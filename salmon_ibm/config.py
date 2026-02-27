@@ -1,0 +1,10 @@
+"""YAML configuration loader."""
+from pathlib import Path
+
+import yaml
+
+
+def load_config(path: str | Path) -> dict:
+    """Load and return simulation configuration from a YAML file."""
+    with open(path) as f:
+        return yaml.safe_load(f)
