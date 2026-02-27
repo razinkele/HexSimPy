@@ -30,7 +30,7 @@ class AgentPool:
         self.n = n
         rng = np.random.default_rng(rng_seed)
 
-        if isinstance(start_tri, int):
+        if isinstance(start_tri, (int, np.integer)):
             self.tri_idx = np.full(n, start_tri, dtype=int)
         else:
             self.tri_idx = np.asarray(start_tri, dtype=int)
