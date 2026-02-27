@@ -1,0 +1,34 @@
+grid:
+  file: curonian_minimal_grid.nc
+  lat_var: lat
+  lon_var: lon
+  mask_var: mask
+  depth_var: depth
+forcings:
+  physics_surface:
+    file: forcing_cmems_phy_stub.nc
+    time_var: time
+    u_var: uo
+    v_var: vo
+    ssh_var: zos
+    temp_var: tos
+    salt_var: sos
+  river_discharge:
+    file: nemunas_discharge_stub.nc
+    time_var: time
+    Q_var: Q
+  winds:
+    file: winds_stub.nc
+    time_var: time
+    u10_var: u10
+    v10_var: v10
+estuary:
+  salinity_cost:
+    S_opt: 0.5
+    S_tol: 6.0
+    k: 0.6
+  do_avoidance:
+    lethal: 2.0
+    high: 4.0
+  seiche_pause:
+    dSSHdt_thresh_m_per_15min: 0.02
