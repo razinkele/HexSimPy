@@ -1,18 +1,30 @@
-"""Run control buttons and progress display."""
+"""Run control bar — Lagoon Field Station theme."""
 from shiny import ui
 
 
 def run_controls_panel():
     return ui.div(
-        ui.row(
-            ui.column(3, ui.input_action_button("btn_run", "Run", class_="btn-primary")),
-            ui.column(3, ui.input_action_button("btn_step", "Step")),
-            ui.column(3, ui.input_action_button("btn_pause", "Pause")),
-            ui.column(3, ui.input_action_button("btn_reset", "Reset", class_="btn-warning")),
+        ui.div(
+            ui.input_action_button("btn_run", "Run", class_="btn-run"),
+            ui.input_action_button("btn_step", "Step", class_="btn-step"),
+            ui.input_action_button("btn_pause", "Pause", class_="btn-pause"),
+            ui.input_action_button("btn_reset", "Reset", class_="btn-reset"),
+            class_="btn-group",
         ),
-        ui.row(
-            ui.column(6, ui.input_slider("speed", "Steps/update", min=1, max=10, value=1)),
-            ui.column(6, ui.output_text("status_text")),
+        ui.div(class_="spacer"),
+        ui.div(
+            ui.tags.label("Speed", **{"for": "speed"}),
+            ui.input_slider("speed", None, min=1, max=10, value=1, width="120px"),
+            class_="speed-control",
         ),
-        ui.output_text("progress_text"),
+        ui.div(class_="spacer"),
+        ui.div(
+            ui.output_text("progress_text"),
+            style="font-family: var(--font-mono); font-size: 0.82rem; color: var(--lagoon-shallow);",
+        ),
+        ui.div(
+            ui.output_text("status_text"),
+            class_="status-badge",
+        ),
+        class_="run-controls-bar",
     )
