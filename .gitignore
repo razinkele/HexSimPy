@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Screenshots
+*.png
+*.jpeg
+
+# IDE / tools
+.claude/
+.playwright-mcp/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Data stubs (regenerated)
+curonian_minimal_grid.nc
+forcing_cmems_phy_stub.nc
+winds_stub.nc
+
+# Output
+output/
