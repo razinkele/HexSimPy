@@ -1,15 +1,9 @@
 """Baltic Salmon IBM — Shiny for Python Application (Lagoon Field Station theme)."""
 import asyncio
-import base64
-import io
 import json
 import time
 from pathlib import Path
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from matplotlib.colors import LinearSegmentedColormap
 import numpy as np
 import plotly.graph_objects as go
 import plotly.io as pio
@@ -99,12 +93,6 @@ def _hex_to_rgb(h: str) -> tuple[int, int, int]:
     """Convert hex color '#rrggbb' to (r, g, b) integers."""
     h = h.lstrip("#")
     return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
-
-
-def _hex_to_rgb_f(h: str) -> tuple[float, float, float]:
-    """Convert hex color '#rrggbb' to (r, g, b) floats 0-1 for matplotlib."""
-    r, g, b = _hex_to_rgb(h)
-    return r / 255.0, g / 255.0, b / 255.0
 
 
 def _colorscale_rgb(z: np.ndarray, colorscale: list) -> np.ndarray:
@@ -210,67 +198,6 @@ map_widget = MapWidget(
     controller=True,
     parameters={"clearColor": [11/255, 31/255, 44/255, 1]},
 )
-
-# deck.gl standalone HTML template (bypasses pydeck widget system)
-DECK_TEMPLATE = """<!DOCTYPE html>
-<html><head><meta charset="utf-8"/>
-<script src="https://unpkg.com/deck.gl@9.1.4/dist.min.js"></script>
-<style>
-  body {{ margin:0; overflow:hidden; background:{bg_color}; }}
-  #deck-container {{ width:100vw; height:100vh; background:{bg_color}; }}
-  #deck-container canvas {{ background:transparent !important; }}
-  .legend {{
-    position:absolute; bottom:12px; right:12px;
-    background:rgba(11,31,44,0.85); border-radius:6px;
-    padding:8px 12px; font:11px 'Work Sans',sans-serif; color:#e4e8e6;
-  }}
-  .legend-title {{ font-size:10px; color:#6a8a8a; margin-bottom:4px; }}
-  .legend-bar {{
-    width:120px; height:10px; border-radius:3px;
-    background:linear-gradient(to right, {gradient_css});
-  }}
-  .legend-range {{ display:flex; justify-content:space-between; font-size:9px; color:#6a8a8a; margin-top:2px; }}
-</style>
-</head><body>
-<div id="deck-container"></div>
-<div class="legend">
-  <div class="legend-title">{cbar_title}</div>
-  <div class="legend-bar"></div>
-  <div class="legend-range"><span>{z_min}</span><span>{z_max}</span></div>
-</div>
-<script>
-const W={water_data};
-const A={agent_data};
-new deck.DeckGL({{
-  container:'deck-container',
-  style:{{backgroundColor:'{bg_color}'}},
-  glOptions:{{alpha:true}},
-  parameters:{{clearColor:[{clear_r},{clear_g},{clear_b},1]}},
-  views:[new deck.OrthographicView()],
-  initialViewState:{{target:[{cx},{cy},0],zoom:{zoom}}},
-  controller:true,
-  layers:[
-    new deck.ScatterplotLayer({{
-      id:'water',data:W,
-      getPosition:d=>[d[0],d[1]],
-      getFillColor:d=>[d[2],d[3],d[4],220],
-      getRadius:{hex_radius},
-      radiusMinPixels:3,radiusMaxPixels:8,
-      pickable:false,updateTriggers:{{getFillColor:[Date.now()]}}
-    }}),
-    new deck.ScatterplotLayer({{
-      id:'agents',data:A,
-      getPosition:d=>[d[0],d[1]],
-      getFillColor:d=>[d[2],d[3],d[4],240],
-      getRadius:{hex_radius}*10,
-      radiusMinPixels:5,radiusMaxPixels:12,
-      getLineColor:[0,0,0,140],lineWidthMinPixels:1,stroked:true
-    }})
-  ]
-}});
-</script>
-</body></html>"""
-
 
 # --- App UI ---
 app_ui = ui.page_sidebar(
