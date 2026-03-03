@@ -125,6 +125,66 @@ def _colorscale_rgb(z: np.ndarray, colorscale: list) -> np.ndarray:
 
 BEH_COLORS_RGB = [_hex_to_rgb(c) for c in BEH_COLORS]
 
+
+def _subsample_indices(n, max_pts):
+    """Return sorted random indices for subsampling large meshes."""
+    if n > max_pts:
+        rng = np.random.default_rng(0)
+        idx = rng.choice(n, max_pts, replace=False)
+        idx.sort()
+        return idx
+    return np.arange(n)
+
+
+def _build_water_data(mesh, z, cscale, field_label, idx=None):
+    """Build water layer data: list of dicts with position, color, info."""
+    rgb = _colorscale_rgb(z, cscale)
+    if idx is None:
+        idx = np.arange(len(z))
+
+    xs = mesh.centroids[idx, 1]
+    ys = mesh.centroids[idx, 0]
+    rs, gs, bs = rgb[idx, 0], rgb[idx, 1], rgb[idx, 2]
+    vals = z[idx]
+
+    return [
+        {
+            "position": [round(float(xs[i]), 2), round(float(ys[i]), 2)],
+            "color": [int(rs[i]), int(gs[i]), int(bs[i]), 220],
+            "info": f"{field_label}: {vals[i]:.1f}",
+        }
+        for i in range(len(idx))
+    ]
+
+
+def _build_agent_data(sim, mesh):
+    """Build agent layer data: list of dicts with position, color, info."""
+    alive = sim.pool.alive
+    if not alive.any():
+        return []
+
+    tris = sim.pool.tri_idx[alive]
+    behaviors = sim.pool.behavior[alive]
+    energies = sim.pool.ed_kJ_g[alive]
+    agent_ids = np.where(alive)[0]
+
+    pts = []
+    for i, (tri, beh, ed, aid) in enumerate(
+        zip(tris, behaviors, energies, agent_ids)
+    ):
+        beh_int = int(beh)
+        rc, gc, bc = BEH_COLORS_RGB[beh_int]
+        pts.append({
+            "position": [
+                round(float(mesh.centroids[tri, 1]), 2),
+                round(float(mesh.centroids[tri, 0]), 2),
+            ],
+            "color": [rc, gc, bc, 240],
+            "info": f"#{aid} {BEH_NAMES[beh_int]} | {ed:.1f} kJ/g",
+        })
+    return pts
+
+
 # Static assets directory
 WWW_DIR = Path(__file__).parent / "www"
 
@@ -433,189 +493,127 @@ def server(input, output, session):
             f'</div>'
         )
 
-    # --- Map Display (unified — @render.ui) ---
-    @render.ui
-    def map_display():
+    # --- Map update (push to shiny-deckgl widget) ---
+    _current_landscape = reactive.Value("")
+
+    @reactive.effect
+    async def _update_map():
         sim = sim_state.get()
         _ = history.get()
-
         if sim is None:
-            return ui.HTML(
-                '<div style="height:520px;display:flex;align-items:center;'
-                'justify-content:center;color:#6a8a8a;'
-                "font-family:'Cormorant Garamond',serif;font-size:1.1rem\">"
-                "Click Step or Run to initialize</div>"
-            )
+            return
 
         mesh = sim.mesh
         field_name = input.map_field()
         is_hexsim = hasattr(mesh, "n_cells")
+        landscape = input.landscape()
 
-        # Resolve field + colorscale
+        # Resolve field + colorscale + label
         if field_name == "depth":
             z = mesh.depth
             cscale = BATHY_COLORSCALE
-            cbar_title = "Depth (m)"
+            field_label = "Depth (m)"
         elif field_name in sim.env.fields:
             z = sim.env.fields[field_name]
             cscale = TEMP_COLORSCALE
             field_labels = {
-                "temperature": "Temp (\u00b0C)", "salinity": "Sal (PSU)",
+                "temperature": "Temp (\u00b0C)",
+                "salinity": "Sal (PSU)",
                 "ssh": "SSH (m)",
             }
-            cbar_title = field_labels.get(field_name, field_name)
+            field_label = field_labels.get(field_name, field_name)
         else:
             z = mesh.depth
             cscale = BATHY_COLORSCALE
-            cbar_title = "Depth (m)"
+            field_label = "Depth (m)"
+
+        # Switch basemap when landscape changes
+        if landscape != _current_landscape.get():
+            _current_landscape.set(landscape)
+            await map_widget.set_style(session, CARTO_DARK)
 
         if is_hexsim:
-            return _render_deckgl(sim, mesh, z, cscale, cbar_title)
-        return _render_mpl(sim, mesh, z, cscale, cbar_title)
-
-    # ── Matplotlib renderer (Curonian / TriMesh) ──
-    def _render_mpl(sim, mesh, z, cscale, cbar_title):
-        # Build matplotlib colormap from Plotly-style stops
-        cmap = LinearSegmentedColormap.from_list(
-            "lagoon",
-            [(s[0], _hex_to_rgb_f(s[1])) for s in cscale],
-        )
-
-        bg = "#0d2233"
-        fig_m, ax = plt.subplots(figsize=(7.5, 5.2), dpi=120, facecolor=bg)
-        ax.set_facecolor(bg)
-
-        water_idx = np.where(mesh.water_mask)[0]
-        sc = ax.scatter(
-            mesh.centroids[water_idx, 1], mesh.centroids[water_idx, 0],
-            c=z[water_idx], cmap=cmap, s=8, edgecolors="none",
-            rasterized=True,
-        )
-        cb = fig_m.colorbar(sc, ax=ax, fraction=0.03, pad=0.02)
-        cb.set_label(cbar_title, color=ACCENT_COLOR, fontsize=9)
-        cb.ax.tick_params(colors=AXIS_COLOR, labelsize=8)
-
-        # Agent overlay
-        alive = sim.pool.alive
-        if alive.any():
-            agent_tris = sim.pool.tri_idx[alive]
-            behaviors = sim.pool.behavior[alive]
-            mpl_markers = ["o", "D", "*", "^", "v"]
-            for b in range(5):
-                b_mask = behaviors == b
-                if b_mask.any():
-                    tris_b = agent_tris[b_mask]
-                    ax.scatter(
-                        mesh.centroids[tris_b, 1], mesh.centroids[tris_b, 0],
-                        c=BEH_COLORS[b], s=50, marker=mpl_markers[b],
-                        edgecolors="black", linewidths=0.8, zorder=5,
-                        label=BEH_NAMES[b],
-                    )
-            ax.legend(
-                loc="upper center", bbox_to_anchor=(0.5, 1.08), ncol=5,
-                fontsize=8, frameon=False, labelcolor=TEXT_COLOR,
-            )
-
-        ax.set_xlabel("Longitude", color=AXIS_COLOR, fontsize=9)
-        ax.set_ylabel("Latitude", color=AXIS_COLOR, fontsize=9)
-        ax.tick_params(colors=AXIS_COLOR, labelsize=8)
-        ax.set_aspect("equal")
-        for spine in ax.spines.values():
-            spine.set_color((42/255, 122/255, 122/255, 0.15))
-        fig_m.tight_layout()
-
-        buf = io.BytesIO()
-        fig_m.savefig(buf, format="png", facecolor=bg, bbox_inches="tight")
-        plt.close(fig_m)
-        buf.seek(0)
-        b64 = base64.b64encode(buf.read()).decode("ascii")
-        return ui.HTML(
-            f'<img src="data:image/png;base64,{b64}" '
-            f'style="width:100%;height:520px;object-fit:contain;border-radius:8px;" />'
-        )
-
-    # ── deck.gl renderer (Columbia / HexMesh) ──
-    def _render_deckgl(sim, mesh, z, cscale, cbar_title):
-        rgb = _colorscale_rgb(z, cscale)
-
-        # Random subsample for reasonable HTML size (~3.5 MB)
-        # Random avoids banding artifacts from regular stepping on row-major data
-        n = mesh.n_cells
-        if n > MAX_DECK_POINTS:
-            rng = np.random.default_rng(0)  # fixed seed for stable rendering
-            idx = rng.choice(n, MAX_DECK_POINTS, replace=False)
-            idx.sort()  # sort for cache-friendly access
+            await _update_columbia(session, sim, mesh, z, cscale, field_label)
         else:
-            idx = np.arange(n)
+            await _update_curonian(session, sim, mesh, z, cscale, field_label)
 
-        # Compact: each point is [x, y, r, g, b]
-        xs = mesh.centroids[idx, 1]
-        ys = mesh.centroids[idx, 0]
-        water_pts = [
-            [round(float(xs[i]), 1), round(float(ys[i]), 1),
-             int(rgb[idx[i], 0]), int(rgb[idx[i], 1]), int(rgb[idx[i], 2])]
-            for i in range(len(idx))
-        ]
+    async def _update_curonian(session, sim, mesh, z, cscale, field_label):
+        """Push Curonian Lagoon layers (geographic, LNGLAT)."""
+        water_idx = np.where(mesh.water_mask)[0]
+        water_data = _build_water_data(mesh, z, cscale, field_label, idx=water_idx)
+        agent_data = _build_agent_data(sim, mesh)
 
-        # Agent overlay
-        agent_pts = []
-        alive = sim.pool.alive
-        if alive.any():
-            agent_tris = sim.pool.tri_idx[alive]
-            behaviors = sim.pool.behavior[alive]
-            for t, b in zip(agent_tris, behaviors):
-                rc, gc, bc = BEH_COLORS_RGB[int(b)]
-                agent_pts.append([
-                    round(float(mesh.centroids[t, 1]), 1),
-                    round(float(mesh.centroids[t, 0]), 1),
-                    rc, gc, bc,
-                ])
+        await map_widget.update(
+            session,
+            layers=[
+                scatterplot_layer("water", water_data,
+                    getPosition="@@d.position",
+                    getFillColor="@@d.color",
+                    getRadius=30,
+                    radiusMinPixels=2,
+                    radiusMaxPixels=6,
+                    pickable=True,
+                ),
+                scatterplot_layer("agents", agent_data,
+                    getPosition="@@d.position",
+                    getFillColor="@@d.color",
+                    getRadius=150,
+                    radiusMinPixels=5,
+                    radiusMaxPixels=12,
+                    stroked=True,
+                    getLineColor=[0, 0, 0, 140],
+                    lineWidthMinPixels=1,
+                    pickable=True,
+                ),
+            ],
+            view_state={
+                "longitude": 21.07,
+                "latitude": 55.31,
+                "zoom": 10,
+            },
+            views=[map_view(controller=True)],
+        )
+
+    async def _update_columbia(session, sim, mesh, z, cscale, field_label):
+        """Push Columbia River layers (orthographic, CARTESIAN)."""
+        idx = _subsample_indices(mesh.n_cells, MAX_DECK_POINTS)
+        water_data = _build_water_data(mesh, z, cscale, field_label, idx=idx)
+        agent_data = _build_agent_data(sim, mesh)
 
         cx = float(np.mean(mesh.centroids[:, 1]))
         cy = float(np.mean(mesh.centroids[:, 0]))
-
-        # Hex radius: spacing between adjacent hex centers ≈ sqrt(3) grid units;
-        # circle radius to visually fill hex ≈ 1.0 grid unit.
-        # At typical zoom, radiusMinPixels dominates anyway.
-        hex_radius = 1.0
-
-        # Auto-zoom: fit full extent into ~520px viewport
         x_range = float(np.ptp(mesh.centroids[:, 1]))
         y_range = float(np.ptp(mesh.centroids[:, 0]))
         extent = max(x_range, y_range, 1.0)
         zoom = -np.log2(extent / 512)
 
-        # Colorbar legend
-        z_min_val = f"{float(np.nanmin(z)):.1f}"
-        z_max_val = f"{float(np.nanmax(z)):.1f}"
-        gradient_stops = ",".join(
-            f"{s[1]} {int(s[0]*100)}%" for s in cscale
-        )
-
-        # WebGL clear color (background): #0b1f2c → normalized floats
-        html = DECK_TEMPLATE.format(
-            bg_color="#0b1f2c",
-            clear_r=round(11/255, 4), clear_g=round(31/255, 4),
-            clear_b=round(44/255, 4),
-            water_data=json.dumps(water_pts, separators=(",", ":")),
-            agent_data=json.dumps(agent_pts, separators=(",", ":")),
-            cx=round(cx, 1), cy=round(cy, 1),
-            zoom=round(zoom, 2),
-            hex_radius=round(hex_radius, 1),
-            cbar_title=cbar_title,
-            z_min=z_min_val, z_max=z_max_val,
-            gradient_css=gradient_stops,
-        )
-
-        deck_path = WWW_DIR / "deck_map.html"
-        deck_path.write_text(html, encoding="utf-8")
-
-        ts = int(time.time() * 1000)
-        return ui.tags.iframe(
-            src=f"deck_map.html?t={ts}",
-            width="100%",
-            height="520px",
-            style="border: none; border-radius: 8px; background: #0b1f2c;",
+        await map_widget.update(
+            session,
+            layers=[
+                scatterplot_layer("water", water_data,
+                    getPosition="@@d.position",
+                    getFillColor="@@d.color",
+                    getRadius=1.0,
+                    radiusMinPixels=3,
+                    radiusMaxPixels=8,
+                    coordinateSystem=COORDINATE_SYSTEM.CARTESIAN,
+                    pickable=False,
+                ),
+                scatterplot_layer("agents", agent_data,
+                    getPosition="@@d.position",
+                    getFillColor="@@d.color",
+                    getRadius=10.0,
+                    radiusMinPixels=5,
+                    radiusMaxPixels=12,
+                    stroked=True,
+                    getLineColor=[0, 0, 0, 140],
+                    lineWidthMinPixels=1,
+                    coordinateSystem=COORDINATE_SYSTEM.CARTESIAN,
+                    pickable=True,
+                ),
+            ],
+            view_state={"target": [cx, cy, 0], "zoom": round(zoom, 2)},
+            views=[orthographic_view(controller=True)],
         )
 
     # --- Chart helper: Plotly → HTML file + iframe (no widget/comm layer) ---
