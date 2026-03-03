@@ -1,9 +1,15 @@
 """Baltic Salmon IBM — Shiny for Python Application (Lagoon Field Station theme)."""
 import asyncio
+import base64
+import io
 import json
 import time
 from pathlib import Path
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
 import numpy as np
 import plotly.graph_objects as go
 import plotly.io as pio
