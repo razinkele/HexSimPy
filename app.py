@@ -382,6 +382,57 @@ def server(input, output, session):
             return "t = 0 h"
         return f"t = {sim.current_t} h"
 
+    @render.ui
+    def map_legend():
+        sim = sim_state.get()
+        _ = history.get()
+        if sim is None:
+            return ui.HTML("")
+
+        field_name = input.map_field()
+        if field_name == "depth":
+            cscale = BATHY_COLORSCALE
+            cbar_title = "Depth (m)"
+            z = sim.mesh.depth
+        elif field_name in sim.env.fields:
+            z = sim.env.fields[field_name]
+            cscale = TEMP_COLORSCALE
+            field_labels = {
+                "temperature": "Temp (\u00b0C)",
+                "salinity": "Sal (PSU)",
+                "ssh": "SSH (m)",
+            }
+            cbar_title = field_labels.get(field_name, field_name)
+        else:
+            cscale = BATHY_COLORSCALE
+            cbar_title = "Depth (m)"
+            z = sim.mesh.depth
+
+        z_min = f"{float(np.nanmin(z)):.1f}"
+        z_max = f"{float(np.nanmax(z)):.1f}"
+        gradient = ", ".join(f"{s[1]} {int(s[0]*100)}%" for s in cscale)
+
+        # Behavior chips (only if agents alive)
+        beh_html = ""
+        if sim.pool.alive.any():
+            chips = []
+            for i, (name, color) in enumerate(zip(BEH_NAMES, BEH_COLORS)):
+                chips.append(
+                    f'<span class="map-legend-beh-item">'
+                    f'<span class="map-legend-beh-dot" style="background:{color}"></span>'
+                    f'{name}</span>'
+                )
+            beh_html = f'<div class="map-legend-behaviors">{"".join(chips)}</div>'
+
+        return ui.HTML(
+            f'<div class="map-legend">'
+            f'<div class="map-legend-title">{cbar_title}</div>'
+            f'<div class="map-legend-bar" style="background:linear-gradient(to right,{gradient})"></div>'
+            f'<div class="map-legend-range"><span>{z_min}</span><span>{z_max}</span></div>'
+            f'{beh_html}'
+            f'</div>'
+        )
+
     # --- Map Display (unified — @render.ui) ---
     @render.ui
     def map_display():
