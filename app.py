@@ -1,6 +1,5 @@
 """Baltic Salmon IBM — Shiny for Python Application (Lagoon Field Station theme)."""
 import asyncio
-import json
 import time
 from pathlib import Path
 
@@ -11,11 +10,11 @@ from shiny import App, reactive, render, ui
 
 from shiny_deckgl import (
     CARTO_DARK,
-    COORDINATE_SYSTEM,
     MapWidget,
+    encode_binary_attribute,
     head_includes,
+    layer,
     map_view,
-    orthographic_view,
     scatterplot_layer,
 )
 
@@ -205,8 +204,8 @@ app_ui = ui.page_sidebar(
     ui.head_content(
         ui.tags.link(rel="stylesheet", href="style.css"),
         ui.tags.meta(name="viewport", content="width=device-width, initial-scale=1"),
-        head_includes(),
     ),
+    head_includes(),
     run_controls_panel(),
     ui.navset_tab(
         ui.nav_panel(
@@ -276,7 +275,7 @@ def server(input, output, session):
     history = reactive.Value([])
 
     @reactive.effect
-    @reactive.event(input.btn_reset, ignore_none=False)
+    @reactive.event(input.btn_reset, input.landscape, ignore_none=False)
     async def _init_sim():
         landscape = input.landscape()
 
@@ -469,7 +468,6 @@ def server(input, output, session):
         water_idx = np.where(mesh.water_mask)[0]
         water_data = _build_water_data(mesh, z, cscale, field_label, idx=water_idx)
         agent_data = _build_agent_data(sim, mesh)
-
         await map_widget.update(
             session,
             layers=[
@@ -502,45 +500,85 @@ def server(input, output, session):
         )
 
     async def _update_columbia(session, sim, mesh, z, cscale, field_label):
-        """Push Columbia River layers (orthographic, CARTESIAN)."""
-        idx = _subsample_indices(mesh.n_cells, MAX_DECK_POINTS)
-        water_data = _build_water_data(mesh, z, cscale, field_label, idx=idx)
-        agent_data = _build_agent_data(sim, mesh)
+        """Push Columbia River layers using geographic view.
 
-        cx = float(np.mean(mesh.centroids[:, 1]))
-        cy = float(np.mean(mesh.centroids[:, 0]))
-        x_range = float(np.ptp(mesh.centroids[:, 1]))
-        y_range = float(np.ptp(mesh.centroids[:, 0]))
-        extent = max(x_range, y_range, 1.0)
-        zoom = -np.log2(extent / 512)
+        HexSim grid uses integer grid coordinates. We scale them to tiny
+        lat/lon offsets near the equator (0°N, 0°E) where CARTO_DARK tiles
+        show featureless dark ocean — effectively a plain background.
+        Equal lon/lat scaling at equator preserves the grid's aspect ratio.
+        """
+        idx = _subsample_indices(mesh.n_cells, MAX_DECK_POINTS)
+        rgb = _colorscale_rgb(z, cscale)
+
+        # Scale grid coords → small geographic degrees at the equator.
+        GRID_SCALE = 0.0005  # 1 grid unit → 0.0005° ≈ 55 m
+
+        # Binary water layer — numpy arrays → base64 (3 MB vs 17 MB JSON)
+        positions = np.column_stack([
+            mesh.centroids[idx, 1] * GRID_SCALE,
+            mesh.centroids[idx, 0] * GRID_SCALE,
+        ]).astype(np.float32)
+        colors = np.column_stack([
+            rgb[idx, 0], rgb[idx, 1], rgb[idx, 2],
+            np.full(len(idx), 220, dtype=np.uint8),
+        ]).astype(np.uint8)
+
+        water_layer = layer(
+            "ScatterplotLayer", "water",
+            data={"length": len(idx)},
+            getPosition=encode_binary_attribute(positions),
+            getFillColor=encode_binary_attribute(colors),
+            getRadius=30,
+            radiusMinPixels=3,
+            radiusMaxPixels=8,
+            pickable=False,
+        )
+
+        # Agent overlay — dict format (small count, needs tooltips)
+        agent_data = []
+        alive = sim.pool.alive
+        if alive.any():
+            tris = sim.pool.tri_idx[alive]
+            behaviors = sim.pool.behavior[alive]
+            energies = sim.pool.ed_kJ_g[alive]
+            agent_ids = np.where(alive)[0]
+            for tri, beh, ed, aid in zip(tris, behaviors, energies, agent_ids):
+                beh_int = int(beh)
+                rc, gc, bc = BEH_COLORS_RGB[beh_int]
+                agent_data.append({
+                    "position": [
+                        round(float(mesh.centroids[tri, 1] * GRID_SCALE), 5),
+                        round(float(mesh.centroids[tri, 0] * GRID_SCALE), 5),
+                    ],
+                    "color": [rc, gc, bc, 240],
+                    "info": f"#{aid} {BEH_NAMES[beh_int]} | {ed:.1f} kJ/g",
+                })
+
+        cx = float(np.mean(mesh.centroids[:, 1])) * GRID_SCALE
+        cy = float(np.mean(mesh.centroids[:, 0])) * GRID_SCALE
 
         await map_widget.update(
             session,
             layers=[
-                scatterplot_layer("water", water_data,
-                    getPosition="@@d.position",
-                    getFillColor="@@d.color",
-                    getRadius=1.0,
-                    radiusMinPixels=3,
-                    radiusMaxPixels=8,
-                    coordinateSystem=COORDINATE_SYSTEM.CARTESIAN,
-                    pickable=False,
-                ),
+                water_layer,
                 scatterplot_layer("agents", agent_data,
                     getPosition="@@d.position",
                     getFillColor="@@d.color",
-                    getRadius=10.0,
+                    getRadius=150,
                     radiusMinPixels=5,
                     radiusMaxPixels=12,
                     stroked=True,
                     getLineColor=[0, 0, 0, 140],
                     lineWidthMinPixels=1,
-                    coordinateSystem=COORDINATE_SYSTEM.CARTESIAN,
                     pickable=True,
                 ),
             ],
-            view_state={"target": [cx, cy, 0], "zoom": round(zoom, 2)},
-            views=[orthographic_view(controller=True)],
+            view_state={
+                "longitude": cx,
+                "latitude": cy,
+                "zoom": 7,
+            },
+            views=[map_view(controller=True)],
         )
 
     # --- Chart helper: Plotly → HTML file + iframe (no widget/comm layer) ---
