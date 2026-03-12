@@ -14,6 +14,9 @@ class BioParams:
     RB: float = -0.217
     RQ: float = 0.06818
     ED_MORTAL: float = 4.0
+    T_OPT: float = 16.0    # optimal temperature for respiration (Macnaughton 2019)
+    T_MAX: float = 26.0    # upper lethal temperature
+    ED_TISSUE: float = 5.0  # energy density of catabolized tissue (kJ/g)
     activity_by_behavior: dict[int, float] = field(default_factory=lambda: {
         0: 1.0, 1: 1.2, 2: 0.8, 3: 1.5, 4: 1.0,
     })
@@ -41,5 +44,7 @@ def update_energy(
     e_total_j = ed_kJ_g * 1000.0 * mass_g
     e_total_j = np.maximum(e_total_j - r_hourly, 0.0)
     new_ed = e_total_j / (mass_g * 1000.0)
+    mass_loss_g = r_hourly / (params.ED_TISSUE * 1000.0)
+    new_mass = np.maximum(mass_g - mass_loss_g, mass_g * 0.5)
     dead = new_ed < params.ED_MORTAL
-    return new_ed, dead
+    return new_ed, dead, new_mass
