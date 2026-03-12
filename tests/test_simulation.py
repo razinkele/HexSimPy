@@ -179,6 +179,22 @@ def test_dssh_dt_array_matches_scalar():
         assert arr[i] == pytest.approx(scalar), f"Mismatch at triangle {i}"
 
 
+def test_activity_multiplier_vectorized():
+    """Activity multiplier lookup should be vectorized and match dict version."""
+    from salmon_ibm.bioenergetics import BioParams
+    bp = BioParams()
+    behaviors = np.array([0, 1, 2, 3, 4, 0, 3])
+    # Build LUT
+    max_beh = max(bp.activity_by_behavior.keys())
+    activity_lut = np.ones(max_beh + 1)
+    for k, v in bp.activity_by_behavior.items():
+        activity_lut[k] = v
+    vectorized = activity_lut[behaviors]
+    # Compare with dict version
+    dict_version = np.array([bp.activity_by_behavior.get(int(b), 1.0) for b in behaviors])
+    np.testing.assert_array_equal(vectorized, dict_version)
+
+
 def test_simulation_reproducibility():
     """Same rng_seed should produce identical results across two runs."""
     cfg = load_config("config_curonian_minimal.yaml")

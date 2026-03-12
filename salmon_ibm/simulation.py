@@ -48,6 +48,7 @@ class Simulation:
 
         self.beh_params = BehaviorParams.defaults()
         self.bio_params = BioParams()
+        self._activity_lut = self._build_activity_lut()
         self.est_cfg = config.get("estuary", {})
 
         self.logger = None
@@ -83,7 +84,8 @@ class Simulation:
 
         # 5. Movement
         execute_movement(self.pool, self.mesh, self.env.fields,
-                         seed=int(self._rng.integers(2**31)))
+                         seed=int(self._rng.integers(2**31)),
+                         cwr_threshold=self.beh_params.temp_bins[0])
 
         # 5. Update timers
         self.pool.steps[alive_mask] += 1
@@ -92,10 +94,7 @@ class Simulation:
         )
 
         # 6. Bioenergetics
-        activity = np.array([
-            self.bio_params.activity_by_behavior.get(int(b), 1.0)
-            for b in self.pool.behavior
-        ])
+        activity = self._activity_lut[self.pool.behavior]
         sal = self.env.fields.get("salinity", np.zeros(self.mesh.n_triangles))
         sal_at_agents = sal[self.pool.tri_idx]
         s_cfg = self.est_cfg.get("salinity_cost", {})
@@ -106,16 +105,22 @@ class Simulation:
             k=s_cfg.get("k", 0.6),
         )
 
-        new_ed, dead, new_mass = update_energy(
-            self.pool.ed_kJ_g, self.pool.mass_g,
-            temps_at_agents, activity, sal_cost, self.bio_params,
-        )
-        self.pool.ed_kJ_g = new_ed
-        self.pool.mass_g = new_mass
-        self.pool.alive[dead] = False
+        # 7. Bioenergetics (alive agents only)
+        alive = self.pool.alive & ~self.pool.arrived
+        if alive.any():
+            new_ed, dead, new_mass = update_energy(
+                self.pool.ed_kJ_g[alive], self.pool.mass_g[alive],
+                temps_at_agents[alive], activity[alive], sal_cost[alive],
+                self.bio_params,
+            )
+            self.pool.ed_kJ_g[alive] = new_ed
+            self.pool.mass_g[alive] = new_mass
+            # dead is relative to the alive subset
+            dead_indices = np.where(alive)[0][dead]
+            self.pool.alive[dead_indices] = False
 
-        # 6b. Thermal mortality
-        thermal_kill = temps_at_agents >= self.bio_params.T_MAX
+        # 7b. Thermal mortality (alive agents only)
+        thermal_kill = alive & (temps_at_agents >= self.bio_params.T_MAX)
         self.pool.alive[thermal_kill] = False
 
         # 7. Logging
@@ -134,6 +139,14 @@ class Simulation:
         }
         self.history.append(summary)
         self.current_t += 1
+
+    def _build_activity_lut(self):
+        """Build vectorized activity multiplier lookup table."""
+        max_beh = max(self.bio_params.activity_by_behavior.keys())
+        lut = np.ones(max_beh + 1)
+        for k, v in self.bio_params.activity_by_behavior.items():
+            lut[k] = v
+        return lut
 
     def _update_cwr_counters(self):
         """Update CWR tracking counters based on current behavior state."""
