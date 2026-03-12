@@ -737,3 +737,49 @@ class TestWorkspace:
                 f.write(struct.pack("<5d", 100.0, 0.0, 0.0, 200.0, 24.0))
             with pytest.raises(FileNotFoundError, match="Hexagons"):
                 Workspace.from_dir(td)
+
+
+# ===================================================================
+# Task 9 – Cross-validation and integration tests
+# ===================================================================
+class TestCrossValidation:
+    """Cross-validate Python parser against C code behavior."""
+
+    @has_habitat
+    def test_patch_hexmap_header_byte_37(self):
+        """Verify data starts at byte 37, not byte 25."""
+        with open(HABITAT_HXN, "rb") as f:
+            raw = f.read()
+        max_val = struct.unpack_from("<f", raw, 25)[0]
+        min_val = struct.unpack_from("<f", raw, 29)[0]
+        hexzero = struct.unpack_from("<f", raw, 33)[0]
+        first_data = struct.unpack_from("<f", raw, 37)[0]
+
+        hm = HexMap.from_file(HABITAT_HXN)
+        assert hm.max_val == pytest.approx(max_val)
+        assert hm.min_val == pytest.approx(min_val)
+        assert hm.hexzero == pytest.approx(hexzero)
+        assert hm.values[0] == pytest.approx(first_data)
+
+    @has_habitat
+    def test_csv_matches_hxn2csv_format(self, tmp_path):
+        """Verify CSV output matches hxn2csv.c format."""
+        hm = HexMap.from_file(HABITAT_HXN)
+        out = tmp_path / "out.csv"
+        hm.to_csv(out, skip_zeros=True)
+        lines = out.read_text().strip().split("\n")
+        assert lines[0] == "Hex ID,Score"
+        for line in lines[1:5]:
+            parts = line.split(",")
+            assert len(parts) == 2
+            int(parts[0])
+            float(parts[1])
+
+    @has_river
+    @has_study
+    def test_multiple_files_consistent(self):
+        """Same workspace files should have same grid dimensions."""
+        hm1 = HexMap.from_file(RIVER_HXN)
+        hm2 = HexMap.from_file(STUDY_HXN)
+        assert hm1.width == hm2.width
+        assert hm1.height == hm2.height
