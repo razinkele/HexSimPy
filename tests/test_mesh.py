@@ -54,3 +54,23 @@ def test_gradient_returns_vector(mesh):
     tri = water_ids[0]
     grad = mesh.gradient(field, tri)
     assert len(grad) == 2
+
+
+def test_gradient_corrects_for_lat_lon_asymmetry(mesh):
+    """Gradient should account for the fact that 1 degree of longitude
+    is shorter than 1 degree of latitude at high latitudes."""
+    # Create a field that increases purely in the longitude direction
+    field = mesh.centroids[:, 1].copy()  # longitude values
+    water_ids = np.where(mesh.water_mask)[0]
+    # Find a water cell with neighbors
+    for tri_idx in water_ids:
+        nbrs = mesh.water_neighbors(tri_idx)
+        if len(nbrs) >= 2:
+            break
+    dlat, dlon = mesh.gradient(field, tri_idx)
+    # For a pure longitude gradient, the lat component should be near zero
+    # and the lon component should dominate
+    assert abs(dlon) > abs(dlat) * 0.5, (
+        f"Longitude gradient should dominate for a pure-longitude field: "
+        f"dlat={dlat:.4f}, dlon={dlon:.4f}"
+    )

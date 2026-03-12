@@ -70,15 +70,18 @@ class TriMesh:
             return (0.0, 0.0)
         c0 = self.centroids[tri_idx]
         f0 = field[tri_idx]
+        # cos(lat) correction: scale longitude differences to physical distance
+        cos_lat = np.cos(np.radians(c0[0]))
         dlat, dlon = 0.0, 0.0
         for n in nbrs:
             cn = self.centroids[n]
             df = field[n] - f0
-            dc = cn - c0
-            norm = np.sqrt(dc[0]**2 + dc[1]**2)
+            dc_lat = cn[0] - c0[0]
+            dc_lon = (cn[1] - c0[1]) * cos_lat
+            norm = np.sqrt(dc_lat**2 + dc_lon**2)
             if norm > 0:
-                dlat += df * dc[0] / norm
-                dlon += df * dc[1] / norm
+                dlat += df * dc_lat / norm
+                dlon += df * dc_lon / norm
         mag = np.sqrt(dlat**2 + dlon**2)
         if mag > 0:
             dlat /= mag
