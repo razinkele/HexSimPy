@@ -35,7 +35,7 @@ class HexMap:
     _edge: float = 0.0       # set by Workspace loader
 ```
 
-Hexagon count formula (from C code):
+Hexagon count formula (from C code). Here `nrows` = value at offset 16 (C `rows`), `ncols` = value at offset 20 (C `cols`):
 - Wide (flag=0): `ncols * nrows`
 - Narrow (flag=1): `ncols * n_wide + (ncols - 1) * n_narrow`
   - Even nrows: `n_wide = nrows / 2`, `n_narrow = n_wide`
@@ -69,6 +69,37 @@ class Barrier:
     class_name: str = ""
 ```
 
+## Binary Format: .grid
+
+**PATCH_GRID binary layout (from `salmon_ibm/hexsim.py` `read_grid`):**
+
+| Offset | Type | Size | Content |
+|--------|------|------|---------|
+| 0-9 | char[10] | 10B | Magic: `"PATCH_GRID"` |
+| 10-13 | uint32 | 4B | Version |
+| 14-17 | uint32 | 4B | Number of hexagons |
+| 18-21 | uint32 | 4B | Number of columns (ncols) |
+| 22-25 | uint32 | 4B | Number of rows (nrows) |
+| 26 | uint8 | 1B | Flag |
+| 27-66 | 5x float64 | 40B | Georef: [x_extent, 0.0, 0.0, y_extent, row_spacing] |
+
+Total header = 67 bytes. Hex edge length derived as `row_spacing / sqrt(3)`.
+
+## Text Format: .hbf
+
+The `.hbf` (HexSim Barrier File) is a plain text file with two line types:
+
+- **Classification lines:** `C <id> <p1> <p2> "<name>"` -- define barrier classifications
+- **Edge lines:** `E <hex_id> <edge> <class_id>` -- define barrier edges between hexagons
+
+Example:
+```
+C 1 0.5 0.0 "Dam"
+C 2 0.3 0.0 "Waterfall"
+E 1234 3 1
+E 1235 0 2
+```
+
 ## File I/O
 
 ### Reading
@@ -81,18 +112,22 @@ barriers = read_barriers("barriers.hbf")           # -> list[Barrier]
 
 **Format detection:** First 12 bytes. If `b"PATCH_HEXMAP"` -> PATCH_HEXMAP parser. If `b"PATCH_GRID"` -> reject with clear error. Otherwise -> plain 44-byte header.
 
-**PATCH_HEXMAP binary layout (matching C code):**
+**PATCH_HEXMAP binary layout (matching C code in `hxn2csv.c` lines 43-50):**
 
 | Offset | Type | Size | Content |
 |--------|------|------|---------|
 | 0-11 | char[12] | 12B | Magic: `"PATCH_HEXMAP"` |
 | 12-15 | uint32 | 4B | Version |
-| 16-19 | uint32 | 4B | Number of columns (ncols) |
-| 20-23 | uint32 | 4B | Number of rows (nrows) |
-| 24 | uint8 | 1B | Flag (0=wide, 1=narrow) |
+| 16-19 | uint32 | 4B | Number of rows (nrows) -- C variable `rows` |
+| 20-23 | uint32 | 4B | Number of columns (ncols) -- C variable `cols` |
+| 24 | uint8 | 1B | Flag (0=wide, 1=narrow) -- stored as C `bool` (1 byte), only 0 and 1 are valid |
 | 25-28 | float32 | 4B | Max hexmap score |
 | 29-32 | float32 | 4B | Min hexmap score |
 | 33-36 | float32 | 4B | Hexagon zero score |
+
+**Total PATCH_HEXMAP header = 37 bytes. Data begins at offset 37.**
+
+Note: The existing `salmon_ibm/hexsim.py` has `_HXN_HEADER_SIZE = 25` which is incorrect -- it treats the 3 metadata floats (max_val, min_val, hexzero) as data values. Also, the existing code swaps rows/cols (reads ncols at offset 16 instead of nrows). Both bugs must be fixed in the new parser.
 
 Data: float32 LE values until `b"HISTORY"` marker or EOF.
 Footer (optional): variable-length ASCII metadata + 256 NaN padding.
@@ -154,7 +189,7 @@ hexmap.to_csv("output.csv", skip_zeros=True)
 - `to_geodataframe`: generates Shapely Polygon per hex cell. Columns: `hex_id`, `row`, `col`, `value`, `geometry`. Skips nodata/zero by default. `edge` required for PATCH_HEXMAP; auto-populated via Workspace.
 - `to_shapefile`: delegates to `to_geodataframe().to_file()`.
 - `to_geotiff`: rectangular raster approximation via rasterio.
-- `to_csv`: matches `hxn2csv.c` output format (`Hex ID,Score`), `skip_zeros=True` by default.
+- `to_csv`: output format `Hex ID,Score`. Default `skip_zeros=True` matches `hxn2csv.c` behavior (skip values == 0.0). Use `skip_zeros=False` to include all hexagons (matches `get_hexmap_means.c` behavior).
 - CRS: not assumed. Pass `crs="EPSG:32610"` to export methods if needed.
 
 ## Workspace Loader
@@ -200,11 +235,13 @@ workspace/
 
 ## Testing Strategy
 
-- Round-trip tests: read .hxn -> write .hxn -> read again -> compare
-- Validate against C code output: parse example files, compare hex counts with C formula
-- Geometry: known hex coordinates, neighbor lists, distances
-- Export: check GeoDataFrame row counts and column names
-- Workspace: load Columbia River workspace, verify layer discovery
+- **Header field order:** Parse a known .hxn file from a workspace that also has a .grid file; verify nrows/ncols match the .grid dimensions (catches the rows/cols swap bug)
+- **Header size:** Verify that PATCH_HEXMAP data starts at byte 37, not byte 25; confirm first data value is a valid hex score, not max_val
+- **Round-trip:** Read .hxn -> write .hxn -> read again -> compare values and metadata
+- **Hex count:** Parse example files, compare hex counts with C formula for both wide and narrow grids
+- **Geometry:** Known hex coordinates, neighbor lists, distances against hand-computed values
+- **Export:** Check GeoDataFrame row counts, column names, polygon vertex counts
+- **Workspace:** Load Columbia River workspace, verify layer discovery and edge auto-population
 
 ## Source Files Analyzed
 
