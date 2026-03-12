@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from heximpy.hxnparser import Barrier, GridMeta, HexMap, read_barriers
+from heximpy.hxnparser import Barrier, GridMeta, HexMap, Workspace, read_barriers
 
 # ---------------------------------------------------------------------------
 # Path helpers
@@ -42,6 +42,11 @@ has_grid = pytest.mark.skipif(
 )
 has_hbf = pytest.mark.skipif(
     not HBF_FILE.exists(), reason=".hbf file not available"
+)
+
+COLUMBIA_WS = SALMON_DIR / "Columbia [small]"
+has_columbia = pytest.mark.skipif(
+    not COLUMBIA_WS.exists(), reason="Columbia [small] workspace not available"
 )
 
 
@@ -600,6 +605,8 @@ class TestToCsv:
             lines = tmp.read_text().strip().split("\n")
             assert lines[0] == "Hex ID,Score"
             assert len(lines) == 7  # header + 6 values
+
+
         finally:
             tmp.unlink()
 
@@ -665,3 +672,68 @@ class TestToGeotiff:
                 )
         finally:
             tmp.unlink()
+
+
+# ===================================================================
+# Task 8 – Workspace loader
+# ===================================================================
+class TestWorkspace:
+    """Test Workspace.from_dir loader."""
+
+    @has_columbia
+    def test_load_workspace(self):
+        ws = Workspace.from_dir(COLUMBIA_WS)
+        assert ws.grid.ncols > 0
+        assert ws.grid.nrows > 0
+        assert len(ws.hexmaps) > 0
+        assert len(ws.barriers) > 0
+        assert ws.path == COLUMBIA_WS
+
+    @has_columbia
+    def test_layer_names_sorted(self):
+        ws = Workspace.from_dir(COLUMBIA_WS)
+        names = ws.layer_names
+        assert names == sorted(names)
+        assert len(names) == len(ws.hexmaps)
+
+    @has_columbia
+    def test_edge_auto_populated(self):
+        ws = Workspace.from_dir(COLUMBIA_WS)
+        for name, hm in ws.hexmaps.items():
+            assert hm._edge == ws.grid.edge, f"Edge mismatch for {name}"
+
+    @has_columbia
+    def test_hexmap_dims_match_grid(self):
+        ws = Workspace.from_dir(COLUMBIA_WS)
+        # At least one layer should match grid dimensions
+        matched = any(
+            hm.height == ws.grid.ncols and hm.width == ws.grid.nrows
+            for hm in ws.hexmaps.values()
+        )
+        assert matched, "No hexmap matched grid dimensions"
+
+    @has_columbia
+    def test_export_layer_to_geodataframe(self):
+        ws = Workspace.from_dir(COLUMBIA_WS)
+        name = ws.layer_names[0]
+        hm = ws.hexmaps[name]
+        gdf = hm.to_geodataframe()
+        assert len(gdf) > 0
+        assert "geometry" in gdf.columns
+
+    def test_missing_grid_raises(self):
+        with tempfile.TemporaryDirectory() as td:
+            with pytest.raises(FileNotFoundError, match="No .grid file"):
+                Workspace.from_dir(td)
+
+    def test_missing_hexagons_dir_raises(self):
+        with tempfile.TemporaryDirectory() as td:
+            # Create a fake .grid file
+            grid_path = Path(td) / "test.grid"
+            with open(grid_path, "wb") as f:
+                f.write(b"PATCH_GRID")
+                f.write(struct.pack("<IIII", 6, 100, 10, 20))
+                f.write(struct.pack("<B", 0))
+                f.write(struct.pack("<5d", 100.0, 0.0, 0.0, 200.0, 24.0))
+            with pytest.raises(FileNotFoundError, match="Hexagons"):
+                Workspace.from_dir(td)

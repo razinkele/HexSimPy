@@ -391,3 +391,60 @@ def read_barriers(path: str | Path) -> list[Barrier]:
                     )
                 )
     return barriers
+
+
+@dataclass
+class Workspace:
+    """A HexSim workspace directory containing grid, hexmaps, and barriers."""
+
+    grid: GridMeta
+    hexmaps: dict[str, HexMap]
+    barriers: list[Barrier]
+    path: Path
+
+    @property
+    def layer_names(self) -> list[str]:
+        """Return sorted list of hexmap layer names."""
+        return sorted(self.hexmaps.keys())
+
+    @classmethod
+    def from_dir(cls, path) -> Workspace:
+        """Load a HexSim workspace from a directory.
+
+        Expects:
+        - One .grid file in the root
+        - Spatial Data/Hexagons/<layer>/<layer>.*.hxn files
+        - Optionally Spatial Data/barriers/<name>/<name>.*.hbf files
+        """
+        ws = Path(path)
+
+        # 1. Find .grid
+        grid_files = list(ws.glob("*.grid"))
+        if not grid_files:
+            raise FileNotFoundError(f"No .grid file found in {ws}")
+        grid = GridMeta.from_file(grid_files[0])
+
+        # 2. Find hexagon layers
+        hex_dir = ws / "Spatial Data" / "Hexagons"
+        if not hex_dir.exists():
+            raise FileNotFoundError(f"Spatial Data/Hexagons/ not found in {ws}")
+        hexmaps: dict[str, HexMap] = {}
+        for hxn_path in sorted(hex_dir.glob("*/*.hxn")):
+            layer_name = hxn_path.parent.name
+            hm = HexMap.from_file(hxn_path)
+            hm._edge = grid.edge
+            hexmaps[layer_name] = hm
+        if not hexmaps:
+            warnings.warn(f"No .hxn files found in {hex_dir}")
+
+        # 3. Find barriers
+        barriers: list[Barrier] = []
+        barrier_dir = ws / "Spatial Data" / "barriers"
+        if barrier_dir.exists():
+            for hbf_path in sorted(barrier_dir.glob("*/*.hbf")):
+                barriers.extend(read_barriers(hbf_path))
+        else:
+            for hbf_path in sorted(ws.glob("*.hbf")):
+                barriers.extend(read_barriers(hbf_path))
+
+        return cls(grid=grid, hexmaps=hexmaps, barriers=barriers, path=ws)
