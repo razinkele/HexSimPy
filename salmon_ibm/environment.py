@@ -64,6 +64,12 @@ class Environment:
             return 0.0
         return float(self.fields["ssh"][tri_idx] - self._prev_ssh[tri_idx])
 
+    def dSSH_dt_array(self) -> np.ndarray:
+        """Rate of SSH change (m/timestep) for all triangles."""
+        if self._prev_ssh is None:
+            return np.zeros(self.mesh.n_triangles)
+        return self.fields["ssh"] - self._prev_ssh
+
     def close(self):
         self._phy.close()
         self._wind.close()

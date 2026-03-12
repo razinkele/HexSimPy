@@ -30,9 +30,12 @@ def test_simulation_run_multiple_steps():
 def test_simulation_energy_decreases():
     cfg = load_config("config_curonian_minimal.yaml")
     sim = Simulation(cfg, n_agents=10, data_dir="data", rng_seed=42)
-    initial_ed = sim.pool.ed_kJ_g.copy()
+    initial_energy = (sim.pool.ed_kJ_g * sim.pool.mass_g).copy()
     sim.run(n_steps=10)
-    assert np.all(sim.pool.ed_kJ_g[sim.pool.alive] <= initial_ed[sim.pool.alive])
+    alive = sim.pool.alive
+    final_energy = sim.pool.ed_kJ_g[alive] * sim.pool.mass_g[alive]
+    assert np.all(final_energy <= initial_energy[alive]), \
+        "Total energy (ED * mass) should decrease for non-feeding fish"
 
 
 def test_thermal_mortality_kills_at_extreme_temp():
@@ -162,6 +165,18 @@ def test_cwr_counters_update():
     assert np.all(sim.pool.hours_since_cwr == 1), (
         "hours_since_cwr should increment to 1 after leaving CWR"
     )
+
+
+def test_dssh_dt_array_matches_scalar():
+    """Vectorized dSSH_dt_array should match per-element dSSH_dt calls."""
+    cfg = load_config("config_curonian_minimal.yaml")
+    sim = Simulation(cfg, n_agents=5, data_dir="data", rng_seed=42)
+    sim.env.advance(0)
+    sim.env.advance(1)  # need two steps for dSSH_dt to be nonzero
+    arr = sim.env.dSSH_dt_array()
+    for i in range(min(10, sim.mesh.n_triangles)):
+        scalar = sim.env.dSSH_dt(i)
+        assert arr[i] == pytest.approx(scalar), f"Mismatch at triangle {i}"
 
 
 def test_simulation_reproducibility():

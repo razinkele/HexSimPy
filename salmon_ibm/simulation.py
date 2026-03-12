@@ -154,8 +154,10 @@ class Simulation:
 
         # Seiche pause
         seiche_cfg = self.est_cfg.get("seiche_pause", {})
-        thresh = seiche_cfg.get("dSSHdt_thresh_m_per_15min", 0.02)
-        dSSH = np.array([self.env.dSSH_dt(int(tri)) for tri in self.pool.tri_idx])
+        thresh = seiche_cfg.get("dSSHdt_thresh_m_per_hour",
+                                seiche_cfg.get("dSSHdt_thresh_m_per_15min", 0.02))
+        dSSH_all = self.env.dSSH_dt_array()
+        dSSH = dSSH_all[self.pool.tri_idx] if len(dSSH_all) > 0 else np.zeros(self.pool.n)
         paused = seiche_pause(dSSH, thresh=thresh)
         self.pool.behavior[paused & alive] = Behavior.HOLD
 

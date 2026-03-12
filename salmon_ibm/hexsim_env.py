@@ -1,0 +1,110 @@
+"""Zone-based environment adapter for HexSim workspaces.
+
+Serves the same ``fields`` dict interface as ``Environment`` but sources
+temperature from a zone lookup table (Temperature Zones layer +
+River Temperature.csv) instead of spatially-explicit NetCDF forcings.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+
+from salmon_ibm.hexsim import HexMesh, read_hexmap
+
+
+class HexSimEnvironment:
+    """Environmental forcing from HexSim zone-based data.
+
+    Parameters
+    ----------
+    workspace_dir : path to HexSim workspace directory.
+    mesh : HexMesh instance (water-only compacted).
+    temperature_csv : filename of the River Temperature CSV
+        (relative to workspace Analysis/Data Lookup/).
+    """
+
+    def __init__(self, workspace_dir: str | Path, mesh: HexMesh,
+                 temperature_csv: str = "River Temperature.csv"):
+        self.mesh = mesh
+        ws = Path(workspace_dir)
+        hex_dir = ws / "Spatial Data" / "Hexagons"
+
+        # ── Temperature zones ────────────────────────────────────────────
+        tz_path = hex_dir / "Temperature Zones" / "Temperature Zones.1.hxn"
+        tz_full = read_hexmap(tz_path)
+        # Zone IDs for water cells (float → int, 0-based: subtract 1,
+        # since zone values 1-45 map to CSV rows 0-44)
+        tz_water = tz_full[mesh._water_full_idx]
+        self._zone_ids = np.clip(tz_water.astype(int) - 1, 0, None)
+
+        # ── Temperature lookup table ─────────────────────────────────────
+        csv_path = ws / "Analysis" / "Data Lookup" / temperature_csv
+        # CSV has no header row; each row = a zone, each column = a timestep
+        self._temp_table = np.loadtxt(csv_path, delimiter=",",
+                                      dtype=np.float32)
+        # Shape: (n_zones, n_timesteps)
+        self.n_timesteps = self._temp_table.shape[1]
+
+        # ── Upstream gradient (static SSH proxy) ─────────────────────────
+        up_path = hex_dir / "Gradient [ upstream ]" / "Gradient [ upstream ].1.hxn"
+        if up_path.exists():
+            up_full = read_hexmap(up_path)
+            self._upstream = up_full[mesh._water_full_idx].astype(np.float64)
+        else:
+            self._upstream = np.zeros(mesh.n_cells)
+
+        # Negate so that lower values = upstream (matching SSH semantics
+        # where movement uses SSH descent for upstream migration)
+        max_up = self._upstream.max() if self._upstream.max() > 0 else 1.0
+        self._ssh_static = -(self._upstream / max_up)
+
+        # ── Fields dict (populated by advance()) ─────────────────────────
+        n = mesh.n_cells
+        self.fields: dict[str, np.ndarray] = {
+            "temperature": np.zeros(n, dtype=np.float64),
+            "salinity": np.zeros(n, dtype=np.float64),
+            "ssh": self._ssh_static.copy(),
+            "u_current": np.zeros(n, dtype=np.float64),
+            "v_current": np.zeros(n, dtype=np.float64),
+        }
+        self._prev_ssh: np.ndarray | None = None
+        self.current_t: int = -1
+
+    def advance(self, t: int) -> None:
+        """Update fields for timestep *t* (wraps around)."""
+        self._prev_ssh = self.fields["ssh"].copy()
+        self.current_t = t
+        t_idx = t % self.n_timesteps
+
+        # Zone-based temperature lookup
+        self.fields["temperature"] = self._temp_table[
+            self._zone_ids, t_idx
+        ].astype(np.float64)
+
+        # SSH stays static (river gradient doesn't change hourly)
+        self.fields["ssh"] = self._ssh_static.copy()
+
+    def sample(self, cell_idx: int) -> dict[str, float]:
+        """All field values at a single cell."""
+        return {name: float(arr[cell_idx]) for name, arr in self.fields.items()}
+
+    def gradient(self, field_name: str, cell_idx: int) -> tuple[float, float]:
+        """Compute field gradient via mesh.gradient()."""
+        return self.mesh.gradient(self.fields[field_name], cell_idx)
+
+    def dSSH_dt(self, cell_idx: int) -> float:
+        """Rate of change of SSH. Always ~0 for static river gradient."""
+        if self._prev_ssh is None:
+            return 0.0
+        return float(self.fields["ssh"][cell_idx] - self._prev_ssh[cell_idx])
+
+    def dSSH_dt_array(self) -> np.ndarray:
+        """Rate of SSH change (m/timestep) for all cells. Always ~0 for static gradient."""
+        if self._prev_ssh is None:
+            return np.zeros(self.mesh.n_cells)
+        return self.fields["ssh"] - self._prev_ssh
+
+    def close(self) -> None:
+        """No-op (no open file handles to release)."""
+        pass
