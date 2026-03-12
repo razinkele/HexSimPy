@@ -225,6 +225,7 @@ app_ui = ui.page_sidebar(
                 ),
                 class_="chart-card",
             ),
+            value="map",
         ),
         ui.nav_panel(
             "Charts",
@@ -256,11 +257,14 @@ app_ui = ui.page_sidebar(
                     ),
                 ),
             ),
+            value="charts",
         ),
         ui.nav_panel(
             "Science",
             science_panel(),
+            value="science",
         ),
+        id="main_tabs",
     ),
     title=ui.div(
         ui.tags.span(
