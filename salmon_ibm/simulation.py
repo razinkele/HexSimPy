@@ -6,7 +6,7 @@ import numpy as np
 from salmon_ibm.agents import AgentPool, Behavior
 from salmon_ibm.behavior import BehaviorParams, pick_behaviors, apply_overrides
 from salmon_ibm.bioenergetics import BioParams, update_energy
-from salmon_ibm.config import load_config
+from salmon_ibm.config import load_config, bio_params_from_config, behavior_params_from_config
 from salmon_ibm.environment import Environment
 from salmon_ibm.estuary import salinity_cost, do_override, seiche_pause, DO_ESCAPE, DO_LETHAL
 from salmon_ibm.mesh import TriMesh
@@ -46,8 +46,8 @@ class Simulation:
         start_tris = rng.choice(water_ids, size=n_agents)
         self.pool = AgentPool(n=n_agents, start_tri=start_tris, rng_seed=rng_seed)
 
-        self.beh_params = BehaviorParams.defaults()
-        self.bio_params = BioParams()
+        self.beh_params = behavior_params_from_config(config)
+        self.bio_params = bio_params_from_config(config)
         self._activity_lut = self._build_activity_lut()
         self.est_cfg = config.get("estuary", {})
 
