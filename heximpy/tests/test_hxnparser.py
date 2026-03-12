@@ -636,3 +636,32 @@ class TestToGeoDataFrame:
             gdf = gpd.read_file(shp_path)
             assert len(gdf) == 3
             assert "hex_id" in gdf.columns
+
+
+# ===================================================================
+# Task 7 – GeoTIFF export
+# ===================================================================
+class TestToGeotiff:
+    """Test HexMap.to_geotiff export."""
+
+    def test_geotiff_roundtrip(self):
+        vals = np.arange(20, dtype=np.float32).reshape(4, 5).ravel()
+        hm = HexMap(
+            format="plain", version=1, height=4, width=5, flag=0,
+            max_val=19.0, min_val=0.0, hexzero=0.0, values=vals,
+            cell_size=10.0, origin=(100.0, 200.0),
+        )
+        with tempfile.NamedTemporaryFile(suffix=".tif", delete=False) as f:
+            tmp = Path(f.name)
+        try:
+            hm.to_geotiff(tmp)
+            import rasterio
+            with rasterio.open(str(tmp)) as src:
+                assert src.width == 5
+                assert src.height == 4
+                data = src.read(1)
+                np.testing.assert_array_almost_equal(
+                    data, vals.reshape(4, 5), decimal=5
+                )
+        finally:
+            tmp.unlink()

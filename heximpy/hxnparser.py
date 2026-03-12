@@ -202,6 +202,28 @@ class HexMap:
         gdf = self.to_geodataframe(edge=edge, include_empty=include_empty, crs=crs)
         gdf.to_file(str(path))
 
+    def to_geotiff(self, path, *, crs=None):
+        """Export as GeoTIFF (rectangular raster approximation)."""
+        import rasterio
+
+        grid = self.values.reshape((self.height, self.width))
+        edge = self._effective_edge()
+        col_spacing = 1.5 * edge
+        row_spacing = math.sqrt(3.0) * edge
+        ox, oy = self.origin
+        transform = rasterio.transform.from_bounds(
+            ox, oy,
+            ox + self.width * col_spacing,
+            oy + self.height * row_spacing,
+            self.width, self.height,
+        )
+        with rasterio.open(
+            str(path), "w", driver="GTiff",
+            height=self.height, width=self.width,
+            count=1, dtype="float32", crs=crs, transform=transform,
+        ) as dst:
+            dst.write(grid.astype(np.float32), 1)
+
     @classmethod
     def from_file(cls, path: str | Path) -> HexMap:
         """Read a .hxn file, auto-detecting PATCH_HEXMAP vs plain format.
