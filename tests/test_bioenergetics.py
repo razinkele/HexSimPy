@@ -25,7 +25,9 @@ def test_hourly_respiration_increases_with_activity():
     assert r_active[0] > r_rest[0]
 
 
-def test_update_energy_decreases_ed():
+def test_update_energy_decreases_total_energy():
+    """Total energy (ED * mass) must decrease; per-gram ED may rise if
+    catabolized tissue is less energy-dense than the pool average."""
     p = BioParams()
     ed = np.array([6.5])
     mass = np.array([3000.0])
@@ -33,7 +35,9 @@ def test_update_energy_decreases_ed():
     activity = np.array([1.0])
     salinity_cost = np.array([1.0])
     new_ed, dead, new_mass = update_energy(ed, mass, temps, activity, salinity_cost, p)
-    assert new_ed[0] < 6.5
+    e_before = ed[0] * 1000.0 * mass[0]
+    e_after = new_ed[0] * 1000.0 * new_mass[0]
+    assert e_after < e_before, "Total energy must decrease each step"
     assert not dead[0]
 
 
@@ -77,3 +81,25 @@ def test_mass_decreases_after_energy_update():
         ed, mass, np.array([15.0]), np.array([1.0]), np.array([1.0]), p,
     )
     assert new_mass[0] < 3000.0, "Mass should decrease during fasting"
+
+
+def test_energy_conservation_single_step():
+    """Total energy lost should equal respiration cost (no double-counting).
+    energy_before - energy_after == R_hourly (within floating point tolerance)."""
+    p = BioParams()
+    ed = np.array([6.5])
+    mass = np.array([3000.0])
+    temps = np.array([15.0])
+    activity = np.array([1.0])
+    sal_cost = np.array([1.0])
+
+    e_before = ed[0] * 1000.0 * mass[0]  # total energy in J
+    r_hourly = float(hourly_respiration(mass, temps, activity, p)[0] * sal_cost[0])
+
+    new_ed, dead, new_mass = update_energy(ed, mass, temps, activity, sal_cost, p)
+    e_after = new_ed[0] * 1000.0 * new_mass[0]  # total energy in J
+
+    energy_lost = e_before - e_after
+    assert energy_lost == pytest.approx(r_hourly, rel=1e-6), (
+        f"Energy lost ({energy_lost:.2f} J) should equal respiration ({r_hourly:.2f} J)"
+    )

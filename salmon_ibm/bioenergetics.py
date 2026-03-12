@@ -39,12 +39,14 @@ def update_energy(
     activity_mult: np.ndarray,
     salinity_cost: np.ndarray,
     params: BioParams,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     r_hourly = hourly_respiration(mass_g, temperature_c, activity_mult, params) * salinity_cost
     e_total_j = ed_kJ_g * 1000.0 * mass_g
     e_total_j = np.maximum(e_total_j - r_hourly, 0.0)
-    new_ed = e_total_j / (mass_g * 1000.0)
+    # Mass lost = energy respired / energy density of catabolized tissue
     mass_loss_g = r_hourly / (params.ED_TISSUE * 1000.0)
     new_mass = np.maximum(mass_g - mass_loss_g, mass_g * 0.5)
+    # Recompute ED using new mass (consistent accounting)
+    new_ed = np.where(new_mass > 0, e_total_j / (new_mass * 1000.0), 0.0)
     dead = new_ed < params.ED_MORTAL
     return new_ed, dead, new_mass
