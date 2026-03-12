@@ -41,14 +41,18 @@ class BehaviorParams:
 def pick_behaviors(t3h_mean, hours_to_spawn, params, seed=None):
     rng = np.random.default_rng(seed)
     n = len(t3h_mean)
-    temp_idx = np.digitize(t3h_mean, params.temp_bins)
-    time_idx = np.digitize(hours_to_spawn, params.time_bins)
+    temp_idx = np.clip(np.digitize(t3h_mean, params.temp_bins),
+                       0, params.p_table.shape[1] - 1)
+    time_idx = np.clip(np.digitize(hours_to_spawn, params.time_bins),
+                       0, params.p_table.shape[0] - 1)
     behaviors = np.empty(n, dtype=int)
-    for i in range(n):
-        ti = int(np.clip(time_idx[i], 0, params.p_table.shape[0] - 1))
-        te = int(np.clip(temp_idx[i], 0, params.p_table.shape[1] - 1))
-        probs = params.p_table[ti, te]
-        behaviors[i] = rng.choice(5, p=probs)
+    for ti in range(params.p_table.shape[0]):
+        for te in range(params.p_table.shape[1]):
+            mask = (time_idx == ti) & (temp_idx == te)
+            count = mask.sum()
+            if count > 0:
+                probs = params.p_table[ti, te]
+                behaviors[mask] = rng.choice(5, size=count, p=probs)
     return behaviors
 
 
