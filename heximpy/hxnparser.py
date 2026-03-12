@@ -1,6 +1,12 @@
-"""HXN binary file parser for HexSim spatial data.
+"""HexSim workspace file parser.
 
-Reads PATCH_HEXMAP (.hxn), PATCH_GRID (.grid), and barrier (.hbf) files.
+Reads/writes HexSim .hxn (hexmap), .grid (workspace geometry),
+and .hbf (barrier) files. Provides hex grid geometry utilities
+and export to GeoDataFrame, shapefile, GeoTIFF, and CSV.
+
+Uses even-q column-offset convention (flat-top hexagons), matching
+the HexSim standard. Note: the older grid.py and HexSim.py.txt
+use odd-r row-offset convention — do not mix neighbor results.
 """
 from __future__ import annotations
 
@@ -11,6 +17,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
+
+# ── Format constants ─────────────────────────────────────────────────────────
+
+_HXN_MAGIC = b"PATCH_HEXMAP"       # 12 bytes
+_HXN_HEADER_SIZE = 37              # bytes before float32 data starts
+_GRID_MAGIC = b"PATCH_GRID"        # 10 bytes
+_HISTORY_MARKER = b"HISTORY"
 
 
 @dataclass
@@ -66,7 +79,7 @@ class HexMap:
 
     def _write_patch_hexmap(self, path: str | Path) -> None:
         with open(path, "wb") as f:
-            f.write(b"PATCH_HEXMAP")
+            f.write(_HXN_MAGIC)
             f.write(struct.pack("<I", self.version))
             f.write(struct.pack("<I", self.height))
             f.write(struct.pack("<I", self.width))
@@ -180,18 +193,20 @@ class HexMap:
                 "No edge length set for PATCH_HEXMAP file. "
                 "Pass edge= parameter or load via Workspace for correct geometry."
             )
-        rows_list = []
-        for i, val in enumerate(self.values):
-            if not include_empty and val == 0.0:
-                continue
-            r = i // self.width
-            c = i % self.width
-            poly = Polygon(self.hex_polygon(r, c))
-            rows_list.append(
-                {"hex_id": i + 1, "row": r, "col": c, "value": float(val), "geometry": poly}
-            )
-        if edge is not None:
-            self._edge = saved
+        try:
+            rows_list = []
+            for i, val in enumerate(self.values):
+                if not include_empty and val == 0.0:
+                    continue
+                r = i // self.width
+                c = i % self.width
+                poly = Polygon(self.hex_polygon(r, c))
+                rows_list.append(
+                    {"hex_id": i + 1, "row": r, "col": c, "value": float(val), "geometry": poly}
+                )
+        finally:
+            if edge is not None:
+                self._edge = saved
         gdf = gpd.GeoDataFrame(rows_list, geometry="geometry")
         if crs:
             gdf = gdf.set_crs(crs)
@@ -233,9 +248,9 @@ class HexMap:
         path = Path(path)
         with open(path, "rb") as f:
             peek = f.read(12)
-            if peek == b"PATCH_HEXMAP":
+            if peek == _HXN_MAGIC:
                 return cls._read_patch_hexmap(f)
-            if peek[:10] == b"PATCH_GRID":
+            if peek[:10] == _GRID_MAGIC:
                 raise ValueError(
                     f"File is PATCH_GRID format, not a hex-map: {path}"
                 )
@@ -251,7 +266,7 @@ class HexMap:
         max_val, min_val, hexzero = struct.unpack("<fff", f.read(12))
         # Data runs until b"HISTORY" marker or EOF
         rest = f.read()
-        hist_idx = rest.find(b"HISTORY")
+        hist_idx = rest.find(_HISTORY_MARKER)
         data_bytes = rest[:hist_idx] if hist_idx >= 0 else rest
         values = np.frombuffer(data_bytes, dtype=np.float32).copy()
         return cls(
@@ -275,7 +290,7 @@ class HexMap:
         dtype_code, nodata = struct.unpack("<ii", f.read(8))
         n = ncols * nrows
         if dtype_code == 1:
-            values = np.frombuffer(f.read(n * 4), dtype=np.float32)
+            values = np.frombuffer(f.read(n * 4), dtype=np.float32).copy()
         elif dtype_code == 2:
             values = np.frombuffer(f.read(n * 4), dtype=np.int32).astype(
                 np.float32
@@ -322,7 +337,7 @@ class GridMeta:
         path = Path(path)
         with open(path, "rb") as f:
             magic = f.read(10)
-            if magic != b"PATCH_GRID":
+            if magic != _GRID_MAGIC:
                 raise ValueError(
                     f"Not a PATCH_GRID file (got {magic!r}): {path}"
                 )
