@@ -40,7 +40,9 @@ class Simulation:
             self.env = Environment(config, self.mesh, data_dir=data_dir)
 
         water_ids = np.where(self.mesh.water_mask)[0]
-        rng = np.random.default_rng(rng_seed)
+        base_rng = np.random.default_rng(rng_seed)
+        rng = np.random.default_rng(base_rng.integers(2**63))
+        self._rng = np.random.default_rng(base_rng.integers(2**63))
         start_tris = rng.choice(water_ids, size=n_agents)
         self.pool = AgentPool(n=n_agents, start_tri=start_tris, rng_seed=rng_seed)
 
@@ -67,7 +69,7 @@ class Simulation:
         t3h = self.pool.t3h_mean()
         self.pool.behavior[alive_mask] = pick_behaviors(
             t3h[alive_mask], self.pool.target_spawn_hour[alive_mask],
-            self.beh_params, seed=None,
+            self.beh_params, seed=int(self._rng.integers(2**31)),
         )
 
         # 2. Apply overrides
@@ -76,8 +78,12 @@ class Simulation:
         # 3. Estuarine overrides
         self._apply_estuarine_overrides()
 
-        # 4. Movement
-        execute_movement(self.pool, self.mesh, self.env.fields, seed=None)
+        # 4. Update CWR counters (after all behavior decisions are final)
+        self._update_cwr_counters()
+
+        # 5. Movement
+        execute_movement(self.pool, self.mesh, self.env.fields,
+                         seed=int(self._rng.integers(2**31)))
 
         # 5. Update timers
         self.pool.steps[alive_mask] += 1
@@ -128,6 +134,20 @@ class Simulation:
         }
         self.history.append(summary)
         self.current_t += 1
+
+    def _update_cwr_counters(self):
+        """Update CWR tracking counters based on current behavior state."""
+        in_cwr = self.pool.behavior == Behavior.TO_CWR
+        not_in_cwr = ~in_cwr
+
+        # Fish in CWR: increment cwr_hours, reset hours_since_cwr
+        self.pool.cwr_hours[in_cwr] += 1
+        self.pool.hours_since_cwr[in_cwr] = 0
+
+        # Fish not in CWR: reset cwr_hours if they were in CWR, increment hours_since_cwr
+        was_in_cwr = not_in_cwr & (self.pool.cwr_hours > 0)
+        self.pool.cwr_hours[was_in_cwr] = 0
+        self.pool.hours_since_cwr[not_in_cwr] += 1
 
     def _apply_estuarine_overrides(self):
         alive = self.pool.alive

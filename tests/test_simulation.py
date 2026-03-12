@@ -131,3 +131,54 @@ def test_thermal_mortality_at_exact_t_max():
     sim.env.advance = exact_tmax_advance
     sim.step()
     assert not sim.pool.alive.any(), "All fish should die at exactly T_MAX"
+
+
+def test_cwr_counters_update():
+    """cwr_hours should increment for fish in TO_CWR state,
+    and hours_since_cwr should reset when leaving CWR."""
+    cfg = load_config("config_curonian_minimal.yaml")
+    sim = Simulation(cfg, n_agents=5, data_dir="data", rng_seed=42)
+    sim.env.advance(0)
+
+    # Manually set agents to TO_CWR
+    sim.pool.behavior[:] = Behavior.TO_CWR
+    sim.pool.steps[:] = 10  # not first move
+    sim.pool.cwr_hours[:] = 0
+    sim.pool.hours_since_cwr[:] = 999
+
+    # Test CWR counter logic directly
+    sim._update_cwr_counters()
+    assert np.all(sim.pool.cwr_hours == 1), "cwr_hours should increment for TO_CWR fish"
+    assert np.all(sim.pool.hours_since_cwr == 0), (
+        "hours_since_cwr should reset to 0 while in CWR"
+    )
+
+    # Now switch away from CWR
+    sim.pool.behavior[:] = Behavior.UPSTREAM
+    sim._update_cwr_counters()
+    assert np.all(sim.pool.cwr_hours == 0), (
+        "cwr_hours should reset to 0 when fish leave CWR"
+    )
+    assert np.all(sim.pool.hours_since_cwr == 1), (
+        "hours_since_cwr should increment to 1 after leaving CWR"
+    )
+
+
+def test_simulation_reproducibility():
+    """Same rng_seed should produce identical results across two runs."""
+    cfg = load_config("config_curonian_minimal.yaml")
+
+    sim1 = Simulation(cfg, n_agents=10, data_dir="data", rng_seed=42)
+    sim1.run(n_steps=5)
+    ed1 = sim1.pool.ed_kJ_g.copy()
+    tri1 = sim1.pool.tri_idx.copy()
+
+    cfg2 = load_config("config_curonian_minimal.yaml")
+    sim2 = Simulation(cfg2, n_agents=10, data_dir="data", rng_seed=42)
+    sim2.run(n_steps=5)
+    ed2 = sim2.pool.ed_kJ_g.copy()
+    tri2 = sim2.pool.tri_idx.copy()
+
+    np.testing.assert_array_equal(tri1, tri2, "Positions should be identical with same seed")
+    np.testing.assert_array_almost_equal(ed1, ed2, decimal=10,
+        err_msg="Energy should be identical with same seed")
