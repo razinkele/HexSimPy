@@ -332,7 +332,7 @@ def server(input, output, session):
         if sim is None:
             await _init_sim()
             sim = sim_state.get()
-        sim.step()
+        await asyncio.to_thread(sim.step)
         history.set(sim.history.copy())
 
     @reactive.effect
@@ -346,10 +346,12 @@ def server(input, output, session):
         steps = input.n_steps()
         while running.get() and sim.current_t < steps:
             speed = input.speed()
-            for _ in range(speed):
-                if sim.current_t >= steps:
-                    break
-                sim.step()
+            def _batch():
+                for _ in range(speed):
+                    if sim.current_t >= steps:
+                        break
+                    sim.step()
+            await asyncio.to_thread(_batch)
             history.set(sim.history.copy())
             await asyncio.sleep(0.05)
         running.set(False)

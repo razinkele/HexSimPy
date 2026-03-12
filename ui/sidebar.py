@@ -23,21 +23,26 @@ def sidebar_panel():
                 ui.tags.strong("Salmon IBM"),
                 style="font-family: var(--font-display); font-size: 1.1rem; color: var(--sediment-light);",
             ),
-            ui.tags.br(),
-            ui.tags.span(
-                "Curonian Lagoon",
-                style="font-size: 0.75rem; color: var(--text-muted); letter-spacing: 0.08em;"
-                " text-transform: uppercase; font-family: var(--font-body);",
-            ),
             style="margin-bottom: 12px;",
         ),
         ui.hr(),
+
+        # --- Landscape ---
+        _section("Landscape"),
+        ui.input_select(
+            "landscape", "Study area",
+            choices={
+                "curonian": "Curonian Lagoon",
+                "columbia": "Columbia River",
+            },
+        ),
 
         # --- Population ---
         _section("Population"),
         ui.input_numeric("n_agents", "Agents", value=50, min=1, max=1000),
         ui.input_numeric("n_steps", "Hours", value=24, min=1, max=8760),
         ui.input_numeric("rng_seed", "Seed", value=42),
+        _hint("Parameter changes take effect on Reset."),
 
         # --- Bioenergetics ---
         _section("Bioenergetics"),
@@ -50,6 +55,9 @@ def sidebar_panel():
         ui.input_numeric("ed_init", "Init. ED (kJ/g)", value=6.5, step=0.1),
         ui.input_numeric("ed_mortal", "Lethal ED (kJ/g)", value=4.0, step=0.1),
         _hint("Death at ED < 4.0 kJ/g (Snyder et al. 2019)."),
+        ui.input_numeric("t_opt", "T optimal (\u00b0C)", value=16.0, step=0.5),
+        ui.input_numeric("t_max", "T lethal (\u00b0C)", value=26.0, step=0.5),
+        _hint("Monotonic R(T): exponential increase with temperature (Wisconsin model)."),
 
         # --- Osmoregulation & Salinity ---
         _section("Osmoregulation"),
