@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import math
 import struct
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -151,6 +152,55 @@ class HexMap:
             )
             for i in range(6)
         ]
+
+    # ------------------------------------------------------------------
+    # Export methods
+    # ------------------------------------------------------------------
+
+    def to_csv(self, path, *, skip_zeros=True):
+        """Export to CSV in hxn2csv.c format: 'Hex ID,Score'."""
+        path = Path(path)
+        with open(path, "w") as f:
+            f.write("Hex ID,Score\n")
+            for i, val in enumerate(self.values):
+                if skip_zeros and val == 0.0:
+                    continue
+                f.write(f"{i + 1},{val:f}\n")
+
+    def to_geodataframe(self, *, edge=None, include_empty=False, crs=None):
+        """Convert to GeoDataFrame with hex polygon geometry."""
+        import geopandas as gpd
+        from shapely.geometry import Polygon
+
+        if edge is not None:
+            saved = self._edge
+            self._edge = edge
+        elif self._effective_edge() == 1.0 and self.format == "patch_hexmap":
+            warnings.warn(
+                "No edge length set for PATCH_HEXMAP file. "
+                "Pass edge= parameter or load via Workspace for correct geometry."
+            )
+        rows_list = []
+        for i, val in enumerate(self.values):
+            if not include_empty and val == 0.0:
+                continue
+            r = i // self.width
+            c = i % self.width
+            poly = Polygon(self.hex_polygon(r, c))
+            rows_list.append(
+                {"hex_id": i + 1, "row": r, "col": c, "value": float(val), "geometry": poly}
+            )
+        if edge is not None:
+            self._edge = saved
+        gdf = gpd.GeoDataFrame(rows_list, geometry="geometry")
+        if crs:
+            gdf = gdf.set_crs(crs)
+        return gdf
+
+    def to_shapefile(self, path, *, edge=None, include_empty=False, crs=None):
+        """Export to shapefile."""
+        gdf = self.to_geodataframe(edge=edge, include_empty=include_empty, crs=crs)
+        gdf.to_file(str(path))
 
     @classmethod
     def from_file(cls, path: str | Path) -> HexMap:

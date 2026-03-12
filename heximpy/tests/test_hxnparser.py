@@ -562,3 +562,77 @@ class TestEffectiveEdge:
             values=np.zeros(4, dtype=np.float32),
         )
         assert hm._effective_edge() == 1.0
+
+
+# ===================================================================
+# Task 6 – CSV and GeoDataFrame export
+# ===================================================================
+def _make_3x2_hex():
+    """3x2 hex with values [0, 1, 2, 0, 3, 0] — 3 nonzero."""
+    vals = np.array([0, 1, 2, 0, 3, 0], dtype=np.float32)
+    return HexMap(
+        format="patch_hexmap", version=8, height=2, width=3, flag=0,
+        max_val=3.0, min_val=0.0, hexzero=0.0, values=vals, _edge=10.0,
+    )
+
+
+class TestToCsv:
+    """Test HexMap.to_csv export."""
+
+    def test_csv_skip_zeros(self):
+        hm = _make_3x2_hex()
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w") as f:
+            tmp = Path(f.name)
+        try:
+            hm.to_csv(tmp)
+            lines = tmp.read_text().strip().split("\n")
+            assert lines[0] == "Hex ID,Score"
+            assert len(lines) == 4  # header + 3 nonzero
+        finally:
+            tmp.unlink()
+
+    def test_csv_include_zeros(self):
+        hm = _make_3x2_hex()
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w") as f:
+            tmp = Path(f.name)
+        try:
+            hm.to_csv(tmp, skip_zeros=False)
+            lines = tmp.read_text().strip().split("\n")
+            assert lines[0] == "Hex ID,Score"
+            assert len(lines) == 7  # header + 6 values
+        finally:
+            tmp.unlink()
+
+
+class TestToGeoDataFrame:
+    """Test HexMap.to_geodataframe export."""
+
+    def test_geodataframe_default(self):
+        hm = _make_3x2_hex()
+        gdf = hm.to_geodataframe()
+        assert len(gdf) == 3  # only nonzero
+        assert set(gdf.columns) >= {"hex_id", "row", "col", "value", "geometry"}
+        # Each polygon should have 7 coords (6 vertices + closing)
+        for geom in gdf.geometry:
+            assert len(geom.exterior.coords) == 7
+
+    def test_geodataframe_include_empty(self):
+        hm = _make_3x2_hex()
+        gdf = hm.to_geodataframe(include_empty=True)
+        assert len(gdf) == 6
+
+    def test_geodataframe_with_crs(self):
+        hm = _make_3x2_hex()
+        gdf = hm.to_geodataframe(crs="EPSG:32610")
+        assert gdf.crs is not None
+        assert gdf.crs.to_epsg() == 32610
+
+    def test_to_shapefile(self):
+        hm = _make_3x2_hex()
+        with tempfile.TemporaryDirectory() as td:
+            shp_path = Path(td) / "test.shp"
+            hm.to_shapefile(shp_path)
+            import geopandas as gpd
+            gdf = gpd.read_file(shp_path)
+            assert len(gdf) == 3
+            assert "hex_id" in gdf.columns
