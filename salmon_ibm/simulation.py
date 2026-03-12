@@ -20,9 +20,24 @@ class Simulation:
         self.rng_seed = rng_seed
         self.current_t = 0
 
-        grid_file = f"{data_dir}/{config['grid']['file']}"
-        self.mesh = TriMesh.from_netcdf(grid_file)
-        self.env = Environment(config, self.mesh, data_dir=data_dir)
+        grid_type = config.get("grid", {}).get("type", "netcdf")
+
+        if grid_type == "hexsim":
+            from salmon_ibm.hexsim import HexMesh
+            from salmon_ibm.hexsim_env import HexSimEnvironment
+
+            hs = config["hexsim"]
+            self.mesh = HexMesh.from_hexsim(
+                hs["workspace"], species=hs.get("species", "chinook"),
+            )
+            self.env = HexSimEnvironment(
+                hs["workspace"], self.mesh,
+                temperature_csv=hs.get("temperature_csv", "River Temperature.csv"),
+            )
+        else:
+            grid_file = f"{data_dir}/{config['grid']['file']}"
+            self.mesh = TriMesh.from_netcdf(grid_file)
+            self.env = Environment(config, self.mesh, data_dir=data_dir)
 
         water_ids = np.where(self.mesh.water_mask)[0]
         rng = np.random.default_rng(rng_seed)
@@ -85,12 +100,17 @@ class Simulation:
             k=s_cfg.get("k", 0.6),
         )
 
-        new_ed, dead = update_energy(
+        new_ed, dead, new_mass = update_energy(
             self.pool.ed_kJ_g, self.pool.mass_g,
             temps_at_agents, activity, sal_cost, self.bio_params,
         )
         self.pool.ed_kJ_g = new_ed
+        self.pool.mass_g = new_mass
         self.pool.alive[dead] = False
+
+        # 6b. Thermal mortality
+        thermal_kill = temps_at_agents >= self.bio_params.T_MAX
+        self.pool.alive[thermal_kill] = False
 
         # 7. Logging
         if self.logger:
@@ -101,6 +121,7 @@ class Simulation:
             "n_alive": int(self.pool.alive.sum()),
             "n_arrived": int(self.pool.arrived.sum()),
             "mean_ed": float(self.pool.ed_kJ_g[self.pool.alive].mean()) if self.pool.alive.any() else 0.0,
+            "mean_mass": float(self.pool.mass_g[self.pool.alive].mean()) if self.pool.alive.any() else 0.0,
             "behavior_counts": {
                 int(b): int((self.pool.behavior[self.pool.alive] == b).sum()) for b in range(5)
             },
@@ -109,11 +130,25 @@ class Simulation:
         self.current_t += 1
 
     def _apply_estuarine_overrides(self):
+        alive = self.pool.alive
+
+        # Seiche pause
         seiche_cfg = self.est_cfg.get("seiche_pause", {})
         thresh = seiche_cfg.get("dSSHdt_thresh_m_per_15min", 0.02)
         dSSH = np.array([self.env.dSSH_dt(int(tri)) for tri in self.pool.tri_idx])
         paused = seiche_pause(dSSH, thresh=thresh)
-        self.pool.behavior[paused & self.pool.alive] = Behavior.HOLD
+        self.pool.behavior[paused & alive] = Behavior.HOLD
+
+        # Dissolved oxygen avoidance
+        do_cfg = self.est_cfg.get("do_avoidance", {})
+        do_lethal = do_cfg.get("lethal", 0.0)
+        do_high = do_cfg.get("high", 0.0)
+        do_field = self.env.fields.get("do")
+        if do_field is not None and (do_lethal > 0 or do_high > 0):
+            do_at_agents = do_field[self.pool.tri_idx]
+            do_state = do_override(do_at_agents, lethal=do_lethal, high=do_high)
+            self.pool.behavior[(do_state == DO_ESCAPE) & alive] = Behavior.DOWNSTREAM
+            self.pool.alive[(do_state == DO_LETHAL) & alive] = False
 
     def run(self, n_steps):
         for _ in range(n_steps):

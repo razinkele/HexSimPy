@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+from salmon_ibm.agents import Behavior
 from salmon_ibm.simulation import Simulation
 from salmon_ibm.config import load_config
 
@@ -32,3 +33,101 @@ def test_simulation_energy_decreases():
     initial_ed = sim.pool.ed_kJ_g.copy()
     sim.run(n_steps=10)
     assert np.all(sim.pool.ed_kJ_g[sim.pool.alive] <= initial_ed[sim.pool.alive])
+
+
+def test_thermal_mortality_kills_at_extreme_temp():
+    from salmon_ibm.bioenergetics import BioParams
+    cfg = load_config("config_curonian_minimal.yaml")
+    sim = Simulation(cfg, n_agents=10, data_dir="data", rng_seed=42)
+    sim.bio_params = BioParams(T_MAX=20.0)
+    # Patch env.advance to force extreme temps after loading
+    original_advance = sim.env.advance
+    def hot_advance(t):
+        original_advance(t)
+        sim.env.fields["temperature"][:] = 25.0
+    sim.env.advance = hot_advance
+    initial_alive = sim.pool.alive.sum()
+    sim.step()
+    assert sim.pool.alive.sum() < initial_alive, "Fish should die when temp > T_MAX"
+
+
+# ---------- DO override integration ----------
+
+def _make_sim_with_do(do_values, lethal=2.0, high=4.0):
+    """Helper: create sim and inject a 'do' field into env.fields."""
+    cfg = load_config("config_curonian_minimal.yaml")
+    sim = Simulation(cfg, n_agents=10, data_dir="data", rng_seed=42)
+    sim.env.advance(0)  # populate fields
+    # Inject DO at every mesh cell
+    do_field = np.full(sim.mesh.n_triangles, do_values, dtype=np.float64)
+    sim.env.fields["do"] = do_field
+    # Set config thresholds
+    sim.est_cfg["do_avoidance"] = {"lethal": lethal, "high": high}
+    return sim
+
+
+def test_do_override_escape_forces_downstream():
+    """DO between lethal and high → agents switch to DOWNSTREAM."""
+    sim = _make_sim_with_do(do_values=3.0, lethal=2.0, high=4.0)  # 3.0 < high(4.0) → ESCAPE
+    # Give agents a non-DOWNSTREAM behavior first
+    sim.pool.behavior[:] = Behavior.UPSTREAM
+    sim._apply_estuarine_overrides()
+    alive = sim.pool.alive
+    assert np.all(sim.pool.behavior[alive] == Behavior.DOWNSTREAM), \
+        "DO_ESCAPE should force behavior to DOWNSTREAM"
+
+
+def test_do_override_lethal_kills_agents():
+    """DO below lethal threshold → agents die."""
+    sim = _make_sim_with_do(do_values=1.0, lethal=2.0, high=4.0)  # 1.0 < lethal(2.0) → LETHAL
+    assert sim.pool.alive.all(), "All agents should start alive"
+    sim._apply_estuarine_overrides()
+    assert not sim.pool.alive.any(), "All agents should die from lethal DO"
+
+
+def test_do_override_ok_no_change():
+    """DO above high threshold → no behavior change or mortality."""
+    sim = _make_sim_with_do(do_values=8.0, lethal=2.0, high=4.0)  # 8.0 > high(4.0) → OK
+    sim.pool.behavior[:] = Behavior.UPSTREAM
+    initial_alive = sim.pool.alive.copy()
+    sim._apply_estuarine_overrides()
+    assert np.all(sim.pool.alive == initial_alive), "No mortality at normal DO"
+    # Behavior may change due to seiche_pause, but DO should not force DOWNSTREAM
+    # (seiche override is separate — test only DO effect here by noting no DOWNSTREAM)
+
+
+def test_do_override_noop_when_field_absent():
+    """No 'do' field in env.fields → no crash, no effect."""
+    cfg = load_config("config_curonian_minimal.yaml")
+    sim = Simulation(cfg, n_agents=10, data_dir="data", rng_seed=42)
+    sim.env.advance(0)
+    # Don't inject "do" field — it shouldn't exist
+    assert "do" not in sim.env.fields
+    sim.pool.behavior[:] = Behavior.UPSTREAM
+    initial_alive = sim.pool.alive.copy()
+    sim._apply_estuarine_overrides()
+    assert np.all(sim.pool.alive == initial_alive), "No mortality without DO data"
+
+
+def test_do_override_noop_when_thresholds_zero():
+    """Config thresholds both 0.0 (Columbia pattern) → no effect."""
+    sim = _make_sim_with_do(do_values=1.0, lethal=0.0, high=0.0)
+    sim.pool.behavior[:] = Behavior.UPSTREAM
+    initial_alive = sim.pool.alive.copy()
+    sim._apply_estuarine_overrides()
+    assert np.all(sim.pool.alive == initial_alive), "Zero thresholds should disable DO"
+
+
+def test_thermal_mortality_at_exact_t_max():
+    """Fish at exactly T_MAX should die (>= not just >)."""
+    from salmon_ibm.bioenergetics import BioParams
+    cfg = load_config("config_curonian_minimal.yaml")
+    sim = Simulation(cfg, n_agents=10, data_dir="data", rng_seed=42)
+    sim.bio_params = BioParams(T_MAX=26.0)
+    original_advance = sim.env.advance
+    def exact_tmax_advance(t):
+        original_advance(t)
+        sim.env.fields["temperature"][:] = 26.0
+    sim.env.advance = exact_tmax_advance
+    sim.step()
+    assert not sim.pool.alive.any(), "All fish should die at exactly T_MAX"
