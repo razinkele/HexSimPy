@@ -56,6 +56,31 @@ def test_gradient_returns_vector(mesh):
     assert len(grad) == 2
 
 
+def test_delaunay_neighbors_match_build_neighbors(mesh):
+    """Verify that Delaunay.neighbors produces the same neighbor sets as
+    the old edge-based _build_neighbors() method."""
+    old_neighbors = TriMesh._build_neighbors(mesh.triangles)
+    for i in range(mesh.n_triangles):
+        old_set = set(int(n) for n in old_neighbors[i] if n >= 0)
+        new_set = set(int(n) for n in mesh.neighbors[i] if n >= 0)
+        assert old_set == new_set, (
+            f"Triangle {i}: old {old_set} != new {new_set}"
+        )
+
+
+def test_precomputed_water_neighbors(mesh):
+    """Verify that precomputed water neighbor arrays match the on-the-fly
+    computation."""
+    for tri_idx in range(mesh.n_triangles):
+        # Recompute the expected result the old way
+        nbrs = mesh.neighbors[tri_idx]
+        expected = [int(n) for n in nbrs if n >= 0 and mesh.water_mask[n]]
+        actual = mesh.water_neighbors(tri_idx)
+        assert set(actual) == set(expected), (
+            f"Triangle {tri_idx}: expected {expected}, got {actual}"
+        )
+
+
 def test_gradient_corrects_for_lat_lon_asymmetry(mesh):
     """Gradient should account for the fact that 1 degree of longitude
     is shorter than 1 degree of latitude at high latitudes."""
