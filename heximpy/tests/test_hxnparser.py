@@ -53,9 +53,10 @@ class TestHexMapDataclass:
 
     def test_create_hexmap(self):
         hm = HexMap(
+            format="patch_hexmap",
             version=8,
-            nrows=100,
-            ncols=50,
+            height=100,
+            width=50,
             flag=0,
             max_val=1.0,
             min_val=0.0,
@@ -63,35 +64,35 @@ class TestHexMapDataclass:
             values=np.zeros(5000, dtype=np.float32),
         )
         assert hm.version == 8
-        assert hm.nrows == 100
-        assert hm.ncols == 50
+        assert hm.height == 100
+        assert hm.width == 50
 
     def test_n_hexagons_wide(self):
-        """flag=0 (wide): ncols * nrows."""
+        """flag=0 (wide): width * height."""
         hm = HexMap(
-            version=8, nrows=10, ncols=5, flag=0,
+            format="patch_hexmap", version=8, height=10, width=5, flag=0,
             max_val=1.0, min_val=0.0, hexzero=0.0,
             values=np.zeros(50, dtype=np.float32),
         )
         assert hm.n_hexagons == 50
 
     def test_n_hexagons_narrow_even(self):
-        """flag=1, even nrows: n_wide=nrows/2, n_narrow=n_wide."""
-        # nrows=10, ncols=5 -> n_wide=5, n_narrow=5
+        """flag=1, even height: n_wide=height/2, n_narrow=n_wide."""
+        # height=10, width=5 -> n_wide=5, n_narrow=5
         # total = 5*5 + 4*5 = 25+20 = 45
         hm = HexMap(
-            version=8, nrows=10, ncols=5, flag=1,
+            format="patch_hexmap", version=8, height=10, width=5, flag=1,
             max_val=1.0, min_val=0.0, hexzero=0.0,
             values=np.zeros(45, dtype=np.float32),
         )
         assert hm.n_hexagons == 45
 
     def test_n_hexagons_narrow_odd(self):
-        """flag=1, odd nrows: n_wide=(nrows+1)/2, n_narrow=n_wide-1."""
-        # nrows=11, ncols=5 -> n_wide=6, n_narrow=5
+        """flag=1, odd height: n_wide=(height+1)/2, n_narrow=n_wide-1."""
+        # height=11, width=5 -> n_wide=6, n_narrow=5
         # total = 5*6 + 4*5 = 30+20 = 50
         hm = HexMap(
-            version=8, nrows=11, ncols=5, flag=1,
+            format="patch_hexmap", version=8, height=11, width=5, flag=1,
             max_val=1.0, min_val=0.0, hexzero=0.0,
             values=np.zeros(50, dtype=np.float32),
         )
@@ -103,12 +104,15 @@ class TestGridMetaDataclass:
 
     def test_create_gridmeta(self):
         gm = GridMeta(
-            version=6,
-            n_hexes=100,
             ncols=10,
             nrows=20,
+            x_extent=100.0,
+            y_extent=200.0,
+            row_spacing=24.0,
+            edge=24.0 / math.sqrt(3),
+            version=6,
+            n_hexes=100,
             flag=1,
-            georef=(100.0, 0.0, 0.0, 200.0, 24.0),
         )
         assert gm.n_hexes == 100
         assert gm.edge == pytest.approx(24.0 / math.sqrt(3))
@@ -118,10 +122,10 @@ class TestBarrierDataclass:
     """Test Barrier creation."""
 
     def test_create_barrier(self):
-        b = Barrier(hex_id=123, edge=2, class_id=1, class_name="Dam")
+        b = Barrier(hex_id=123, edge=2, classification=1, class_name="Dam")
         assert b.hex_id == 123
         assert b.edge == 2
-        assert b.class_id == 1
+        assert b.classification == 1
         assert b.class_name == "Dam"
 
 
@@ -135,8 +139,8 @@ class TestHexMapFromFile:
     def test_read_habitat_hxn(self):
         hm = HexMap.from_file(HABITAT_HXN)
         assert hm.version == 8
-        assert hm.nrows == 1033
-        assert hm.ncols == 757
+        assert hm.height == 1033
+        assert hm.width == 757
         assert hm.flag == 1
         assert hm.max_val == pytest.approx(1.0)
         assert hm.min_val == pytest.approx(0.0)
@@ -147,7 +151,7 @@ class TestHexMapFromFile:
         """The PATCH_HEXMAP header is 37 bytes, not 25."""
         with open(HABITAT_HXN, "rb") as f:
             f.read(12)  # magic
-            f.read(12)  # ver, nrows, ncols
+            f.read(12)  # ver, height, width
             f.read(1)   # flag
             f.read(12)  # max, min, hexzero
             assert f.tell() == 37
@@ -155,16 +159,16 @@ class TestHexMapFromFile:
     @has_river
     def test_read_river_hxn(self):
         hm = HexMap.from_file(RIVER_HXN)
-        assert hm.nrows == 1574
-        assert hm.ncols == 10195
+        assert hm.height == 1574
+        assert hm.width == 10195
         assert hm.flag == 1
         assert len(hm.values) == hm.n_hexagons
 
     @has_study
     def test_read_study_hxn(self):
         hm = HexMap.from_file(STUDY_HXN)
-        assert hm.nrows == 1574
-        assert hm.ncols == 10195
+        assert hm.height == 1574
+        assert hm.width == 10195
         assert len(hm.values) == hm.n_hexagons
 
     @has_grid
@@ -191,8 +195,8 @@ class TestHexMapFromFile:
         header = struct.pack(
             "<iiidddi i",
             1,           # version
-            width,       # ncols
-            height,      # nrows
+            width,       # width
+            height,      # height
             1.0,         # cell_size
             0.0,         # origin_x
             0.0,         # origin_y
@@ -205,8 +209,8 @@ class TestHexMapFromFile:
             tmp = Path(f.name)
         try:
             hm = HexMap.from_file(tmp)
-            assert hm.nrows == height
-            assert hm.ncols == width
+            assert hm.height == height
+            assert hm.width == width
             assert hm.flag == 0
             assert len(hm.values) == n
             np.testing.assert_array_equal(hm.values, vals)
@@ -251,16 +255,16 @@ class TestGridMetaFromFile:
         assert gm.ncols == 1574
         assert gm.nrows == 10195
         assert gm.flag == 1
-        assert len(gm.georef) == 5
+        assert gm.row_spacing == pytest.approx(24.028114141347544, rel=1e-6)
         assert gm.edge == pytest.approx(24.028114141347544 / math.sqrt(3), rel=1e-6)
 
     @has_grid
     @has_river
     def test_grid_dims_match_river_hxn(self):
-        """Grid ncols/nrows should correspond to River.hxn nrows/ncols."""
+        """Grid width/height should correspond to River.hxn height/width."""
         gm = GridMeta.from_file(GRID_FILE)
         hm = HexMap.from_file(RIVER_HXN)
-        # The .hxn stores (nrows, ncols) and .grid stores (ncols, nrows)
+        # The .hxn stores (height, width) and .grid stores (width, height)
         # but n_hexes should match
         assert gm.n_hexes == hm.n_hexagons
 
@@ -284,7 +288,7 @@ class TestReadBarriers:
         b = barriers[0]
         assert isinstance(b.hex_id, int)
         assert isinstance(b.edge, int)
-        assert isinstance(b.class_id, int)
+        assert isinstance(b.classification, int)
         assert isinstance(b.class_name, str)
 
     @has_hbf
@@ -311,27 +315,29 @@ class TestReadBarriers:
             barriers = read_barriers(tmp)
             assert len(barriers) == 3
             assert barriers[0] == Barrier(
-                hex_id=100, edge=2, class_id=1, class_name="Dam"
+                hex_id=100, edge=2, classification=1, class_name="Dam"
             )
             assert barriers[1] == Barrier(
-                hex_id=200, edge=3, class_id=2, class_name="Fish Ladder"
+                hex_id=200, edge=3, classification=2, class_name="Fish Ladder"
             )
             assert barriers[2] == Barrier(
-                hex_id=300, edge=0, class_id=1, class_name="Dam"
+                hex_id=300, edge=0, classification=1, class_name="Dam"
             )
         finally:
             tmp.unlink()
 
-    def test_hbf_missing_classification_raises(self):
-        """Edge referencing unknown classification should raise."""
-        content = "E 100 2 1\n"  # no C line for class_id=1
+    def test_hbf_missing_classification_fallback(self):
+        """Edge referencing unknown classification should fall back to empty string."""
+        content = "E 100 2 1\n"  # no C line for classification=1
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".hbf", delete=False
         ) as f:
             f.write(content)
             tmp = Path(f.name)
         try:
-            with pytest.raises(KeyError):
-                read_barriers(tmp)
+            barriers = read_barriers(tmp)
+            assert len(barriers) == 1
+            assert barriers[0].classification == 1
+            assert barriers[0].class_name == ""
         finally:
             tmp.unlink()

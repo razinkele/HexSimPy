@@ -16,9 +16,10 @@ import numpy as np
 class HexMap:
     """Parsed hex-map data from a .hxn file."""
 
+    format: str  # "patch_hexmap" or "plain"
     version: int
-    nrows: int
-    ncols: int
+    height: int
+    width: int
     flag: int  # 0 = wide, 1 = narrow
     max_val: float
     min_val: float
@@ -29,15 +30,15 @@ class HexMap:
     def n_hexagons(self) -> int:
         """Compute total hexagon count from grid dimensions and flag."""
         if self.flag == 0:
-            return self.ncols * self.nrows
+            return self.width * self.height
         # flag == 1 (narrow)
-        if self.nrows % 2 == 0:
-            n_wide = self.nrows // 2
+        if self.height % 2 == 0:
+            n_wide = self.height // 2
             n_narrow = n_wide
         else:
-            n_wide = (self.nrows + 1) // 2
+            n_wide = (self.height + 1) // 2
             n_narrow = n_wide - 1
-        return self.ncols * n_wide + (self.ncols - 1) * n_narrow
+        return self.width * n_wide + (self.width - 1) * n_narrow
 
     @classmethod
     def from_file(cls, path: str | Path) -> HexMap:
@@ -68,11 +69,12 @@ class HexMap:
         rest = f.read()
         hist_idx = rest.find(b"HISTORY")
         data_bytes = rest[:hist_idx] if hist_idx >= 0 else rest
-        values = np.frombuffer(data_bytes, dtype=np.float32)
+        values = np.frombuffer(data_bytes, dtype=np.float32).copy()
         return cls(
+            format="patch_hexmap",
             version=version,
-            nrows=nrows,
-            ncols=ncols,
+            height=nrows,
+            width=ncols,
             flag=flag,
             max_val=max_val,
             min_val=min_val,
@@ -97,9 +99,10 @@ class HexMap:
         else:
             raise ValueError(f"Unknown dtype_code: {dtype_code}")
         return cls(
+            format="plain",
             version=version,
-            nrows=nrows,
-            ncols=ncols,
+            height=nrows,
+            width=ncols,
             flag=0,  # plain format is always wide
             max_val=float(values.max()) if len(values) > 0 else 0.0,
             min_val=float(values.min()) if len(values) > 0 else 0.0,
@@ -112,17 +115,15 @@ class HexMap:
 class GridMeta:
     """Metadata from a PATCH_GRID (.grid) file."""
 
-    version: int
-    n_hexes: int
     ncols: int
     nrows: int
-    flag: int
-    georef: tuple[float, ...]  # (x_extent, 0.0, 0.0, y_extent, row_spacing)
-
-    @property
-    def edge(self) -> float:
-        """Hexagon edge length derived from row_spacing."""
-        return self.georef[4] / math.sqrt(3)
+    x_extent: float
+    y_extent: float
+    row_spacing: float
+    edge: float  # row_spacing / sqrt(3)
+    version: int = 0
+    n_hexes: int = 0
+    flag: int = 0
 
     @classmethod
     def from_file(cls, path: str | Path) -> GridMeta:
@@ -141,12 +142,15 @@ class GridMeta:
             (flag,) = struct.unpack("<B", f.read(1))
             georef = struct.unpack("<5d", f.read(40))
         return cls(
-            version=version,
-            n_hexes=n_hexes,
             ncols=ncols,
             nrows=nrows,
+            x_extent=georef[0],
+            y_extent=georef[3],
+            row_spacing=georef[4],
+            edge=georef[4] / math.sqrt(3),
+            version=version,
+            n_hexes=n_hexes,
             flag=flag,
-            georef=georef,
         )
 
 
@@ -156,7 +160,7 @@ class Barrier:
 
     hex_id: int
     edge: int
-    class_id: int
+    classification: int
     class_name: str
 
 
@@ -168,7 +172,7 @@ def read_barriers(path: str | Path) -> list[Barrier]:
         E <hex_id> <edge> <class_id>
 
     Returns a list of Barrier with class_name populated from classifications.
-    Raises KeyError if an edge references an undefined classification.
+    Falls back to empty string if a classification is not defined.
     """
     path = Path(path)
     classifications: dict[int, str] = {}
@@ -189,12 +193,12 @@ def read_barriers(path: str | Path) -> list[Barrier]:
                 hex_id = int(parts[1])
                 edge = int(parts[2])
                 class_id = int(parts[3])
-                class_name = classifications[class_id]
+                class_name = classifications.get(class_id, "")
                 barriers.append(
                     Barrier(
                         hex_id=hex_id,
                         edge=edge,
-                        class_id=class_id,
+                        classification=class_id,
                         class_name=class_name,
                     )
                 )
