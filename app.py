@@ -38,7 +38,6 @@ SALMON_COLOR = "#d4826a"
 # Behavior colors — nature-inspired
 BEH_NAMES = ["Hold", "Random", "CWR", "Upstream", "Downstream"]
 BEH_COLORS = ["#7a8b7a", "#4a8fa8", "#3d9b8f", "#d4826a", "#b8963e"]
-BEH_SYMBOLS = ["circle", "diamond", "star", "triangle-up", "triangle-down"]
 
 # Bathymetric colorscale
 BATHY_COLORSCALE = [
@@ -123,28 +122,38 @@ def _subsample_indices(n, max_pts):
     return np.arange(n)
 
 
-def _build_water_data(mesh, z, cscale, field_label, idx=None):
-    """Build water layer data: list of dicts with position, color, info."""
+def _build_water_binary(mesh, z, cscale, idx, scale=1.0):
+    """Build binary-encoded position and color arrays for the water layer.
+
+    Returns (positions_binary, colors_binary, n_points).
+    """
     rgb = _colorscale_rgb(z, cscale)
-    if idx is None:
-        idx = np.arange(len(z))
-
-    xs = mesh.centroids[idx, 1]
-    ys = mesh.centroids[idx, 0]
-    rs, gs, bs = rgb[idx, 0], rgb[idx, 1], rgb[idx, 2]
-    vals = z[idx]
-
-    return [
-        {
-            "position": [round(float(xs[i]), 2), round(float(ys[i]), 2)],
-            "color": [int(rs[i]), int(gs[i]), int(bs[i]), 220],
-            "info": f"{field_label}: {vals[i]:.1f}",
-        }
-        for i in range(len(idx))
-    ]
+    positions = np.column_stack([
+        mesh.centroids[idx, 1] * scale,
+        mesh.centroids[idx, 0] * scale,
+    ]).astype(np.float32)
+    colors = np.column_stack([
+        rgb[idx, 0], rgb[idx, 1], rgb[idx, 2],
+        np.full(len(idx), 220, dtype=np.uint8),
+    ]).astype(np.uint8)
+    return (
+        encode_binary_attribute(positions),
+        encode_binary_attribute(colors),
+        len(idx),
+    )
 
 
-def _build_agent_data(sim, mesh):
+def _build_color_binary(mesh, z, cscale, idx):
+    """Build only the color binary for a partial update."""
+    rgb = _colorscale_rgb(z, cscale)
+    colors = np.column_stack([
+        rgb[idx, 0], rgb[idx, 1], rgb[idx, 2],
+        np.full(len(idx), 220, dtype=np.uint8),
+    ]).astype(np.uint8)
+    return encode_binary_attribute(colors)
+
+
+def _build_agent_data(sim, mesh, scale=1.0):
     """Build agent layer data: list of dicts with position, color, info."""
     alive = sim.pool.alive
     if not alive.any():
@@ -156,15 +165,13 @@ def _build_agent_data(sim, mesh):
     agent_ids = np.where(alive)[0]
 
     pts = []
-    for i, (tri, beh, ed, aid) in enumerate(
-        zip(tris, behaviors, energies, agent_ids)
-    ):
+    for tri, beh, ed, aid in zip(tris, behaviors, energies, agent_ids):
         beh_int = int(beh)
         rc, gc, bc = BEH_COLORS_RGB[beh_int]
         pts.append({
             "position": [
-                round(float(mesh.centroids[tri, 1]), 2),
-                round(float(mesh.centroids[tri, 0]), 2),
+                round(float(mesh.centroids[tri, 1] * scale), 5),
+                round(float(mesh.centroids[tri, 0] * scale), 5),
             ],
             "color": [rc, gc, bc, 240],
             "info": f"#{aid} {BEH_NAMES[beh_int]} | {ed:.1f} kJ/g",
@@ -302,6 +309,7 @@ def server(input, output, session):
         ra, rb, rq = input.ra(), input.rb(), input.rq()
         ed_mortal = input.ed_mortal()
         t_opt, t_max = input.t_opt(), input.t_max()
+        ed_init = input.ed_init()
 
         # Run blocking init in a thread to avoid freezing the event loop
         sim = await asyncio.to_thread(
@@ -311,6 +319,8 @@ def server(input, output, session):
             RA=ra, RB=rb, RQ=rq, ED_MORTAL=ed_mortal,
             T_OPT=t_opt, T_MAX=t_max,
         )
+        sim._activity_lut = sim._build_activity_lut()
+        sim.pool.ed_kJ_g[:] = ed_init
         sim_state.set(sim)
         history.set([])
         running.set(False)
@@ -334,8 +344,8 @@ def server(input, output, session):
             await _init_sim()
             sim = sim_state.get()
         steps = input.n_steps()
-        speed = input.speed()
         while running.get() and sim.current_t < steps:
+            speed = input.speed()
             for _ in range(speed):
                 if sim.current_t >= steps:
                     break
@@ -419,167 +429,148 @@ def server(input, output, session):
             f'</div>'
         )
 
-    # --- Map update (push to shiny-deckgl widget) ---
-    _current_landscape = reactive.Value("")
+    # --- Map update: three-tier strategy ---
+    # Cache state for change detection
+    _cached_landscape = ""
+    _cached_field = ""
+    _cached_subsample_idx = None  # Columbia subsample / Curonian water indices (computed once)
+    _cached_scale = 1.0
+    _cached_water_n = 0
+
+    # Dynamic fields whose colors change on env.advance()
+    DYNAMIC_FIELDS = {"temperature", "salinity", "ssh"}
+
+    def _resolve_field(sim):
+        """Resolve current field → (z, colorscale)."""
+        field_name = input.map_field()
+        if field_name == "depth":
+            return sim.mesh.depth, BATHY_COLORSCALE
+        elif field_name in sim.env.fields:
+            return sim.env.fields[field_name], TEMP_COLORSCALE
+        return sim.mesh.depth, BATHY_COLORSCALE
+
+    def _water_idx(sim):
+        """Return subsample indices for the current mesh."""
+        nonlocal _cached_subsample_idx
+        mesh = sim.mesh
+        is_hexsim = hasattr(mesh, "n_cells")
+        if is_hexsim:
+            if _cached_subsample_idx is None:
+                _cached_subsample_idx = _subsample_indices(
+                    mesh.n_cells, MAX_DECK_POINTS
+                )
+            return _cached_subsample_idx
+        if _cached_subsample_idx is None:
+            _cached_subsample_idx = np.where(mesh.water_mask)[0]
+        return _cached_subsample_idx
+
+    def _view_state(sim):
+        """Return the appropriate view_state for the current landscape."""
+        mesh = sim.mesh
+        is_hexsim = hasattr(mesh, "n_cells")
+        if is_hexsim:
+            cx = float(np.mean(mesh.centroids[:, 1])) * _cached_scale
+            cy = float(np.mean(mesh.centroids[:, 0])) * _cached_scale
+            return {"longitude": cx, "latitude": cy, "zoom": 7}
+        return {"longitude": 21.07, "latitude": 55.31, "zoom": 10}
+
+    def _agent_layer(sim):
+        """Build the complete agent ScatterplotLayer dict."""
+        agent_data = _build_agent_data(sim, sim.mesh, scale=_cached_scale)
+        return scatterplot_layer(
+            "agents", agent_data,
+            getPosition="@@d.position",
+            getFillColor="@@d.color",
+            getRadius=150,
+            radiusMinPixels=5,
+            radiusMaxPixels=12,
+            stroked=True,
+            getLineColor=[0, 0, 0, 140],
+            lineWidthMinPixels=1,
+            pickable=True,
+        )
+
+    async def _full_update(sim):
+        """Send everything: positions + colors + agents (~3 MB)."""
+        nonlocal _cached_water_n
+        z, cscale = _resolve_field(sim)
+        idx = _water_idx(sim)
+        pos_bin, col_bin, n = _build_water_binary(
+            sim.mesh, z, cscale, idx, scale=_cached_scale
+        )
+        _cached_water_n = n
+
+        is_hexsim = hasattr(sim.mesh, "n_cells")
+        water = layer(
+            "ScatterplotLayer", "water",
+            data={"length": n},
+            getPosition=pos_bin,
+            getFillColor=col_bin,
+            getRadius=30,
+            radiusMinPixels=3 if is_hexsim else 2,
+            radiusMaxPixels=8 if is_hexsim else 6,
+            pickable=False,
+        )
+        await map_widget.update(
+            session,
+            layers=[water, _agent_layer(sim)],
+            view_state=_view_state(sim),
+            views=[map_view(controller=True)],
+        )
+
+    async def _color_and_agent_update(sim):
+        """Send new colors + agents, positions stay in JS cache (~805 KB)."""
+        z, cscale = _resolve_field(sim)
+        idx = _water_idx(sim)
+        col_bin = _build_color_binary(sim.mesh, z, cscale, idx)
+        await map_widget.partial_update(session, [
+            {"id": "water", "getFillColor": col_bin,
+             "data": {"length": _cached_water_n}},
+            _agent_layer(sim),
+        ])
+
+    async def _agent_only_update(sim):
+        """Send only agents, water layer untouched in JS cache (~5 KB)."""
+        await map_widget.partial_update(session, [_agent_layer(sim)])
 
     @reactive.effect
     async def _update_map():
+        nonlocal _cached_landscape, _cached_field
+        nonlocal _cached_subsample_idx, _cached_scale
+
         sim = sim_state.get()
         _ = history.get()
         if sim is None:
             return
 
-        mesh = sim.mesh
-        field_name = input.map_field()
-        is_hexsim = hasattr(mesh, "n_cells")
         landscape = input.landscape()
+        field_name = input.map_field()
+        is_hexsim = hasattr(sim.mesh, "n_cells")
+        scale = 0.0005 if is_hexsim else 1.0
 
-        # Resolve field + colorscale + label
-        if field_name == "depth":
-            z = mesh.depth
-            cscale = BATHY_COLORSCALE
-            field_label = "Depth (m)"
-        elif field_name in sim.env.fields:
-            z = sim.env.fields[field_name]
-            cscale = TEMP_COLORSCALE
-            field_labels = {
-                "temperature": "Temp (\u00b0C)",
-                "salinity": "Sal (PSU)",
-                "ssh": "SSH (m)",
-            }
-            field_label = field_labels.get(field_name, field_name)
-        else:
-            z = mesh.depth
-            cscale = BATHY_COLORSCALE
-            field_label = "Depth (m)"
+        # Detect what changed
+        landscape_changed = landscape != _cached_landscape
+        field_changed = field_name != _cached_field
 
-        # Switch basemap when landscape changes
-        if landscape != _current_landscape.get():
-            _current_landscape.set(landscape)
+        if landscape_changed:
+            # Reset cache for new landscape
+            _cached_landscape = landscape
+            _cached_field = field_name
+            _cached_subsample_idx = None
+            _cached_scale = scale
             await map_widget.set_style(session, CARTO_DARK)
-
-        if is_hexsim:
-            await _update_columbia(session, sim, mesh, z, cscale, field_label)
+            await _full_update(sim)
+        elif field_changed:
+            _cached_field = field_name
+            _cached_scale = scale
+            await _color_and_agent_update(sim)
         else:
-            await _update_curonian(session, sim, mesh, z, cscale, field_label)
-
-    async def _update_curonian(session, sim, mesh, z, cscale, field_label):
-        """Push Curonian Lagoon layers (geographic, LNGLAT)."""
-        water_idx = np.where(mesh.water_mask)[0]
-        water_data = _build_water_data(mesh, z, cscale, field_label, idx=water_idx)
-        agent_data = _build_agent_data(sim, mesh)
-        await map_widget.update(
-            session,
-            layers=[
-                scatterplot_layer("water", water_data,
-                    getPosition="@@d.position",
-                    getFillColor="@@d.color",
-                    getRadius=30,
-                    radiusMinPixels=2,
-                    radiusMaxPixels=6,
-                    pickable=True,
-                ),
-                scatterplot_layer("agents", agent_data,
-                    getPosition="@@d.position",
-                    getFillColor="@@d.color",
-                    getRadius=150,
-                    radiusMinPixels=5,
-                    radiusMaxPixels=12,
-                    stroked=True,
-                    getLineColor=[0, 0, 0, 140],
-                    lineWidthMinPixels=1,
-                    pickable=True,
-                ),
-            ],
-            view_state={
-                "longitude": 21.07,
-                "latitude": 55.31,
-                "zoom": 10,
-            },
-            views=[map_view(controller=True)],
-        )
-
-    async def _update_columbia(session, sim, mesh, z, cscale, field_label):
-        """Push Columbia River layers using geographic view.
-
-        HexSim grid uses integer grid coordinates. We scale them to tiny
-        lat/lon offsets near the equator (0°N, 0°E) where CARTO_DARK tiles
-        show featureless dark ocean — effectively a plain background.
-        Equal lon/lat scaling at equator preserves the grid's aspect ratio.
-        """
-        idx = _subsample_indices(mesh.n_cells, MAX_DECK_POINTS)
-        rgb = _colorscale_rgb(z, cscale)
-
-        # Scale grid coords → small geographic degrees at the equator.
-        GRID_SCALE = 0.0005  # 1 grid unit → 0.0005° ≈ 55 m
-
-        # Binary water layer — numpy arrays → base64 (3 MB vs 17 MB JSON)
-        positions = np.column_stack([
-            mesh.centroids[idx, 1] * GRID_SCALE,
-            mesh.centroids[idx, 0] * GRID_SCALE,
-        ]).astype(np.float32)
-        colors = np.column_stack([
-            rgb[idx, 0], rgb[idx, 1], rgb[idx, 2],
-            np.full(len(idx), 220, dtype=np.uint8),
-        ]).astype(np.uint8)
-
-        water_layer = layer(
-            "ScatterplotLayer", "water",
-            data={"length": len(idx)},
-            getPosition=encode_binary_attribute(positions),
-            getFillColor=encode_binary_attribute(colors),
-            getRadius=30,
-            radiusMinPixels=3,
-            radiusMaxPixels=8,
-            pickable=False,
-        )
-
-        # Agent overlay — dict format (small count, needs tooltips)
-        agent_data = []
-        alive = sim.pool.alive
-        if alive.any():
-            tris = sim.pool.tri_idx[alive]
-            behaviors = sim.pool.behavior[alive]
-            energies = sim.pool.ed_kJ_g[alive]
-            agent_ids = np.where(alive)[0]
-            for tri, beh, ed, aid in zip(tris, behaviors, energies, agent_ids):
-                beh_int = int(beh)
-                rc, gc, bc = BEH_COLORS_RGB[beh_int]
-                agent_data.append({
-                    "position": [
-                        round(float(mesh.centroids[tri, 1] * GRID_SCALE), 5),
-                        round(float(mesh.centroids[tri, 0] * GRID_SCALE), 5),
-                    ],
-                    "color": [rc, gc, bc, 240],
-                    "info": f"#{aid} {BEH_NAMES[beh_int]} | {ed:.1f} kJ/g",
-                })
-
-        cx = float(np.mean(mesh.centroids[:, 1])) * GRID_SCALE
-        cy = float(np.mean(mesh.centroids[:, 0])) * GRID_SCALE
-
-        await map_widget.update(
-            session,
-            layers=[
-                water_layer,
-                scatterplot_layer("agents", agent_data,
-                    getPosition="@@d.position",
-                    getFillColor="@@d.color",
-                    getRadius=150,
-                    radiusMinPixels=5,
-                    radiusMaxPixels=12,
-                    stroked=True,
-                    getLineColor=[0, 0, 0, 140],
-                    lineWidthMinPixels=1,
-                    pickable=True,
-                ),
-            ],
-            view_state={
-                "longitude": cx,
-                "latitude": cy,
-                "zoom": 7,
-            },
-            views=[map_view(controller=True)],
-        )
+            # Step only — choose path based on field dynamism
+            _cached_scale = scale
+            if field_name in DYNAMIC_FIELDS:
+                await _color_and_agent_update(sim)
+            else:
+                await _agent_only_update(sim)
 
     # --- Chart helper: Plotly → HTML file + iframe (no widget/comm layer) ---
     def _plotly_iframe(fig, name, height="280px"):
