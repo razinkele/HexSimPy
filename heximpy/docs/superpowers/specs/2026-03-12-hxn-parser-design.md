@@ -213,13 +213,15 @@ class Workspace:
 ```
 workspace/
   *.grid
-  *.hbf  (optional)
   Spatial Data/
     Hexagons/
       Layer Name/
         Layer Name.1.hxn
       Another Layer/
         Another Layer.1.hxn
+    barriers/  (optional)
+      Barrier Name/
+        Barrier Name.1.hbf
 ```
 
 **Discovery logic:**
