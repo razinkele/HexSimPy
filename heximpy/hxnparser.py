@@ -125,6 +125,31 @@ class GridMeta:
         """Hexagon edge length derived from row_spacing."""
         return self.georef[4] / math.sqrt(3)
 
+    @classmethod
+    def from_file(cls, path: str | Path) -> GridMeta:
+        """Read a PATCH_GRID (.grid) file (67-byte header).
+
+        Raises ValueError if the file does not start with b"PATCH_GRID".
+        """
+        path = Path(path)
+        with open(path, "rb") as f:
+            magic = f.read(10)
+            if magic != b"PATCH_GRID":
+                raise ValueError(
+                    f"Not a PATCH_GRID file (got {magic!r}): {path}"
+                )
+            version, n_hexes, ncols, nrows = struct.unpack("<IIII", f.read(16))
+            (flag,) = struct.unpack("<B", f.read(1))
+            georef = struct.unpack("<5d", f.read(40))
+        return cls(
+            version=version,
+            n_hexes=n_hexes,
+            ncols=ncols,
+            nrows=nrows,
+            flag=flag,
+            georef=georef,
+        )
+
 
 @dataclass
 class Barrier:
@@ -137,4 +162,41 @@ class Barrier:
 
 
 def read_barriers(path: str | Path) -> list[Barrier]:
-    raise NotImplementedError
+    """Parse an .hbf barrier file.
+
+    The file contains C (classification) and E (edge) lines:
+        C <id> <p1> <p2> "<name>"
+        E <hex_id> <edge> <class_id>
+
+    Returns a list of Barrier with class_name populated from classifications.
+    Raises KeyError if an edge references an undefined classification.
+    """
+    path = Path(path)
+    classifications: dict[int, str] = {}
+    barriers: list[Barrier] = []
+
+    with open(path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split()
+            if parts[0] == "C":
+                class_id = int(parts[1])
+                # Name is the last quoted token
+                name = line.split('"')[1]
+                classifications[class_id] = name
+            elif parts[0] == "E":
+                hex_id = int(parts[1])
+                edge = int(parts[2])
+                class_id = int(parts[3])
+                class_name = classifications[class_id]
+                barriers.append(
+                    Barrier(
+                        hex_id=hex_id,
+                        edge=edge,
+                        class_id=class_id,
+                        class_name=class_name,
+                    )
+                )
+    return barriers
