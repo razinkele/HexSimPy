@@ -32,3 +32,20 @@ def test_override_cwr_max_residence(params):
     pool.cwr_hours[:] = params.max_cwr_hours + 1
     overridden = apply_overrides(pool, params)
     assert np.all(overridden == Behavior.UPSTREAM)
+
+
+def test_urgent_fish_prefer_upstream(params):
+    """Fish with < 15 days to spawn at cool temperature should
+    strongly prefer UPSTREAM over HOLD."""
+    n = 1000
+    t3h = np.full(n, 14.0)  # cool water (below temp_bins[0]=16)
+    hours = np.full(n, 100.0)  # < 360 hours = urgent
+    behaviors = pick_behaviors(t3h, hours, params, seed=42)
+    upstream_frac = (behaviors == Behavior.UPSTREAM).mean()
+    hold_frac = (behaviors == Behavior.HOLD).mean()
+    assert upstream_frac > 0.5, (
+        f"Urgent fish in cool water: UPSTREAM fraction {upstream_frac:.2f} should exceed 0.5"
+    )
+    assert upstream_frac > hold_frac, (
+        f"Urgent fish: UPSTREAM ({upstream_frac:.2f}) should exceed HOLD ({hold_frac:.2f})"
+    )
