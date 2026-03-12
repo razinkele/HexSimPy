@@ -328,33 +328,40 @@ def server(input, output, session):
     @reactive.effect
     @reactive.event(input.btn_step)
     async def _step():
-        sim = sim_state.get()
-        if sim is None:
-            await _init_sim()
+        try:
             sim = sim_state.get()
-        await asyncio.to_thread(sim.step)
-        history.set(sim.history.copy())
+            if sim is None:
+                await _init_sim()
+                sim = sim_state.get()
+            await asyncio.to_thread(sim.step)
+            history.set(sim.history.copy())
+        except Exception as e:
+            ui.notification_show(f"Step error: {e}", type="error", duration=10)
 
     @reactive.effect
     @reactive.event(input.btn_run)
     async def _run():
         running.set(True)
-        sim = sim_state.get()
-        if sim is None:
-            await _init_sim()
+        try:
             sim = sim_state.get()
-        steps = input.n_steps()
-        while running.get() and sim.current_t < steps:
-            speed = input.speed()
-            def _batch():
-                for _ in range(speed):
-                    if sim.current_t >= steps:
-                        break
-                    sim.step()
-            await asyncio.to_thread(_batch)
-            history.set(sim.history.copy())
-            await asyncio.sleep(0.05)
-        running.set(False)
+            if sim is None:
+                await _init_sim()
+                sim = sim_state.get()
+            steps = input.n_steps()
+            while running.get() and sim.current_t < steps:
+                speed = input.speed()
+                def _batch():
+                    for _ in range(speed):
+                        if sim.current_t >= steps:
+                            break
+                        sim.step()
+                await asyncio.to_thread(_batch)
+                history.set(sim.history.copy())
+                await asyncio.sleep(0.05)
+        except Exception as e:
+            ui.notification_show(f"Simulation error: {e}", type="error", duration=10)
+        finally:
+            running.set(False)
 
     @reactive.effect
     @reactive.event(input.btn_pause)
