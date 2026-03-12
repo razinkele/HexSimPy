@@ -315,6 +315,20 @@ def server(input, output, session):
         t_opt, t_max = input.t_opt(), input.t_max()
         ed_init = input.ed_init()
 
+        # Validate parameters
+        errors = []
+        if ra is not None and ra <= 0:
+            errors.append("RA must be > 0")
+        if rq is not None and rq <= 0:
+            errors.append("RQ must be > 0")
+        if t_max is not None and t_opt is not None and t_max <= t_opt:
+            errors.append(f"T lethal ({t_max}) must be > T optimal ({t_opt})")
+        if ed_init is not None and ed_mortal is not None and ed_init <= ed_mortal:
+            errors.append(f"Init ED ({ed_init}) must be > Lethal ED ({ed_mortal})")
+        if errors:
+            ui.notification_show(" | ".join(errors), type="warning", duration=8)
+            return
+
         # Run blocking init in a thread to avoid freezing the event loop
         sim = await asyncio.to_thread(
             Simulation, cfg, n_agents=n_agents, data_dir="data", rng_seed=rng_seed,
