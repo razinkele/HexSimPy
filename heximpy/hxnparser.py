@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import math
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -25,6 +25,11 @@ class HexMap:
     min_val: float
     hexzero: float
     values: np.ndarray
+    cell_size: float = 0.0
+    origin: tuple = (0.0, 0.0)
+    nodata: int = 0
+    dtype_code: int = 1
+    _edge: float = field(default=0.0, repr=False)
 
     @property
     def n_hexagons(self) -> int:
@@ -39,6 +44,113 @@ class HexMap:
             n_wide = (self.height + 1) // 2
             n_narrow = n_wide - 1
         return self.width * n_wide + (self.width - 1) * n_narrow
+
+    def to_file(self, path: str | Path, *, format: str | None = None) -> None:
+        """Write a .hxn file in the specified format.
+
+        Parameters
+        ----------
+        path : str or Path
+            Output file path.
+        format : str, optional
+            "patch_hexmap" or "plain".  Defaults to ``self.format``.
+        """
+        fmt = format or self.format
+        if fmt == "patch_hexmap":
+            self._write_patch_hexmap(path)
+        elif fmt == "plain":
+            self._write_plain(path)
+        else:
+            raise ValueError(f"Unknown format: {fmt!r}")
+
+    def _write_patch_hexmap(self, path: str | Path) -> None:
+        with open(path, "wb") as f:
+            f.write(b"PATCH_HEXMAP")
+            f.write(struct.pack("<I", self.version))
+            f.write(struct.pack("<I", self.height))
+            f.write(struct.pack("<I", self.width))
+            f.write(struct.pack("B", self.flag))
+            f.write(struct.pack("<f", self.max_val))
+            f.write(struct.pack("<f", self.min_val))
+            f.write(struct.pack("<f", self.hexzero))
+            f.write(self.values.astype("<f4").tobytes())
+
+    def _write_plain(self, path: str | Path) -> None:
+        with open(path, "wb") as f:
+            f.write(struct.pack("<i", self.version))
+            f.write(struct.pack("<i", self.width))
+            f.write(struct.pack("<i", self.height))
+            f.write(struct.pack("<d", self.cell_size))
+            f.write(struct.pack("<d", self.origin[0]))
+            f.write(struct.pack("<d", self.origin[1]))
+            f.write(struct.pack("<i", self.dtype_code))
+            f.write(struct.pack("<i", self.nodata))
+            dtype = "<f4" if self.dtype_code == 1 else "<i4"
+            f.write(self.values.astype(dtype).tobytes())
+
+    # ------------------------------------------------------------------
+    # Hex geometry methods
+    # ------------------------------------------------------------------
+
+    def _effective_edge(self) -> float:
+        """_edge (Workspace) > cell_size (plain) > 1.0 fallback."""
+        if self._edge > 0:
+            return self._edge
+        if self.cell_size > 0:
+            return self.cell_size
+        return 1.0
+
+    def neighbors(self, row: int, col: int) -> list[tuple[int, int]]:
+        """Even-q column-offset neighbors (flat-top hex)."""
+        if col % 2 == 0:
+            offsets = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1)]
+        else:
+            offsets = [(-1, 0), (1, 0), (0, -1), (0, 1), (1, -1), (1, 1)]
+        return [
+            (row + dr, col + dc)
+            for dr, dc in offsets
+            if 0 <= row + dr < self.height and 0 <= col + dc < self.width
+        ]
+
+    def hex_to_xy(self, row: int, col: int) -> tuple[float, float]:
+        """Convert hex grid (row, col) to Cartesian (x, y)."""
+        edge = self._effective_edge()
+        x = 1.5 * edge * col
+        y = math.sqrt(3.0) * edge * (row + 0.5 * (col % 2))
+        return (x, y)
+
+    def xy_to_hex(self, x: float, y: float) -> tuple[int, int]:
+        """Convert Cartesian (x, y) to nearest hex grid (row, col)."""
+        edge = self._effective_edge()
+        col = round(x / (1.5 * edge))
+        row = round(y / (math.sqrt(3.0) * edge) - 0.5 * (col % 2))
+        return (int(row), int(col))
+
+    @staticmethod
+    def _offset_to_cube(row: int, col: int) -> tuple[int, int, int]:
+        """Convert even-q offset coords to cube coords."""
+        qx = col
+        qz = row - (col + (col & 1)) // 2
+        qy = -qx - qz
+        return (qx, qy, qz)
+
+    def hex_distance(self, a: tuple[int, int], b: tuple[int, int]) -> int:
+        """Hex distance between two (row, col) positions."""
+        ax, ay, az = self._offset_to_cube(a[0], a[1])
+        bx, by, bz = self._offset_to_cube(b[0], b[1])
+        return (abs(ax - bx) + abs(ay - by) + abs(az - bz)) // 2
+
+    def hex_polygon(self, row: int, col: int) -> list[tuple[float, float]]:
+        """Return 6 vertices of the flat-top hexagon at (row, col)."""
+        cx, cy = self.hex_to_xy(row, col)
+        edge = self._effective_edge()
+        return [
+            (
+                cx + edge * math.cos(math.radians(60 * i)),
+                cy + edge * math.sin(math.radians(60 * i)),
+            )
+            for i in range(6)
+        ]
 
     @classmethod
     def from_file(cls, path: str | Path) -> HexMap:
@@ -108,6 +220,10 @@ class HexMap:
             min_val=float(values.min()) if len(values) > 0 else 0.0,
             hexzero=0.0,
             values=values,
+            cell_size=cell_size,
+            origin=(origin_x, origin_y),
+            nodata=nodata,
+            dtype_code=dtype_code,
         )
 
 

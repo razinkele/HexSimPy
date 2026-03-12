@@ -341,3 +341,224 @@ class TestReadBarriers:
             assert barriers[0].class_name == ""
         finally:
             tmp.unlink()
+
+
+# ===================================================================
+# Task 4 – HexMap.to_file (write support)
+# ===================================================================
+class TestHexMapToFile:
+    """Test writing .hxn files and round-tripping."""
+
+    def test_roundtrip_patch_hexmap(self):
+        """Create a PATCH_HEXMAP, write, read back, compare all fields."""
+        vals = np.array([1.0, 2.0, 3.0, 0.5], dtype=np.float32)
+        hm = HexMap(
+            format="patch_hexmap", version=8, height=2, width=2, flag=0,
+            max_val=3.0, min_val=0.5, hexzero=-1.0, values=vals,
+        )
+        with tempfile.NamedTemporaryFile(suffix=".hxn", delete=False) as f:
+            tmp = Path(f.name)
+        try:
+            hm.to_file(tmp)
+            hm2 = HexMap.from_file(tmp)
+            assert hm2.format == "patch_hexmap"
+            assert hm2.version == 8
+            assert hm2.height == 2
+            assert hm2.width == 2
+            assert hm2.flag == 0
+            assert hm2.max_val == pytest.approx(3.0)
+            assert hm2.min_val == pytest.approx(0.5)
+            assert hm2.hexzero == pytest.approx(-1.0)
+            np.testing.assert_array_equal(hm2.values, vals)
+        finally:
+            tmp.unlink()
+
+    def test_roundtrip_plain(self):
+        """Create a plain-format HexMap, write, read back, compare all fields."""
+        vals = np.array([10.0, 20.0, 30.0, 40.0, 50.0, 60.0], dtype=np.float32)
+        hm = HexMap(
+            format="plain", version=1, height=2, width=3, flag=0,
+            max_val=60.0, min_val=10.0, hexzero=0.0, values=vals,
+            cell_size=5.0, origin=(100.0, 200.0), nodata=-9999, dtype_code=1,
+        )
+        with tempfile.NamedTemporaryFile(suffix=".hxn", delete=False) as f:
+            tmp = Path(f.name)
+        try:
+            hm.to_file(tmp)
+            hm2 = HexMap.from_file(tmp)
+            assert hm2.format == "plain"
+            assert hm2.version == 1
+            assert hm2.height == 2
+            assert hm2.width == 3
+            assert hm2.cell_size == pytest.approx(5.0)
+            assert hm2.origin == pytest.approx((100.0, 200.0))
+            assert hm2.nodata == -9999
+            assert hm2.dtype_code == 1
+            np.testing.assert_array_equal(hm2.values, vals)
+        finally:
+            tmp.unlink()
+
+    @has_habitat
+    def test_roundtrip_real_file(self):
+        """Read HabitatMap.hxn, write, read back, compare values."""
+        hm = HexMap.from_file(HABITAT_HXN)
+        with tempfile.NamedTemporaryFile(suffix=".hxn", delete=False) as f:
+            tmp = Path(f.name)
+        try:
+            hm.to_file(tmp)
+            hm2 = HexMap.from_file(tmp)
+            assert hm2.format == hm.format
+            assert hm2.version == hm.version
+            assert hm2.height == hm.height
+            assert hm2.width == hm.width
+            assert hm2.flag == hm.flag
+            assert hm2.max_val == pytest.approx(hm.max_val)
+            assert hm2.min_val == pytest.approx(hm.min_val)
+            np.testing.assert_array_equal(hm2.values, hm.values)
+        finally:
+            tmp.unlink()
+
+    def test_format_override(self):
+        """Write a patch_hexmap as plain, read back, verify format."""
+        vals = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
+        hm = HexMap(
+            format="patch_hexmap", version=1, height=2, width=2, flag=0,
+            max_val=4.0, min_val=1.0, hexzero=0.0, values=vals,
+            cell_size=1.0, origin=(0.0, 0.0), nodata=0, dtype_code=1,
+        )
+        with tempfile.NamedTemporaryFile(suffix=".hxn", delete=False) as f:
+            tmp = Path(f.name)
+        try:
+            hm.to_file(tmp, format="plain")
+            hm2 = HexMap.from_file(tmp)
+            assert hm2.format == "plain"
+            np.testing.assert_array_equal(hm2.values, vals)
+        finally:
+            tmp.unlink()
+
+
+# ===================================================================
+# Task 5 – Hex geometry methods
+# ===================================================================
+def _make_hex(height=10, width=8, edge=10.0):
+    """Helper to create a HexMap with a known _edge for geometry tests."""
+    n = height * width
+    return HexMap(
+        format="patch_hexmap", version=8, height=height, width=width, flag=0,
+        max_val=1.0, min_val=0.0, hexzero=0.0,
+        values=np.zeros(n, dtype=np.float32),
+        _edge=edge,
+    )
+
+
+class TestNeighbors:
+    """Test HexMap.neighbors (even-q flat-top)."""
+
+    def test_neighbors_even_col(self):
+        hm = _make_hex()
+        result = sorted(hm.neighbors(3, 4))
+        expected = sorted([(2, 3), (2, 4), (2, 5), (3, 3), (3, 5), (4, 4)])
+        assert result == expected
+
+    def test_neighbors_odd_col(self):
+        hm = _make_hex()
+        result = sorted(hm.neighbors(3, 5))
+        expected = sorted([(2, 5), (3, 4), (3, 6), (4, 4), (4, 5), (4, 6)])
+        assert result == expected
+
+    def test_neighbors_corner(self):
+        hm = _make_hex()
+        result = hm.neighbors(0, 0)
+        # (0,0) is even col: offsets (-1,0),(1,0),(0,-1),(0,1),(-1,-1),(-1,1)
+        # valid: (1,0), (0,1) only — (-1,*) and (*,-1) are out of bounds
+        assert len(result) <= 3
+        assert (1, 0) in result
+        assert (0, 1) in result
+
+
+class TestHexToXy:
+    """Test hex_to_xy coordinate conversion."""
+
+    def test_origin(self):
+        hm = _make_hex(edge=10.0)
+        x, y = hm.hex_to_xy(0, 0)
+        assert x == pytest.approx(0.0)
+        assert y == pytest.approx(0.0)
+
+    def test_col1(self):
+        hm = _make_hex(edge=10.0)
+        x, y = hm.hex_to_xy(0, 1)
+        assert x == pytest.approx(15.0)
+        assert y == pytest.approx(math.sqrt(3) * 5)
+
+
+class TestXyToHexRoundtrip:
+    """Test xy_to_hex round-trips with hex_to_xy for a 3x3 grid."""
+
+    def test_roundtrip_3x3(self):
+        hm = _make_hex(height=3, width=3, edge=10.0)
+        for r in range(3):
+            for c in range(3):
+                x, y = hm.hex_to_xy(r, c)
+                r2, c2 = hm.xy_to_hex(x, y)
+                assert (r2, c2) == (r, c), f"Failed for ({r},{c})"
+
+
+class TestHexDistance:
+    """Test hex_distance computations."""
+
+    def test_same_cell(self):
+        hm = _make_hex()
+        assert hm.hex_distance((3, 4), (3, 4)) == 0
+
+    def test_adjacent(self):
+        hm = _make_hex()
+        # (3,4) and (2,4) are neighbors
+        assert hm.hex_distance((3, 4), (2, 4)) == 1
+
+    def test_two_steps(self):
+        hm = _make_hex()
+        # (3,4) to (1,4): two rows straight up
+        assert hm.hex_distance((3, 4), (1, 4)) == 2
+
+
+class TestHexPolygon:
+    """Test hex_polygon returns correct vertices."""
+
+    def test_six_vertices(self):
+        hm = _make_hex(edge=10.0)
+        poly = hm.hex_polygon(0, 0)
+        assert len(poly) == 6
+
+    def test_vertices_at_edge_distance(self):
+        hm = _make_hex(edge=10.0)
+        cx, cy = hm.hex_to_xy(2, 3)
+        poly = hm.hex_polygon(2, 3)
+        for vx, vy in poly:
+            dist = math.sqrt((vx - cx) ** 2 + (vy - cy) ** 2)
+            assert dist == pytest.approx(10.0)
+
+
+class TestEffectiveEdge:
+    """Test _effective_edge priority: _edge > cell_size > 1.0."""
+
+    def test_edge_from_workspace(self):
+        hm = _make_hex(edge=10.0)
+        assert hm._effective_edge() == 10.0
+
+    def test_edge_from_cell_size(self):
+        hm = HexMap(
+            format="plain", version=1, height=2, width=2, flag=0,
+            max_val=1.0, min_val=0.0, hexzero=0.0,
+            values=np.zeros(4, dtype=np.float32),
+            cell_size=5.0,
+        )
+        assert hm._effective_edge() == 5.0
+
+    def test_edge_fallback(self):
+        hm = HexMap(
+            format="patch_hexmap", version=1, height=2, width=2, flag=0,
+            max_val=1.0, min_val=0.0, hexzero=0.0,
+            values=np.zeros(4, dtype=np.float32),
+        )
+        assert hm._effective_edge() == 1.0
