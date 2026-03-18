@@ -6,6 +6,10 @@ from salmon_ibm.events import (
     EveryStep, Once, Periodic, Window, RandomTrigger,
     Event, EventSequencer, EventGroup,
 )
+from salmon_ibm.agents import AgentPool
+from salmon_ibm.events_builtin import StageSpecificSurvivalEvent, IntroductionEvent, ReproductionEvent, FloaterCreationEvent
+from salmon_ibm.traits import TraitManager, TraitDefinition, TraitType
+from salmon_ibm.population import Population
 
 
 class TestEveryStep:
@@ -293,3 +297,130 @@ class TestLoadEventsFromConfig:
         assert events[0].trigger.should_fire(2) is True
         assert events[0].trigger.should_fire(3) is False
         assert events[0].trigger.should_fire(7) is True
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 lifecycle events
+# ---------------------------------------------------------------------------
+
+class TestStageSpecificSurvival:
+    @pytest.fixture
+    def pop_with_stages(self):
+        pool = AgentPool(n=100, start_tri=0, rng_seed=42)
+        trait_defs = [TraitDefinition("stage", TraitType.PROBABILISTIC, ["juvenile", "adult"])]
+        trait_mgr = TraitManager(100, trait_defs)
+        trait_mgr._data["stage"][:50] = 0
+        trait_mgr._data["stage"][50:] = 1
+        pop = Population("fish", pool, trait_mgr=trait_mgr)
+        return pop
+
+    def test_juvenile_high_mortality(self, pop_with_stages):
+        event = StageSpecificSurvivalEvent(name="survival", mortality_rates={"juvenile": 1.0, "adult": 0.0})
+        mask = pop_with_stages.alive.copy()
+        landscape = {"rng": np.random.default_rng(42)}
+        event.execute(pop_with_stages, landscape, t=0, mask=mask)
+        assert pop_with_stages.pool.alive[:50].sum() == 0
+        assert pop_with_stages.pool.alive[50:].sum() == 50
+
+    def test_zero_mortality_preserves_all(self, pop_with_stages):
+        event = StageSpecificSurvivalEvent(name="survival", mortality_rates={"juvenile": 0.0, "adult": 0.0})
+        mask = pop_with_stages.alive.copy()
+        landscape = {"rng": np.random.default_rng(42)}
+        event.execute(pop_with_stages, landscape, t=0, mask=mask)
+        assert pop_with_stages.n_alive == 100
+
+
+class TestIntroductionEvent:
+    def test_adds_agents(self):
+        pool = AgentPool(n=10, start_tri=0, rng_seed=42)
+        pop = Population("fish", pool)
+        event = IntroductionEvent(name="introduce", n_agents=5, positions=[3, 7])
+        landscape = {"rng": np.random.default_rng(42)}
+        event.execute(pop, landscape, t=0, mask=pop.alive.copy())
+        assert pop.n == 15
+        assert pop.n_alive == 15
+
+    def test_positions_are_set(self):
+        pool = AgentPool(n=5, start_tri=0, rng_seed=42)
+        pop = Population("fish", pool)
+        event = IntroductionEvent(name="introduce", n_agents=3, positions=[10])
+        landscape = {"rng": np.random.default_rng(42)}
+        event.execute(pop, landscape, t=0, mask=pop.alive.copy())
+        assert (pop.pool.tri_idx[5:] == 10).all()
+
+    def test_sets_initial_traits(self):
+        pool = AgentPool(n=5, start_tri=0, rng_seed=42)
+        trait_defs = [TraitDefinition("stage", TraitType.PROBABILISTIC, ["egg", "juvenile", "adult"])]
+        trait_mgr = TraitManager(5, trait_defs)
+        pop = Population("fish", pool, trait_mgr=trait_mgr)
+        event = IntroductionEvent(name="introduce", n_agents=3, positions=[0], initial_traits={"stage": "juvenile"})
+        landscape = {"rng": np.random.default_rng(42)}
+        event.execute(pop, landscape, t=0, mask=pop.alive.copy())
+        assert (pop.trait_mgr._data["stage"][5:] == 1).all()
+
+
+class TestReproductionEvent:
+    @pytest.fixture
+    def grouped_pop(self):
+        pool = AgentPool(n=10, start_tri=5, rng_seed=42)
+        trait_defs = [TraitDefinition("stage", TraitType.PROBABILISTIC, ["juvenile", "adult"])]
+        trait_mgr = TraitManager(10, trait_defs)
+        trait_mgr._data["stage"][:] = 1
+        pop = Population("fish", pool, trait_mgr=trait_mgr)
+        pop.group_id[:5] = 0
+        pop.group_id[5:] = -1
+        return pop
+
+    def test_only_grouped_reproduce(self, grouped_pop):
+        event = ReproductionEvent(name="repro", clutch_mean=2.0)
+        landscape = {"rng": np.random.default_rng(42)}
+        event.execute(grouped_pop, landscape, t=0, mask=grouped_pop.alive.copy())
+        assert grouped_pop.n > 10
+
+    def test_offspring_inherit_position(self, grouped_pop):
+        event = ReproductionEvent(name="repro", clutch_mean=1.0)
+        landscape = {"rng": np.random.default_rng(42)}
+        event.execute(grouped_pop, landscape, t=0, mask=grouped_pop.alive.copy())
+        assert (grouped_pop.pool.tri_idx[10:] == 5).all()
+
+    def test_offspring_get_trait(self, grouped_pop):
+        event = ReproductionEvent(name="repro", clutch_mean=1.0, offspring_trait_name="stage", offspring_trait_value="juvenile")
+        landscape = {"rng": np.random.default_rng(42)}
+        event.execute(grouped_pop, landscape, t=0, mask=grouped_pop.alive.copy())
+        assert (grouped_pop.trait_mgr._data["stage"][10:] == 0).all()
+
+    def test_floaters_excluded(self, grouped_pop):
+        grouped_pop.group_id[:] = -1
+        event = ReproductionEvent(name="repro", clutch_mean=5.0)
+        landscape = {"rng": np.random.default_rng(42)}
+        event.execute(grouped_pop, landscape, t=0, mask=grouped_pop.alive.copy())
+        assert grouped_pop.n == 10
+
+
+class TestFloaterCreationEvent:
+    @pytest.fixture
+    def all_grouped_pop(self):
+        pool = AgentPool(n=20, start_tri=0, rng_seed=42)
+        pop = Population("fish", pool)
+        pop.group_id[:10] = 0
+        pop.group_id[10:] = 1
+        return pop
+
+    def test_releases_some_agents(self, all_grouped_pop):
+        event = FloaterCreationEvent(name="release", probability=0.5)
+        landscape = {"rng": np.random.default_rng(42)}
+        event.execute(all_grouped_pop, landscape, t=0, mask=all_grouped_pop.alive.copy())
+        n_floaters = (all_grouped_pop.group_id == -1).sum()
+        assert 0 < n_floaters < 20
+
+    def test_probability_zero_releases_none(self, all_grouped_pop):
+        event = FloaterCreationEvent(name="release", probability=0.0)
+        landscape = {"rng": np.random.default_rng(42)}
+        event.execute(all_grouped_pop, landscape, t=0, mask=all_grouped_pop.alive.copy())
+        assert (all_grouped_pop.group_id >= 0).all()
+
+    def test_probability_one_releases_all(self, all_grouped_pop):
+        event = FloaterCreationEvent(name="release", probability=1.0)
+        landscape = {"rng": np.random.default_rng(42)}
+        event.execute(all_grouped_pop, landscape, t=0, mask=all_grouped_pop.alive.copy())
+        assert (all_grouped_pop.group_id == -1).all()

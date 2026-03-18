@@ -89,8 +89,12 @@ class EventSequencer:
     @staticmethod
     def _compute_mask(population, trait_filter: dict | None) -> np.ndarray:
         base = population.alive & ~population.arrived
-        if trait_filter is not None:
-            pass  # Future: trait-based filtering
+        if trait_filter is not None and hasattr(population, 'trait_mgr') and population.trait_mgr is not None:
+            trait_mask = population.trait_mgr.filter_by_traits(**trait_filter)
+            base = base & trait_mask
+        elif trait_filter is not None and hasattr(population, 'traits') and population.traits is not None:
+            trait_mask = population.traits.filter_by_traits(**trait_filter)
+            base = base & trait_mask
         return base
 
 

@@ -10,6 +10,7 @@ from salmon_ibm.events import Event, EveryStep, EventTrigger, register_event
 from salmon_ibm.movement import execute_movement
 from salmon_ibm.bioenergetics import BioParams, update_energy
 from salmon_ibm.estuary import salinity_cost
+from salmon_ibm.population import Population
 
 
 @register_event("movement")
@@ -91,3 +92,140 @@ class CustomEvent(Event):
 
     def execute(self, population, landscape, t, mask):
         self.callback(population, landscape, t, mask)
+
+
+@register_event("stage_survival")
+@dataclass
+class StageSpecificSurvivalEvent(Event):
+    """Trait-filtered survival with stage-specific mortality rates."""
+    trait_name: str = "stage"
+    mortality_rates: dict[str, float] = field(default_factory=dict)
+    density_dependent: bool = False
+    density_scale: float = 1.0
+
+    def execute(self, population, landscape, t, mask):
+        if not mask.any():
+            return
+        rng = landscape.get("rng", np.random.default_rng())
+        trait_mgr = getattr(population, 'trait_mgr', None) or getattr(population, 'traits', None)
+        if trait_mgr is None:
+            default_rate = self.mortality_rates.get("default", 0.0)
+            if default_rate > 0:
+                rolls = rng.random(mask.sum())
+                die_local = rolls < default_rate
+                die_indices = np.where(mask)[0][die_local]
+                population.alive[die_indices] = False
+            return
+        trait_vals = trait_mgr.get(self.trait_name)
+        defn = trait_mgr.definitions[self.trait_name]
+        alive_idx = np.where(mask)[0]
+        mort_prob = np.zeros(len(alive_idx), dtype=np.float64)
+        for cat_name, rate in self.mortality_rates.items():
+            cat_idx = defn.categories.index(cat_name)
+            cat_mask = trait_vals[alive_idx] == cat_idx
+            mort_prob[cat_mask] = rate
+        if self.density_dependent:
+            mesh = landscape.get("mesh")
+            if mesh is not None:
+                positions = population.tri_idx[alive_idx]
+                n_cells = mesh.n_cells if hasattr(mesh, 'n_cells') else mesh.n_triangles
+                cell_counts = np.bincount(positions, minlength=n_cells)
+                local_density = cell_counts[positions].astype(np.float64)
+                density_factor = 1.0 + self.density_scale * np.maximum(local_density - 1.0, 0.0)
+                mort_prob = np.minimum(mort_prob * density_factor, 1.0)
+        rolls = rng.random(len(alive_idx))
+        die_local = rolls < mort_prob
+        die_indices = alive_idx[die_local]
+        population.alive[die_indices] = False
+
+
+@register_event("introduction")
+@dataclass
+class IntroductionEvent(Event):
+    """Add new individuals to the population."""
+    n_agents: int = 10
+    positions: list[int] = field(default_factory=lambda: [0])
+    initial_mass_mean: float = 3500.0
+    initial_mass_std: float = 500.0
+    initial_ed: float = 6.5
+    initial_traits: dict[str, str] = field(default_factory=dict)
+    initial_accumulators: dict[str, float] = field(default_factory=dict)
+
+    def execute(self, population, landscape, t, mask):
+        rng = landscape.get("rng", np.random.default_rng())
+        n = self.n_agents
+        pos_arr = np.array(self.positions, dtype=int)
+        if len(pos_arr) < n:
+            pos_arr = np.tile(pos_arr, (n // len(pos_arr)) + 1)[:n]
+        mass = np.clip(
+            rng.normal(self.initial_mass_mean, self.initial_mass_std, n),
+            self.initial_mass_mean * 0.5, self.initial_mass_mean * 1.5)
+        new_idx = population.add_agents(n, pos_arr, mass_g=mass, ed_kJ_g=self.initial_ed)
+        if population.trait_mgr is not None:
+            for trait_name, cat_name in self.initial_traits.items():
+                defn = population.trait_mgr.definitions[trait_name]
+                cat_idx = defn.categories.index(cat_name)
+                population.trait_mgr._data[trait_name][new_idx] = cat_idx
+        if population.accumulator_mgr is not None:
+            for acc_name, value in self.initial_accumulators.items():
+                idx = population.accumulator_mgr.index_of(acc_name)
+                population.accumulator_mgr.data[new_idx, idx] = value
+
+
+@register_event("reproduction")
+@dataclass
+class ReproductionEvent(Event):
+    """Group-based reproduction with Poisson clutch sizes."""
+    clutch_mean: float = 4.0
+    offspring_trait_name: str = "stage"
+    offspring_trait_value: str = "juvenile"
+    min_group_size: int = 1
+    offspring_mass_mean: float = 100.0
+    offspring_mass_std: float = 20.0
+    offspring_ed: float = 6.5
+
+    def execute(self, population, landscape, t, mask):
+        rng = landscape.get("rng", np.random.default_rng())
+        can_reproduce = mask & (population.group_id >= 0)
+        if self.min_group_size > 1:
+            group_ids = population.group_id[can_reproduce]
+            unique_groups, counts = np.unique(group_ids[group_ids >= 0], return_counts=True)
+            valid_groups = set(unique_groups[counts >= self.min_group_size])
+            can_reproduce = can_reproduce & np.isin(population.group_id, list(valid_groups))
+        reproducer_idx = np.where(can_reproduce)[0]
+        if len(reproducer_idx) == 0:
+            return
+        clutch_sizes = rng.poisson(self.clutch_mean, size=len(reproducer_idx))
+        total_offspring = clutch_sizes.sum()
+        if total_offspring == 0:
+            return
+        parent_positions = population.tri_idx[reproducer_idx]
+        offspring_positions = np.repeat(parent_positions, clutch_sizes)
+        offspring_mass = np.clip(
+            rng.normal(self.offspring_mass_mean, self.offspring_mass_std, total_offspring),
+            self.offspring_mass_mean * 0.5, self.offspring_mass_mean * 1.5)
+        new_idx = population.add_agents(
+            total_offspring, offspring_positions,
+            mass_g=offspring_mass, ed_kJ_g=self.offspring_ed)
+        if population.trait_mgr is not None and self.offspring_trait_name:
+            defn = population.trait_mgr.definitions[self.offspring_trait_name]
+            cat_idx = defn.categories.index(self.offspring_trait_value)
+            population.trait_mgr._data[self.offspring_trait_name][new_idx] = cat_idx
+
+
+@register_event("floater_creation")
+@dataclass
+class FloaterCreationEvent(Event):
+    """Release agents from groups to become floaters."""
+    probability: float = 0.1
+
+    def execute(self, population, landscape, t, mask):
+        rng = landscape.get("rng", np.random.default_rng())
+        candidates = mask & (population.group_id >= 0)
+        cand_idx = np.where(candidates)[0]
+        if len(cand_idx) == 0:
+            return
+        rolls = rng.random(len(cand_idx))
+        release = rolls < self.probability
+        release_idx = cand_idx[release]
+        population.group_id[release_idx] = -1
