@@ -231,3 +231,40 @@ class FloaterCreationEvent(Event):
         release = rolls < self.probability
         release_idx = cand_idx[release]
         population.group_id[release_idx] = -1
+
+
+@register_event("census")
+@dataclass
+class CensusEvent(Event):
+    """Record population counts stratified by trait combinations.
+
+    Results are stored in landscape["census_records"] as a list of dicts.
+    Each dict has: time, trait counts, total alive, total dead.
+    """
+    trait_names: list[str] = field(default_factory=list)
+
+    def execute(self, population, landscape, t, mask):
+        record = {
+            "time": t,
+            "n_alive": int(population.alive.sum()),
+            "n_dead": int((~population.alive).sum()),
+            "n_total": population.n,
+        }
+
+        # Count by trait if trait manager exists
+        trait_mgr = getattr(population, 'trait_mgr', None) or getattr(population, 'traits', None)
+        if trait_mgr is not None and self.trait_names:
+            for trait_name in self.trait_names:
+                if trait_name in trait_mgr.definitions:
+                    defn = trait_mgr.definitions[trait_name]
+                    vals = trait_mgr.get(trait_name)
+                    alive = population.alive
+                    counts = {}
+                    for i, cat_name in enumerate(defn.categories):
+                        counts[cat_name] = int(((vals == i) & alive).sum())
+                    record[f"trait_{trait_name}"] = counts
+
+        # Append to census records in landscape
+        if "census_records" not in landscape:
+            landscape["census_records"] = []
+        landscape["census_records"].append(record)

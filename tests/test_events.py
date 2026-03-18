@@ -7,7 +7,7 @@ from salmon_ibm.events import (
     Event, EventSequencer, EventGroup,
 )
 from salmon_ibm.agents import AgentPool
-from salmon_ibm.events_builtin import StageSpecificSurvivalEvent, IntroductionEvent, ReproductionEvent, FloaterCreationEvent
+from salmon_ibm.events_builtin import StageSpecificSurvivalEvent, IntroductionEvent, ReproductionEvent, FloaterCreationEvent, CensusEvent
 from salmon_ibm.traits import TraitManager, TraitDefinition, TraitType
 from salmon_ibm.population import Population
 
@@ -424,3 +424,51 @@ class TestFloaterCreationEvent:
         landscape = {"rng": np.random.default_rng(42)}
         event.execute(all_grouped_pop, landscape, t=0, mask=all_grouped_pop.alive.copy())
         assert (all_grouped_pop.group_id == -1).all()
+
+
+class TestCensusEvent:
+    def test_records_basic_counts(self):
+        from salmon_ibm.agents import AgentPool
+        pool = AgentPool(n=20, start_tri=0, rng_seed=42)
+        pop = Population("fish", pool)
+        pop.pool.alive[15:] = False  # 15 alive, 5 dead
+
+        landscape = {}
+        event = CensusEvent(name="census")
+        mask = pop.alive.copy()
+        event.execute(pop, landscape, t=5, mask=mask)
+
+        assert len(landscape["census_records"]) == 1
+        rec = landscape["census_records"][0]
+        assert rec["time"] == 5
+        assert rec["n_alive"] == 15
+        assert rec["n_dead"] == 5
+        assert rec["n_total"] == 20
+
+    def test_records_trait_counts(self):
+        from salmon_ibm.agents import AgentPool
+        pool = AgentPool(n=10, start_tri=0, rng_seed=42)
+        trait_defs = [TraitDefinition("stage", TraitType.PROBABILISTIC, ["juv", "adult"])]
+        trait_mgr = TraitManager(10, trait_defs)
+        trait_mgr._data["stage"][:6] = 0  # 6 juvenile
+        trait_mgr._data["stage"][6:] = 1  # 4 adult
+        pop = Population("fish", pool, trait_mgr=trait_mgr)
+
+        landscape = {}
+        event = CensusEvent(name="census", trait_names=["stage"])
+        mask = pop.alive.copy()
+        event.execute(pop, landscape, t=0, mask=mask)
+
+        rec = landscape["census_records"][0]
+        assert rec["trait_stage"]["juv"] == 6
+        assert rec["trait_stage"]["adult"] == 4
+
+    def test_multiple_timesteps(self):
+        from salmon_ibm.agents import AgentPool
+        pool = AgentPool(n=10, start_tri=0, rng_seed=42)
+        pop = Population("fish", pool)
+        landscape = {}
+        event = CensusEvent(name="census")
+        for t in range(5):
+            event.execute(pop, landscape, t=t, mask=pop.alive.copy())
+        assert len(landscape["census_records"]) == 5
