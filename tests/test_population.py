@@ -1,0 +1,97 @@
+"""Unit tests for the Population class."""
+import numpy as np
+import pytest
+
+from salmon_ibm.agents import AgentPool
+from salmon_ibm.accumulators import AccumulatorManager, AccumulatorDef
+from salmon_ibm.traits import TraitManager, TraitDefinition, TraitType
+from salmon_ibm.population import Population
+
+
+@pytest.fixture
+def basic_pool():
+    return AgentPool(n=10, start_tri=0, rng_seed=42)
+
+@pytest.fixture
+def basic_pop(basic_pool):
+    return Population(name="test", pool=basic_pool)
+
+
+class TestPopulationInit:
+    def test_name_and_size(self, basic_pop):
+        assert basic_pop.name == "test"
+        assert basic_pop.n == 10
+        assert basic_pop.n_alive == 10
+
+    def test_all_start_as_floaters(self, basic_pop):
+        assert (basic_pop.group_id == -1).all()
+        assert basic_pop.floaters.sum() == 10
+        assert basic_pop.grouped.sum() == 0
+
+    def test_agent_ids_sequential(self, basic_pop):
+        np.testing.assert_array_equal(basic_pop.agent_ids, np.arange(10))
+
+    def test_with_accumulators(self, basic_pool):
+        acc_defs = [AccumulatorDef("energy", min_val=0.0)]
+        acc_mgr = AccumulatorManager(10, acc_defs)
+        pop = Population("test", basic_pool, accumulator_mgr=acc_mgr)
+        assert pop.accumulator_mgr is not None
+
+    def test_with_traits(self, basic_pool):
+        trait_defs = [TraitDefinition("stage", TraitType.PROBABILISTIC, ["juvenile", "adult"])]
+        trait_mgr = TraitManager(10, trait_defs)
+        pop = Population("test", basic_pool, trait_mgr=trait_mgr)
+        assert pop.trait_mgr is not None
+
+    def test_proxy_properties(self, basic_pop):
+        """Population proxies should reflect AgentPool state."""
+        assert len(basic_pop.behavior) == 10
+        assert len(basic_pop.ed_kJ_g) == 10
+        assert len(basic_pop.mass_g) == 10
+        assert len(basic_pop.steps) == 10
+        assert len(basic_pop.target_spawn_hour) == 10
+        assert basic_pop.t3h_mean().shape == (10,)
+
+
+class TestRemoveAgents:
+    def test_remove_marks_dead(self, basic_pop):
+        basic_pop.remove_agents(np.array([0, 3, 7]))
+        assert not basic_pop.pool.alive[0]
+        assert not basic_pop.pool.alive[3]
+        assert not basic_pop.pool.alive[7]
+        assert basic_pop.n_alive == 7
+
+    def test_compact_shrinks_arrays(self, basic_pop):
+        basic_pop.remove_agents(np.array([0, 3, 7]))
+        basic_pop.compact()
+        assert basic_pop.n == 7
+        assert basic_pop.pool.alive.all()
+        assert len(basic_pop.group_id) == 7
+        assert len(basic_pop.agent_ids) == 7
+
+
+class TestAddAgents:
+    def test_add_extends_arrays(self, basic_pop):
+        positions = np.array([5, 5, 5])
+        new_idx = basic_pop.add_agents(3, positions)
+        assert basic_pop.n == 13
+        assert basic_pop.n_alive == 13
+        np.testing.assert_array_equal(new_idx, [10, 11, 12])
+
+    def test_new_agents_get_unique_ids(self, basic_pop):
+        basic_pop.add_agents(3, np.array([0, 0, 0]))
+        assert len(np.unique(basic_pop.agent_ids)) == 13
+
+    def test_add_agents_with_accumulators(self, basic_pool):
+        acc_defs = [AccumulatorDef("energy", min_val=0.0)]
+        acc_mgr = AccumulatorManager(10, acc_defs)
+        pop = Population("test", basic_pool, accumulator_mgr=acc_mgr)
+        pop.add_agents(5, np.zeros(5, dtype=int))
+        assert pop.accumulator_mgr.data.shape == (15, 1)
+
+    def test_add_then_compact_roundtrip(self, basic_pop):
+        basic_pop.add_agents(5, np.zeros(5, dtype=int))
+        basic_pop.remove_agents(np.array([0, 1, 2]))
+        basic_pop.compact()
+        assert basic_pop.n == 12
+        assert basic_pop.pool.alive.all()
