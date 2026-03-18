@@ -300,3 +300,92 @@ class TestAgentPoolIntegration:
         pool.accumulators.set("energy", np.array([10.0, 40.0, 80.0, 70.0]))
         pool.traits.evaluate_accumulated("condition", pool.accumulators)
         np.testing.assert_array_equal(pool.traits.get("condition"), [0, 1, 2, 2])
+
+
+from salmon_ibm.accumulators import (
+    updater_accumulator_transfer, updater_group_size, updater_group_sum,
+    updater_hexagon_presence, updater_uptake, updater_individual_locations,
+    updater_subpopulation_assign, updater_trait_value_index, updater_data_lookup,
+)
+
+
+class TestRemainingUpdaters:
+    def test_accumulator_transfer(self):
+        defs = [AccumulatorDef("src"), AccumulatorDef("tgt")]
+        mgr = AccumulatorManager(3, defs)
+        mgr.set("src", np.array([10.0, 20.0, 30.0]))
+        mask = np.ones(3, dtype=bool)
+        updater_accumulator_transfer(mgr, "src", "tgt", mask, fraction=0.5)
+        np.testing.assert_array_almost_equal(mgr.get("src"), [5.0, 10.0, 15.0])
+        np.testing.assert_array_almost_equal(mgr.get("tgt"), [5.0, 10.0, 15.0])
+
+    def test_group_size(self):
+        defs = [AccumulatorDef("gsize")]
+        mgr = AccumulatorManager(6, defs)
+        mask = np.ones(6, dtype=bool)
+        group_ids = np.array([0, 0, 0, 1, 1, -1], dtype=np.int32)
+        updater_group_size(mgr, "gsize", mask, group_ids=group_ids)
+        np.testing.assert_array_equal(mgr.get("gsize"), [3.0, 3.0, 3.0, 2.0, 2.0, 0.0])
+
+    def test_group_sum(self):
+        defs = [AccumulatorDef("energy"), AccumulatorDef("group_energy")]
+        mgr = AccumulatorManager(4, defs)
+        mgr.set("energy", np.array([10.0, 20.0, 30.0, 40.0]))
+        mask = np.ones(4, dtype=bool)
+        group_ids = np.array([0, 0, 1, 1], dtype=np.int32)
+        updater_group_sum(mgr, "group_energy", "energy", mask, group_ids=group_ids)
+        np.testing.assert_array_equal(mgr.get("group_energy"), [30.0, 30.0, 70.0, 70.0])
+
+    def test_hexagon_presence(self):
+        defs = [AccumulatorDef("present")]
+        mgr = AccumulatorManager(3, defs)
+        mask = np.ones(3, dtype=bool)
+        hex_map = np.array([0.5, 1.5, 0.0, 2.0])
+        cells = np.array([0, 1, 2])
+        updater_hexagon_presence(mgr, "present", mask, hex_map=hex_map, cell_indices=cells, threshold=1.0)
+        np.testing.assert_array_equal(mgr.get("present"), [0.0, 1.0, 0.0])
+
+    def test_uptake_depletes_map(self):
+        defs = [AccumulatorDef("food")]
+        mgr = AccumulatorManager(2, defs)
+        mask = np.ones(2, dtype=bool)
+        hex_map = np.array([10.0, 20.0, 30.0])
+        cells = np.array([0, 2])
+        updater_uptake(mgr, "food", mask, hex_map=hex_map, cell_indices=cells, rate=0.5)
+        np.testing.assert_array_almost_equal(mgr.get("food"), [5.0, 15.0])
+        np.testing.assert_array_almost_equal(hex_map, [5.0, 20.0, 15.0])
+
+    def test_individual_locations(self):
+        defs = [AccumulatorDef("loc")]
+        mgr = AccumulatorManager(3, defs)
+        mask = np.ones(3, dtype=bool)
+        cells = np.array([7, 12, 3])
+        updater_individual_locations(mgr, "loc", mask, cell_indices=cells)
+        np.testing.assert_array_equal(mgr.get("loc"), [7.0, 12.0, 3.0])
+
+    def test_subpopulation_assign(self):
+        defs = [AccumulatorDef("selected")]
+        mgr = AccumulatorManager(10, defs)
+        mask = np.ones(10, dtype=bool)
+        updater_subpopulation_assign(mgr, "selected", mask, n_select=3, value=1.0, rng=np.random.default_rng(42))
+        assert (mgr.get("selected") == 1.0).sum() == 3
+
+    def test_trait_value_index(self):
+        from salmon_ibm.traits import TraitManager, TraitDefinition, TraitType
+        defs = [AccumulatorDef("stage_val")]
+        mgr = AccumulatorManager(4, defs)
+        trait_defs = [TraitDefinition("stage", TraitType.PROBABILISTIC, ["juv", "adult"])]
+        tmgr = TraitManager(4, trait_defs)
+        tmgr._data["stage"] = np.array([0, 1, 1, 0], dtype=np.int32)
+        mask = np.ones(4, dtype=bool)
+        updater_trait_value_index(mgr, "stage_val", mask, trait_mgr=tmgr, trait_name="stage")
+        np.testing.assert_array_equal(mgr.get("stage_val"), [0.0, 1.0, 1.0, 0.0])
+
+    def test_data_lookup(self):
+        defs = [AccumulatorDef("key"), AccumulatorDef("result")]
+        mgr = AccumulatorManager(3, defs)
+        mgr.set("key", np.array([0.0, 2.0, 1.0]))
+        lookup = np.array([100.0, 200.0, 300.0])
+        mask = np.ones(3, dtype=bool)
+        updater_data_lookup(mgr, "result", mask, lookup_table=lookup, key_acc_name="key")
+        np.testing.assert_array_equal(mgr.get("result"), [100.0, 300.0, 200.0])
