@@ -67,6 +67,13 @@ class Simulation:
     # ------------------------------------------------------------------
 
     def _build_events(self):
+        """Build event sequence from config or use default salmon sequence."""
+        event_defs = self.config.get("events")
+        if event_defs is not None:
+            from salmon_ibm.events import load_events_from_config
+            return load_events_from_config(event_defs, self._build_callback_registry())
+
+        # Default: hardcoded salmon migration sequence
         return [
             CustomEvent(name="push_temperature", callback=self._event_push_temperature),
             CustomEvent(name="behavior_selection", callback=self._event_behavior_selection),
@@ -77,6 +84,18 @@ class Simulation:
             CustomEvent(name="bioenergetics", callback=self._event_bioenergetics),
             CustomEvent(name="logging", callback=self._event_logging),
         ]
+
+    def _build_callback_registry(self):
+        """Map custom event names to their callback methods."""
+        return {
+            "push_temperature": self._event_push_temperature,
+            "behavior_selection": self._event_behavior_selection,
+            "estuarine_overrides": self._event_estuarine_overrides,
+            "update_cwr_counters": self._event_update_cwr_counters,
+            "update_timers": self._event_update_timers,
+            "bioenergetics": self._event_bioenergetics,
+            "logging": self._event_logging,
+        }
 
     # ------------------------------------------------------------------
     # Event callbacks

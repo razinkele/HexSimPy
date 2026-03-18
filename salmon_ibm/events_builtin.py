@@ -6,12 +6,13 @@ from typing import Callable
 
 import numpy as np
 
-from salmon_ibm.events import Event, EveryStep, EventTrigger
+from salmon_ibm.events import Event, EveryStep, EventTrigger, register_event
 from salmon_ibm.movement import execute_movement
 from salmon_ibm.bioenergetics import BioParams, update_energy
 from salmon_ibm.estuary import salinity_cost
 
 
+@register_event("movement")
 @dataclass
 class MovementEvent(Event):
     """Wraps execute_movement() as an event."""
@@ -30,6 +31,7 @@ class MovementEvent(Event):
         )
 
 
+@register_event("survival")
 @dataclass
 class SurvivalEvent(Event):
     """Bioenergetics energy update + thermal/starvation mortality."""
@@ -71,6 +73,7 @@ class SurvivalEvent(Event):
             population.alive[thermal_kill] = False
 
 
+@register_event("accumulate")
 @dataclass
 class AccumulateEvent(Event):
     """Runs updater functions that modify agent state."""

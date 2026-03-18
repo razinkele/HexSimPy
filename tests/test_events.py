@@ -251,3 +251,45 @@ class TestCustomEvent:
         event = CustomEvent(name="custom", callback=capture)
         event.execute(pop, {}, t=0, mask=mask)
         assert received[0].sum() == 7
+
+
+# ---------------------------------------------------------------------------
+# YAML event loading
+# ---------------------------------------------------------------------------
+
+from salmon_ibm.events import load_events_from_config, EVENT_REGISTRY
+
+
+class TestLoadEventsFromConfig:
+    def test_loads_custom_event(self):
+        calls = []
+        def my_cb(pop, land, t, mask): calls.append(t)
+        defs = [{"type": "custom", "name": "my_cb"}]
+        events = load_events_from_config(defs, {"my_cb": my_cb})
+        assert len(events) == 1
+        assert events[0].name == "my_cb"
+
+    def test_loads_movement_event(self):
+        # Ensure events_builtin is imported so register_event runs
+        import salmon_ibm.events_builtin  # noqa: F401
+        defs = [{"type": "movement", "name": "move", "params": {"n_micro_steps": 5}}]
+        events = load_events_from_config(defs)
+        assert len(events) == 1
+        assert events[0].n_micro_steps == 5
+
+    def test_unknown_type_raises(self):
+        defs = [{"type": "nonexistent", "name": "bad"}]
+        with pytest.raises(ValueError, match="Unknown event type"):
+            load_events_from_config(defs)
+
+    def test_missing_custom_callback_raises(self):
+        defs = [{"type": "custom", "name": "missing"}]
+        with pytest.raises(ValueError, match="No callback registered"):
+            load_events_from_config(defs, {})
+
+    def test_trigger_parsing(self):
+        defs = [{"type": "custom", "name": "x", "trigger": {"type": "periodic", "interval": 5, "offset": 2}}]
+        events = load_events_from_config(defs, {"x": lambda *a: None})
+        assert events[0].trigger.should_fire(2) is True
+        assert events[0].trigger.should_fire(3) is False
+        assert events[0].trigger.should_fire(7) is True
