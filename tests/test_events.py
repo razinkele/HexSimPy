@@ -155,3 +155,99 @@ class TestEventGroup:
         for t in range(5):
             seq.step(FakePopulation(), {}, t)
         assert len(sub.calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Built-in event types
+# ---------------------------------------------------------------------------
+
+from salmon_ibm.events_builtin import MovementEvent, SurvivalEvent, AccumulateEvent, CustomEvent
+from salmon_ibm.bioenergetics import BioParams
+
+
+class TestMovementEvent:
+    def test_calls_execute_movement(self, mocker):
+        mock_move = mocker.patch("salmon_ibm.events_builtin.execute_movement")
+        rng = np.random.default_rng(42)
+        pop = FakePopulation(n=5)
+        landscape = {"mesh": object(), "fields": {}, "rng": rng}
+        mask = np.ones(5, dtype=bool)
+        event = MovementEvent(name="movement", n_micro_steps=3, cwr_threshold=16.0)
+        event.execute(pop, landscape, t=0, mask=mask)
+        mock_move.assert_called_once()
+
+
+class TestSurvivalEvent:
+    def _make_landscape(self, n_cells=20, temperature=15.0):
+        fields = {"temperature": np.full(n_cells, temperature)}
+        activity_lut = np.ones(5)
+        return {"fields": fields, "activity_lut": activity_lut, "est_cfg": {}}
+
+    def test_thermal_mortality(self):
+        pop = FakePopulation(n=5)
+        pop.tri_idx = np.zeros(5, dtype=int)
+        pop.ed_kJ_g = np.full(5, 6.5)
+        pop.mass_g = np.full(5, 3500.0)
+        pop.behavior = np.zeros(5, dtype=int)
+        bio = BioParams(T_MAX=20.0)
+        landscape = self._make_landscape(temperature=25.0)
+        mask = pop.alive & ~pop.arrived
+        event = SurvivalEvent(name="survival", bio_params=bio)
+        event.execute(pop, landscape, t=0, mask=mask)
+        assert not pop.alive.any(), "All agents should die at temp > T_MAX"
+
+    def test_no_mortality_at_safe_temp(self):
+        pop = FakePopulation(n=5)
+        pop.tri_idx = np.zeros(5, dtype=int)
+        pop.ed_kJ_g = np.full(5, 6.5)
+        pop.mass_g = np.full(5, 3500.0)
+        pop.behavior = np.zeros(5, dtype=int)
+        bio = BioParams(T_MAX=26.0)
+        landscape = self._make_landscape(temperature=10.0)
+        mask = pop.alive & ~pop.arrived
+        event = SurvivalEvent(name="survival", bio_params=bio)
+        event.execute(pop, landscape, t=0, mask=mask)
+        assert pop.alive.all(), "All agents should survive at safe temperature"
+
+
+class TestAccumulateEvent:
+    def test_runs_updaters_in_order(self):
+        call_log = []
+        def updater_a(pop, land, t, mask): call_log.append("a")
+        def updater_b(pop, land, t, mask): call_log.append("b")
+        event = AccumulateEvent(name="acc", updaters=[updater_a, updater_b])
+        pop = FakePopulation()
+        mask = pop.alive & ~pop.arrived
+        event.execute(pop, {}, t=0, mask=mask)
+        assert call_log == ["a", "b"]
+
+    def test_updater_modifies_population(self):
+        def increment_steps(pop, land, t, mask):
+            pop.steps = getattr(pop, "steps", 0) + 1
+        event = AccumulateEvent(name="acc", updaters=[increment_steps])
+        pop = FakePopulation()
+        pop.steps = 0
+        mask = pop.alive & ~pop.arrived
+        event.execute(pop, {}, t=0, mask=mask)
+        assert pop.steps == 1
+
+
+class TestCustomEvent:
+    def test_calls_callback(self):
+        calls = []
+        def my_callback(pop, land, t, mask): calls.append(t)
+        event = CustomEvent(name="custom", callback=my_callback)
+        pop = FakePopulation()
+        mask = pop.alive & ~pop.arrived
+        event.execute(pop, {}, t=7, mask=mask)
+        assert calls == [7]
+
+    def test_callback_receives_correct_mask(self):
+        received = []
+        def capture(pop, land, t, mask): received.append(mask.copy())
+        pop = FakePopulation(n=10)
+        pop.alive[0:3] = False
+        mask = pop.alive & ~pop.arrived
+        event = CustomEvent(name="custom", callback=capture)
+        event.execute(pop, {}, t=0, mask=mask)
+        assert received[0].sum() == 7
