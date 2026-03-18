@@ -472,3 +472,35 @@ class TestCensusEvent:
         for t in range(5):
             event.execute(pop, landscape, t=t, mask=pop.alive.copy())
         assert len(landscape["census_records"]) == 5
+
+
+class TestReproductionWithGenetics:
+    def test_offspring_get_genotypes(self):
+        from salmon_ibm.agents import AgentPool
+        from salmon_ibm.genetics import LocusDefinition, GenomeManager
+
+        pool = AgentPool(n=10, start_tri=5, rng_seed=42)
+        trait_defs = [TraitDefinition("stage", TraitType.PROBABILISTIC, ["juv", "adult"])]
+        trait_mgr = TraitManager(10, trait_defs)
+        trait_mgr._data["stage"][:] = 1  # all adults
+
+        loci = [LocusDefinition("color", n_alleles=4, position=0.0)]
+        genome = GenomeManager(n_agents=10, loci=loci, rng_seed=42)
+        genome.initialize_random()
+
+        pop = Population("fish", pool, trait_mgr=trait_mgr, genome=genome)
+        pop.group_id[:5] = 0  # first 5 grouped
+
+        event = ReproductionEvent(
+            name="repro", clutch_mean=1.0,
+            offspring_trait_name="stage", offspring_trait_value="juv",
+        )
+        landscape = {"rng": np.random.default_rng(42)}
+        event.execute(pop, landscape, t=0, mask=pop.alive.copy())
+
+        # Offspring should have non-zero genotypes (from recombination)
+        n_offspring = pop.n - 10
+        assert n_offspring > 0
+        offspring_geno = pop.genome.genotypes[10:]
+        # At least some alleles should be non-zero (inherited from parents)
+        assert offspring_geno.sum() > 0

@@ -214,6 +214,14 @@ class ReproductionEvent(Event):
             cat_idx = defn.categories.index(self.offspring_trait_value)
             population.trait_mgr._data[self.offspring_trait_name][new_idx] = cat_idx
 
+        # Genetic recombination: offspring inherit from parents
+        if population.genome is not None:
+            parent1_idx = np.repeat(reproducer_idx, clutch_sizes)
+            # Simple model: self-fertilization (same parent for both gametes)
+            # For sexual reproduction, pair selection should be added later
+            parent2_idx = parent1_idx.copy()
+            population.genome.recombine(parent1_idx, parent2_idx, new_idx)
+
 
 @register_event("floater_creation")
 @dataclass
