@@ -19,6 +19,7 @@ class Population:
     accumulator_mgr: AccumulatorManager | None = None
     trait_mgr: TraitManager | None = None
     genome: Any = None  # GenomeManager | None (Phase 3)
+    ranges: Any = None  # RangeAllocator | None (Phase 4)
 
     group_id: np.ndarray = field(init=False)
     _next_id: int = field(init=False, default=0)

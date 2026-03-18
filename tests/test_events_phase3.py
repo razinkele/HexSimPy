@@ -72,3 +72,45 @@ class TestSetAffinityEvent:
         event = SetAffinityEvent(name="test", affinity_type="spatial", strength=1.0)
         mask = np.ones(3, dtype=bool)
         event.execute(pop, {}, t=0, mask=mask)
+
+
+class TestPlantDynamicsEvent:
+    def test_produces_seedlings(self):
+        from salmon_ibm.events_phase3 import PlantDynamicsEvent
+        from salmon_ibm.population import Population
+        from salmon_ibm.agents import AgentPool
+
+        pool = AgentPool(n=5, start_tri=np.array([0, 1, 2, 3, 4]), rng_seed=42)
+        pop = Population("plants", pool)
+
+        # Simple mesh mock
+        class SimpleMesh:
+            n_cells = 10
+            n_triangles = 10
+            _water_nbrs = np.full((10, 6), -1, dtype=np.intp)
+            _water_nbr_count = np.zeros(10, dtype=np.intp)
+        for i in range(10):
+            k = 0
+            if i > 0:
+                SimpleMesh._water_nbrs[i, k] = i - 1; k += 1
+            if i < 9:
+                SimpleMesh._water_nbrs[i, k] = i + 1; k += 1
+            SimpleMesh._water_nbr_count[i] = k
+
+        landscape = {
+            "rng": np.random.default_rng(42),
+            "mesh": SimpleMesh(),
+            "resources": np.ones(10) * 2.0,
+        }
+        event = PlantDynamicsEvent(name="plant", seed_production_rate=3.0)
+        mask = pop.alive.copy()
+        n_before = pop.n
+        event.execute(pop, landscape, t=0, mask=mask)
+        assert pop.n > n_before, "Seedlings should have been created"
+
+    def test_no_crash_without_mesh(self):
+        from salmon_ibm.events_phase3 import PlantDynamicsEvent
+        pop = MockPopulation(3)
+        landscape = {"rng": np.random.default_rng(42)}
+        event = PlantDynamicsEvent(name="plant")
+        event.execute(pop, landscape, t=0, mask=np.ones(3, dtype=bool))
