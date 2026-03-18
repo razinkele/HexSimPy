@@ -97,3 +97,18 @@ def validate_config(cfg: dict) -> None:
                 raise ValueError(
                     f"bioenergetics.T_MAX ({t_max}) must be > T_OPT ({t_opt})"
                 )
+
+
+def population_config_from_yaml(cfg: dict) -> dict:
+    """Extract population configuration from YAML."""
+    return cfg.get("population", {})
+
+
+def barrier_config_from_yaml(cfg: dict) -> dict | None:
+    """Extract barrier configuration. Returns None if no barriers configured."""
+    return cfg.get("barriers")
+
+
+def genetics_config_from_yaml(cfg: dict) -> dict | None:
+    """Extract genetics configuration. Returns None if no genetics configured."""
+    return cfg.get("genetics")

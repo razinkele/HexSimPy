@@ -76,3 +76,33 @@ def test_validate_config_invalid_bio():
     cfg = {"grid": {"file": "test.nc"}, "bioenergetics": {"RA": 0}}
     with pytest.raises(ValueError, match="RA"):
         validate_config(cfg)
+
+
+from salmon_ibm.config import population_config_from_yaml, barrier_config_from_yaml, genetics_config_from_yaml
+
+
+def test_population_config_default():
+    cfg = {"grid": {"type": "netcdf", "file": "test.nc"}}
+    assert population_config_from_yaml(cfg) == {}
+
+
+def test_barrier_config_absent():
+    cfg = {"grid": {"type": "hexsim"}}
+    assert barrier_config_from_yaml(cfg) is None
+
+
+def test_barrier_config_present():
+    cfg = {"grid": {"type": "hexsim"}, "barriers": {"file": "test.hbf"}}
+    result = barrier_config_from_yaml(cfg)
+    assert result["file"] == "test.hbf"
+
+
+def test_genetics_config_absent():
+    cfg = {"grid": {"type": "hexsim"}}
+    assert genetics_config_from_yaml(cfg) is None
+
+
+def test_genetics_config_present():
+    cfg = {"grid": {"type": "hexsim"}, "genetics": {"loci": [{"name": "color", "n_alleles": 4}]}}
+    result = genetics_config_from_yaml(cfg)
+    assert len(result["loci"]) == 1

@@ -52,6 +52,17 @@ class Simulation:
         self.pool = AgentPool(n=n_agents, start_tri=start_tris, rng_seed=rng_seed)
         self.population = Population(name="salmon", pool=self.pool)
 
+        # Load barriers if configured
+        barrier_cfg = self.config.get("barriers")
+        self._barrier_arrays = None
+        if barrier_cfg and grid_type == "hexsim":
+            from salmon_ibm.barriers import BarrierMap
+            hbf_path = barrier_cfg.get("file")
+            if hbf_path:
+                bmap = BarrierMap.from_hbf(hbf_path, self.mesh)
+                if bmap.has_barriers():
+                    self._barrier_arrays = bmap.to_arrays(self.mesh)
+
         self.beh_params = behavior_params_from_config(config)
         self.bio_params = bio_params_from_config(config)
         self._activity_lut = self._build_activity_lut()
@@ -184,6 +195,7 @@ class Simulation:
             "rng": self._rng,
             "activity_lut": self._activity_lut,
             "est_cfg": self.est_cfg,
+            "barrier_arrays": self._barrier_arrays,
         }
         self._sequencer.step(self.population, landscape, t)
         self.current_t += 1
