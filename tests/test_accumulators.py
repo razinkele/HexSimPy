@@ -251,3 +251,52 @@ class TestQuantifyLocationUpdater:
         agent_cells = np.array([0, 2, 4])
         updater_quantify_location(mgr, "depth", mask, hex_map=hex_map, cell_indices=agent_cells)
         np.testing.assert_array_equal(mgr.get("depth"), [5.0, 0.0, 25.0])
+
+
+from salmon_ibm.agents import AgentPool
+from salmon_ibm.traits import TraitType, TraitDefinition, TraitManager
+
+
+class TestAgentPoolIntegration:
+    def test_pool_has_no_accumulators_by_default(self):
+        pool = AgentPool(n=5, start_tri=0)
+        assert pool.accumulators is None
+        assert pool.traits is None
+
+    def test_pool_with_accumulators(self):
+        pool = AgentPool(n=5, start_tri=0)
+        defs = [AccumulatorDef(name="energy", min_val=0.0)]
+        pool.accumulators = AccumulatorManager(n_agents=5, definitions=defs)
+        pool.accumulators.set("energy", np.array([1.0, 2.0, 3.0, 4.0, 5.0]))
+        np.testing.assert_array_equal(pool.accumulators.get("energy"), [1.0, 2.0, 3.0, 4.0, 5.0])
+
+    def test_pool_with_traits(self):
+        pool = AgentPool(n=4, start_tri=0)
+        td = TraitDefinition(name="stage", trait_type=TraitType.PROBABILISTIC, categories=["juv", "adult"])
+        pool.traits = TraitManager(n_agents=4, definitions=[td])
+        pool.traits.set("stage", np.array([0, 1, 1, 0], dtype=np.int32))
+        np.testing.assert_array_equal(pool.traits.get("stage"), [0, 1, 1, 0])
+
+    def test_updater_with_pool_cell_indices(self):
+        from salmon_ibm.accumulators import updater_quantify_location
+        pool = AgentPool(n=3, start_tri=np.array([0, 5, 9]))
+        defs = [AccumulatorDef(name="depth")]
+        pool.accumulators = AccumulatorManager(n_agents=3, definitions=defs)
+        hex_map = np.arange(10, dtype=np.float64) * 10.0
+        mask = np.ones(3, dtype=bool)
+        updater_quantify_location(pool.accumulators, "depth", mask, hex_map=hex_map, cell_indices=pool.tri_idx)
+        np.testing.assert_array_equal(pool.accumulators.get("depth"), [0.0, 50.0, 90.0])
+
+    def test_accumulated_trait_with_pool(self):
+        pool = AgentPool(n=4, start_tri=0)
+        acc_defs = [AccumulatorDef(name="energy", linked_trait="condition")]
+        pool.accumulators = AccumulatorManager(n_agents=4, definitions=acc_defs)
+        trait_def = TraitDefinition(
+            name="condition", trait_type=TraitType.ACCUMULATED,
+            categories=["low", "medium", "high"],
+            accumulator_name="energy", thresholds=np.array([30.0, 70.0]),
+        )
+        pool.traits = TraitManager(n_agents=4, definitions=[trait_def])
+        pool.accumulators.set("energy", np.array([10.0, 40.0, 80.0, 70.0]))
+        pool.traits.evaluate_accumulated("condition", pool.accumulators)
+        np.testing.assert_array_equal(pool.traits.get("condition"), [0, 1, 2, 2])

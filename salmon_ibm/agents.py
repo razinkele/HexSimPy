@@ -50,6 +50,10 @@ class AgentPool:
         self.arrived = np.zeros(n, dtype=bool)
         self.temp_history = np.full((n, 3), 15.0)
 
+        # Optional general-purpose state (Phase 1a)
+        self.accumulators = None  # AccumulatorManager | None
+        self.traits = None        # TraitManager | None
+
     def get_agent(self, idx: int) -> "FishAgent":
         return FishAgent(self, idx)
 
