@@ -333,3 +333,38 @@ def _apply_current_advection_vec(pool, mesh, fields, alive_mask, rng):
         update = has_nbrs & drift
 
         pool.tri_idx[mov_idx[update]] = best_nbr[update]
+
+
+def _resolve_barriers_vec(current, proposed, barrier_mort, barrier_defl,
+                          barrier_trans, neighbors, rng):
+    """Resolve barrier outcomes for a batch of proposed moves."""
+    n = len(current)
+    final = proposed.copy()
+    died = np.zeros(n, dtype=bool)
+
+    moving = current != proposed
+    if not moving.any():
+        return final, died
+
+    nbr_matrix = neighbors[current]
+    match = (nbr_matrix == proposed[:, np.newaxis])
+    has_match = match.any(axis=1) & moving
+
+    if not has_match.any():
+        return final, died
+
+    slot = np.argmax(match, axis=1)
+    p_mort = barrier_mort[current, slot]
+    p_defl = barrier_defl[current, slot]
+
+    has_barrier = has_match & ((p_mort > 0) | (p_defl > 0))
+    if not has_barrier.any():
+        return final, died
+
+    rolls = rng.random(n)
+    kill = has_barrier & (rolls < p_mort)
+    died[kill] = True
+    deflect = has_barrier & ~kill & (rolls < p_mort + p_defl)
+    final[deflect] = current[deflect]
+
+    return final, died
