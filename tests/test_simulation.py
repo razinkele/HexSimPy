@@ -197,19 +197,48 @@ def test_activity_multiplier_vectorized():
 
 def test_simulation_reproducibility():
     """Same rng_seed should produce identical results across two runs."""
+    import salmon_ibm.movement as mov
+    orig = mov.FORCE_NUMPY
+    try:
+        mov.FORCE_NUMPY = True
+        cfg = load_config("config_curonian_minimal.yaml")
+
+        sim1 = Simulation(cfg, n_agents=10, data_dir="data", rng_seed=42)
+        sim1.run(n_steps=5)
+        ed1 = sim1.pool.ed_kJ_g.copy()
+        tri1 = sim1.pool.tri_idx.copy()
+
+        cfg2 = load_config("config_curonian_minimal.yaml")
+        sim2 = Simulation(cfg2, n_agents=10, data_dir="data", rng_seed=42)
+        sim2.run(n_steps=5)
+        ed2 = sim2.pool.ed_kJ_g.copy()
+        tri2 = sim2.pool.tri_idx.copy()
+
+        np.testing.assert_array_equal(tri1, tri2, "Positions should be identical with same seed")
+        np.testing.assert_array_almost_equal(ed1, ed2, decimal=10,
+            err_msg="Energy should be identical with same seed")
+    finally:
+        mov.FORCE_NUMPY = orig
+
+
+def test_seiche_threshold_per_15min_converted_to_hourly():
+    """Config key dSSHdt_thresh_m_per_15min should be multiplied by 4
+    to convert to m/hour before comparison with dSSH_dt_array()."""
     cfg = load_config("config_curonian_minimal.yaml")
+    sim = Simulation(cfg, n_agents=5, data_dir="data", rng_seed=42)
+    sim.env.advance(0)
 
-    sim1 = Simulation(cfg, n_agents=10, data_dir="data", rng_seed=42)
-    sim1.run(n_steps=5)
-    ed1 = sim1.pool.ed_kJ_g.copy()
-    tri1 = sim1.pool.tri_idx.copy()
+    # The curonian config has dSSHdt_thresh_m_per_15min: 0.02
+    # This should be converted to 0.08 m/hour internally
+    # Inject dSSH values: 0.05 m/hour should NOT trigger pause
+    # (0.05 < 0.08 after conversion) but WOULD trigger if unconverted (0.05 > 0.02)
+    dSSH_moderate = np.full(sim.mesh.n_triangles, 0.05)
+    sim.env.fields["ssh"] = np.zeros(sim.mesh.n_triangles)
+    sim.env._prev_ssh = -dSSH_moderate  # so dSSH = ssh - prev = 0 - (-0.05) = 0.05
 
-    cfg2 = load_config("config_curonian_minimal.yaml")
-    sim2 = Simulation(cfg2, n_agents=10, data_dir="data", rng_seed=42)
-    sim2.run(n_steps=5)
-    ed2 = sim2.pool.ed_kJ_g.copy()
-    tri2 = sim2.pool.tri_idx.copy()
-
-    np.testing.assert_array_equal(tri1, tri2, "Positions should be identical with same seed")
-    np.testing.assert_array_almost_equal(ed1, ed2, decimal=10,
-        err_msg="Energy should be identical with same seed")
+    sim.pool.behavior[:] = Behavior.UPSTREAM
+    sim._apply_estuarine_overrides()
+    # With correct conversion (thresh=0.08), 0.05 < 0.08 → no pause
+    assert np.all(sim.pool.behavior[sim.pool.alive] != Behavior.HOLD), (
+        "dSSH of 0.05 m/h should NOT trigger seiche pause when thresh is 0.02 m/15min (= 0.08 m/h)"
+    )

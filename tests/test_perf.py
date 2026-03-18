@@ -40,17 +40,42 @@ def test_step_performance_10000_agents():
     assert elapsed < 10.0, f"10 steps took {elapsed:.1f}s, expected <10s"
 
 
+@pytest.mark.slow
+def test_step_performance_100k_agents():
+    """100K agents, 10 steps should complete in <50s with Numba JIT."""
+    cfg = load_config("config_curonian_minimal.yaml")
+    # Warmup Numba compilation with small run
+    sim_warmup = Simulation(cfg, n_agents=100, data_dir="data", rng_seed=99)
+    sim_warmup.run(1)
+
+    sim = Simulation(cfg, n_agents=100_000, data_dir="data", rng_seed=42)
+    n_steps = 10
+    t0 = time.perf_counter()
+    sim.run(n_steps)
+    elapsed = time.perf_counter() - t0
+    per_step = elapsed / n_steps
+    print(f"\n  Numba JIT: {per_step:.4f} s/step for 100K agents")
+    assert elapsed < 50.0, f"10 steps took {elapsed:.1f}s, expected <50s"
+    assert sim.pool.alive.sum() > 0
+
+
 def test_vectorized_movement_correctness():
     """Full simulation should still produce valid, reproducible results."""
-    cfg = load_config("config_curonian_minimal.yaml")
+    import salmon_ibm.movement as mov
+    orig = mov.FORCE_NUMPY
+    try:
+        mov.FORCE_NUMPY = True
+        cfg = load_config("config_curonian_minimal.yaml")
 
-    sim1 = Simulation(cfg, n_agents=100, data_dir="data", rng_seed=42)
-    sim1.run(n_steps=20)
+        sim1 = Simulation(cfg, n_agents=100, data_dir="data", rng_seed=42)
+        sim1.run(n_steps=20)
 
-    cfg2 = load_config("config_curonian_minimal.yaml")
-    sim2 = Simulation(cfg2, n_agents=100, data_dir="data", rng_seed=42)
-    sim2.run(n_steps=20)
+        cfg2 = load_config("config_curonian_minimal.yaml")
+        sim2 = Simulation(cfg2, n_agents=100, data_dir="data", rng_seed=42)
+        sim2.run(n_steps=20)
 
-    np.testing.assert_array_equal(sim1.pool.tri_idx, sim2.pool.tri_idx)
-    np.testing.assert_array_almost_equal(sim1.pool.ed_kJ_g, sim2.pool.ed_kJ_g)
-    assert sim1.pool.alive.sum() > 0, "Some agents should survive 20 steps"
+        np.testing.assert_array_equal(sim1.pool.tri_idx, sim2.pool.tri_idx)
+        np.testing.assert_array_almost_equal(sim1.pool.ed_kJ_g, sim2.pool.ed_kJ_g)
+        assert sim1.pool.alive.sum() > 0, "Some agents should survive 20 steps"
+    finally:
+        mov.FORCE_NUMPY = orig

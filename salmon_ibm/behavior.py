@@ -4,6 +4,19 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import numpy as np
 
+try:
+    from numba import njit, prange
+    HAS_NUMBA = True
+except ImportError:
+    HAS_NUMBA = False
+    def njit(*args, **kwargs):
+        def decorator(func):
+            return func
+        if len(args) == 1 and callable(args[0]):
+            return args[0]
+        return decorator
+    prange = range
+
 from salmon_ibm.agents import Behavior
 
 
@@ -38,6 +51,25 @@ class BehaviorParams:
         return cls(p_table=p)
 
 
+@njit(cache=True, parallel=True)
+def _pick_behaviors_numba(temp_idx, time_idx, p_table, rand_vals):
+    n = len(temp_idx)
+    behaviors = np.empty(n, dtype=np.int32)
+    for i in prange(n):
+        ti = time_idx[i]
+        te = temp_idx[i]
+        r = rand_vals[i]
+        cumsum = 0.0
+        chosen = 4
+        for b in range(5):
+            cumsum += p_table[ti, te, b]
+            if r < cumsum:
+                chosen = b
+                break
+        behaviors[i] = chosen
+    return behaviors
+
+
 def pick_behaviors(t3h_mean, hours_to_spawn, params, seed=None):
     rng = np.random.default_rng(seed)
     n = len(t3h_mean)
@@ -45,15 +77,23 @@ def pick_behaviors(t3h_mean, hours_to_spawn, params, seed=None):
                        0, params.p_table.shape[1] - 1)
     time_idx = np.clip(np.digitize(hours_to_spawn, params.time_bins),
                        0, params.p_table.shape[0] - 1)
-    behaviors = np.empty(n, dtype=int)
-    for ti in range(params.p_table.shape[0]):
-        for te in range(params.p_table.shape[1]):
-            mask = (time_idx == ti) & (temp_idx == te)
-            count = mask.sum()
-            if count > 0:
-                probs = params.p_table[ti, te]
-                behaviors[mask] = rng.choice(5, size=count, p=probs)
-    return behaviors
+
+    if HAS_NUMBA:
+        rand_vals = rng.random(n)
+        return _pick_behaviors_numba(
+            temp_idx.astype(np.int32), time_idx.astype(np.int32),
+            np.ascontiguousarray(params.p_table), rand_vals,
+        )
+    else:
+        behaviors = np.empty(n, dtype=int)
+        for ti in range(params.p_table.shape[0]):
+            for te in range(params.p_table.shape[1]):
+                mask = (time_idx == ti) & (temp_idx == te)
+                count = mask.sum()
+                if count > 0:
+                    probs = params.p_table[ti, te]
+                    behaviors[mask] = rng.choice(5, size=count, p=probs)
+        return behaviors
 
 
 def apply_overrides(pool, params):
