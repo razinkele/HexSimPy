@@ -276,3 +276,58 @@ class CensusEvent(Event):
         if "census_records" not in landscape:
             landscape["census_records"] = []
         landscape["census_records"].append(record)
+
+
+import tempfile
+from pathlib import Path
+
+
+@register_event("log_snapshot")
+@dataclass
+class LogSnapshotEvent(Event):
+    """Save a binary snapshot of agent state each timestep.
+
+    Saves to landscape["log_dir"]/<prefix>_t<timestep>.npz
+    containing: tri_idx, alive, behavior, ed_kJ_g, mass_g arrays.
+    """
+    prefix: str = "snapshot"
+
+    def execute(self, population, landscape, t, mask):
+        log_dir = landscape.get("log_dir")
+        if log_dir is None:
+            return
+        log_dir = Path(log_dir)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        path = log_dir / f"{self.prefix}_t{t:06d}.npz"
+        np.savez_compressed(
+            path,
+            tri_idx=population.tri_idx,
+            alive=population.alive,
+            behavior=population.behavior,
+            ed_kJ_g=population.ed_kJ_g,
+            mass_g=population.mass_g,
+        )
+
+
+@register_event("summary_report")
+@dataclass
+class SummaryReportEvent(Event):
+    """Compute and store per-timestep summary statistics.
+
+    Appends to landscape["summary_reports"] a dict with:
+    time, n_alive, n_dead, births (if tracked), mean_ed, mean_mass.
+    """
+
+    def execute(self, population, landscape, t, mask):
+        alive = population.alive
+        record = {
+            "time": t,
+            "n_alive": int(alive.sum()),
+            "n_dead": int((~alive).sum()),
+            "n_total": population.n,
+            "mean_ed": float(population.ed_kJ_g[alive].mean()) if alive.any() else 0.0,
+            "mean_mass": float(population.mass_g[alive].mean()) if alive.any() else 0.0,
+        }
+        if "summary_reports" not in landscape:
+            landscape["summary_reports"] = []
+        landscape["summary_reports"].append(record)

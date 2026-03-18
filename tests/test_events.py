@@ -504,3 +504,60 @@ class TestReproductionWithGenetics:
         offspring_geno = pop.genome.genotypes[10:]
         # At least some alleles should be non-zero (inherited from parents)
         assert offspring_geno.sum() > 0
+
+
+from salmon_ibm.events_builtin import LogSnapshotEvent, SummaryReportEvent
+
+
+class TestLogSnapshotEvent:
+    def test_saves_npz_file(self, tmp_path):
+        from salmon_ibm.agents import AgentPool
+        pool = AgentPool(n=10, start_tri=0, rng_seed=42)
+        pop = Population("fish", pool)
+        landscape = {"log_dir": str(tmp_path)}
+        event = LogSnapshotEvent(name="log", prefix="test")
+        mask = pop.alive.copy()
+        event.execute(pop, landscape, t=5, mask=mask)
+
+        path = tmp_path / "test_t000005.npz"
+        assert path.exists()
+        data = np.load(path)
+        assert "tri_idx" in data
+        assert "alive" in data
+        assert len(data["tri_idx"]) == 10
+
+    def test_no_crash_without_log_dir(self):
+        from salmon_ibm.agents import AgentPool
+        pool = AgentPool(n=5, start_tri=0, rng_seed=42)
+        pop = Population("fish", pool)
+        landscape = {}
+        event = LogSnapshotEvent(name="log")
+        event.execute(pop, landscape, t=0, mask=pop.alive.copy())  # should not raise
+
+
+class TestSummaryReportEvent:
+    def test_records_summary(self):
+        from salmon_ibm.agents import AgentPool
+        pool = AgentPool(n=20, start_tri=0, rng_seed=42)
+        pop = Population("fish", pool)
+        pop.pool.alive[15:] = False
+        landscape = {}
+        event = SummaryReportEvent(name="summary")
+        event.execute(pop, landscape, t=3, mask=pop.alive.copy())
+
+        assert len(landscape["summary_reports"]) == 1
+        rec = landscape["summary_reports"][0]
+        assert rec["time"] == 3
+        assert rec["n_alive"] == 15
+        assert rec["n_dead"] == 5
+        assert rec["mean_ed"] > 0
+
+    def test_accumulates_over_timesteps(self):
+        from salmon_ibm.agents import AgentPool
+        pool = AgentPool(n=10, start_tri=0, rng_seed=42)
+        pop = Population("fish", pool)
+        landscape = {}
+        event = SummaryReportEvent(name="summary")
+        for t in range(10):
+            event.execute(pop, landscape, t=t, mask=pop.alive.copy())
+        assert len(landscape["summary_reports"]) == 10
