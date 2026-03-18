@@ -22,16 +22,28 @@ def execute_movement(pool, mesh, fields, seed=None, n_micro_steps=3, cwr_thresho
         _step_random_vec(tri_buf, water_nbrs, water_nbr_count, rng, n_micro_steps)
         pool.tri_idx[idx] = tri_buf
 
-    # --- Per-agent fallback for UPSTREAM, DOWNSTREAM, TO_CWR ---
-    for i in np.where(alive & (pool.behavior >= Behavior.TO_CWR))[0]:
-        beh = pool.behavior[i]
+    # --- UPSTREAM (vectorized) ---
+    mask_up = alive & (pool.behavior == Behavior.UPSTREAM)
+    if mask_up.any():
+        idx = np.where(mask_up)[0]
+        tri_buf = pool.tri_idx[idx].copy()
+        _step_directed_vec(tri_buf, water_nbrs, water_nbr_count,
+                           fields["ssh"], rng, n_micro_steps, ascending=False)
+        pool.tri_idx[idx] = tri_buf
+
+    # --- DOWNSTREAM (vectorized) ---
+    mask_down = alive & (pool.behavior == Behavior.DOWNSTREAM)
+    if mask_down.any():
+        idx = np.where(mask_down)[0]
+        tri_buf = pool.tri_idx[idx].copy()
+        _step_directed_vec(tri_buf, water_nbrs, water_nbr_count,
+                           fields["ssh"], rng, n_micro_steps, ascending=True)
+        pool.tri_idx[idx] = tri_buf
+
+    # --- Per-agent fallback for TO_CWR only ---
+    for i in np.where(alive & (pool.behavior == Behavior.TO_CWR))[0]:
         tri = pool.tri_idx[i]
-        if beh == Behavior.UPSTREAM:
-            pool.tri_idx[i] = _step_directed(tri, mesh, fields["ssh"], rng, n_micro_steps, ascending=False)
-        elif beh == Behavior.DOWNSTREAM:
-            pool.tri_idx[i] = _step_directed(tri, mesh, fields["ssh"], rng, n_micro_steps, ascending=True)
-        elif beh == Behavior.TO_CWR:
-            pool.tri_idx[i] = _step_to_cwr(tri, mesh, fields["temperature"], rng, n_micro_steps, cwr_threshold=cwr_threshold)
+        pool.tri_idx[i] = _step_to_cwr(tri, mesh, fields["temperature"], rng, n_micro_steps, cwr_threshold=cwr_threshold)
 
     _apply_current_advection(pool, mesh, fields, np.where(alive)[0], rng)
 
@@ -48,6 +60,43 @@ def _step_random_vec(tri_indices, water_nbrs, water_nbr_count, rng, steps):
         rand_idx = rng.integers(0, np.maximum(counts, 1))
         chosen = water_nbrs[current, rand_idx]
         tri_indices[has_nbrs] = chosen[has_nbrs]
+
+
+def _step_directed_vec(tri_indices, water_nbrs, water_nbr_count, field,
+                       rng, steps, ascending):
+    """Vectorized gradient-following for a batch of agents.
+
+    Even micro-steps: move to neighbor with best field value.
+    Odd micro-steps: random jitter (move to random neighbor).
+    """
+    n = len(tri_indices)
+
+    for s in range(steps):
+        current = tri_indices
+        counts = water_nbr_count[current]
+        has_nbrs = counts > 0
+        if not has_nbrs.any():
+            break
+
+        if s % 2 == 0:
+            # Gradient step: gather field values at all neighbors
+            nbr_matrix = water_nbrs[current]
+            safe_idx = np.where(nbr_matrix >= 0, nbr_matrix, 0)
+            nbr_vals = field[safe_idx]
+            invalid = nbr_matrix < 0
+            if ascending:
+                nbr_vals[invalid] = -np.inf
+                best_local = np.argmax(nbr_vals, axis=1)
+            else:
+                nbr_vals[invalid] = np.inf
+                best_local = np.argmin(nbr_vals, axis=1)
+            chosen = nbr_matrix[np.arange(n), best_local]
+            tri_indices[has_nbrs] = chosen[has_nbrs]
+        else:
+            # Random jitter step
+            rand_idx = rng.integers(0, np.maximum(counts, 1))
+            chosen = water_nbrs[current, rand_idx]
+            tri_indices[has_nbrs] = chosen[has_nbrs]
 
 
 def _step_random(tri, mesh, rng, steps):
