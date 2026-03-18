@@ -49,7 +49,7 @@ def execute_movement(pool, mesh, fields, seed=None, n_micro_steps=3, cwr_thresho
                          fields["temperature"], n_micro_steps, cwr_threshold)
         pool.tri_idx[idx] = tri_buf
 
-    _apply_current_advection(pool, mesh, fields, np.where(alive)[0], rng)
+    _apply_current_advection_vec(pool, mesh, fields, alive, rng)
 
 
 def _step_random_vec(tri_indices, water_nbrs, water_nbr_count, rng, steps):
@@ -168,6 +168,70 @@ def _step_to_cwr(tri, mesh, temperature, rng, steps, cwr_threshold=16.0):
         temps = np.array([temperature[n] for n in nbrs])
         current = nbrs[np.argmin(temps)]
     return current
+
+
+def _apply_current_advection_vec(pool, mesh, fields, alive_mask, rng):
+    """Vectorized current advection for all alive agents."""
+    u = fields.get("u_current")
+    v = fields.get("v_current")
+    if u is None or v is None:
+        return
+
+    alive_idx = np.where(alive_mask)[0]
+    if len(alive_idx) == 0:
+        return
+
+    tris = pool.tri_idx[alive_idx]
+    speeds = np.sqrt(u[tris]**2 + v[tris]**2)
+
+    moving = speeds >= 0.01
+    if not moving.any():
+        return
+
+    mov_idx = alive_idx[moving]
+    mov_tris = pool.tri_idx[mov_idx]
+    mov_speeds = speeds[moving]
+    water_nbrs = mesh._water_nbrs
+    water_nbr_count = mesh._water_nbr_count
+
+    counts = water_nbr_count[mov_tris]
+    has_nbrs = counts > 0
+    if not has_nbrs.any():
+        return
+
+    # Flow direction for each agent: (v, u) normalized
+    flow_y = v[mov_tris].copy()
+    flow_x = u[mov_tris].copy()
+    flow_norm = np.sqrt(flow_y**2 + flow_x**2) + 1e-12
+    flow_y /= flow_norm
+    flow_x /= flow_norm
+
+    # Gather neighbor centroids and compute direction vectors
+    nbr_matrix = water_nbrs[mov_tris]
+    safe_idx = np.where(nbr_matrix >= 0, nbr_matrix, 0)
+
+    c0 = mesh.centroids[mov_tris]                            # (n, 2)
+    cn = mesh.centroids[safe_idx]                            # (n, max_nbrs, 2)
+    dy = cn[:, :, 0] - c0[:, np.newaxis, 0]                 # (n, max_nbrs)
+    dx = cn[:, :, 1] - c0[:, np.newaxis, 1]                 # (n, max_nbrs)
+    dnorm = np.sqrt(dy**2 + dx**2) + 1e-12
+    dy /= dnorm
+    dx /= dnorm
+
+    # Dot product with flow direction
+    dots = dy * flow_y[:, np.newaxis] + dx * flow_x[:, np.newaxis]
+    dots[nbr_matrix < 0] = -999.0
+
+    # Best neighbor per agent
+    best_local = np.argmax(dots, axis=1)
+    best_nbr = nbr_matrix[np.arange(len(mov_tris)), best_local]
+
+    # Probabilistic drift
+    drift_prob = np.minimum(mov_speeds * 5.0, 0.8)
+    drift = rng.random(len(mov_tris)) < drift_prob
+    update = has_nbrs & drift
+
+    pool.tri_idx[mov_idx[update]] = best_nbr[update]
 
 
 def _apply_current_advection(pool, mesh, fields, alive_idx, rng):
