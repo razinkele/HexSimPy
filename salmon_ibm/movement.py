@@ -40,10 +40,14 @@ def execute_movement(pool, mesh, fields, seed=None, n_micro_steps=3, cwr_thresho
                            fields["ssh"], rng, n_micro_steps, ascending=True)
         pool.tri_idx[idx] = tri_buf
 
-    # --- Per-agent fallback for TO_CWR only ---
-    for i in np.where(alive & (pool.behavior == Behavior.TO_CWR))[0]:
-        tri = pool.tri_idx[i]
-        pool.tri_idx[i] = _step_to_cwr(tri, mesh, fields["temperature"], rng, n_micro_steps, cwr_threshold=cwr_threshold)
+    # --- TO_CWR (vectorized) ---
+    mask_cwr = alive & (pool.behavior == Behavior.TO_CWR)
+    if mask_cwr.any():
+        idx = np.where(mask_cwr)[0]
+        tri_buf = pool.tri_idx[idx].copy()
+        _step_to_cwr_vec(tri_buf, water_nbrs, water_nbr_count,
+                         fields["temperature"], n_micro_steps, cwr_threshold)
+        pool.tri_idx[idx] = tri_buf
 
     _apply_current_advection(pool, mesh, fields, np.where(alive)[0], rng)
 
@@ -97,6 +101,28 @@ def _step_directed_vec(tri_indices, water_nbrs, water_nbr_count, field,
             rand_idx = rng.integers(0, np.maximum(counts, 1))
             chosen = water_nbrs[current, rand_idx]
             tri_indices[has_nbrs] = chosen[has_nbrs]
+
+
+def _step_to_cwr_vec(tri_indices, water_nbrs, water_nbr_count, temperature,
+                     steps, cwr_threshold):
+    """Vectorized cold-water refuge seeking for a batch of agents."""
+    n = len(tri_indices)
+
+    for _ in range(steps):
+        current = tri_indices
+        above_thresh = temperature[current] >= cwr_threshold
+        counts = water_nbr_count[current]
+        active = above_thresh & (counts > 0)
+        if not active.any():
+            break
+
+        nbr_matrix = water_nbrs[current]
+        safe_idx = np.where(nbr_matrix >= 0, nbr_matrix, 0)
+        nbr_temps = temperature[safe_idx]
+        nbr_temps[nbr_matrix < 0] = np.inf
+        best_local = np.argmin(nbr_temps, axis=1)
+        chosen = nbr_matrix[np.arange(n), best_local]
+        tri_indices[active] = chosen[active]
 
 
 def _step_random(tri, mesh, rng, steps):
