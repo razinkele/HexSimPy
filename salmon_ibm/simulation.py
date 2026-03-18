@@ -9,6 +9,8 @@ from salmon_ibm.bioenergetics import BioParams, update_energy
 from salmon_ibm.config import load_config, bio_params_from_config, behavior_params_from_config
 from salmon_ibm.environment import Environment
 from salmon_ibm.estuary import salinity_cost, do_override, seiche_pause, DO_ESCAPE, DO_LETHAL
+from salmon_ibm.events import EventSequencer
+from salmon_ibm.events_builtin import MovementEvent, CustomEvent
 from salmon_ibm.mesh import TriMesh
 from salmon_ibm.movement import execute_movement
 from salmon_ibm.output import OutputLogger
@@ -29,6 +31,8 @@ class Simulation:
             hs = config["hexsim"]
             self.mesh = HexMesh.from_hexsim(
                 hs["workspace"], species=hs.get("species", "chinook"),
+                extent_layer=hs.get("extent_layer"),
+                depth_layer=hs.get("depth_layer"),
             )
             self.env = HexSimEnvironment(
                 hs["workspace"], self.mesh,
@@ -56,47 +60,60 @@ class Simulation:
             self.logger = OutputLogger(output_path, self.mesh.centroids)
 
         self.history = []
+        self._sequencer = EventSequencer(self._build_events())
 
-    def step(self):
-        t = self.current_t
-        self.env.advance(t)
+    # ------------------------------------------------------------------
+    # Event sequencer setup
+    # ------------------------------------------------------------------
 
-        alive_mask = self.pool.alive & ~self.pool.arrived
+    def _build_events(self):
+        return [
+            CustomEvent(name="push_temperature", callback=self._event_push_temperature),
+            CustomEvent(name="behavior_selection", callback=self._event_behavior_selection),
+            CustomEvent(name="estuarine_overrides", callback=self._event_estuarine_overrides),
+            CustomEvent(name="update_cwr_counters", callback=self._event_update_cwr_counters),
+            MovementEvent(name="movement", n_micro_steps=3, cwr_threshold=self.beh_params.temp_bins[0]),
+            CustomEvent(name="update_timers", callback=self._event_update_timers),
+            CustomEvent(name="bioenergetics", callback=self._event_bioenergetics),
+            CustomEvent(name="logging", callback=self._event_logging),
+        ]
 
-        temps_at_agents = self.env.fields["temperature"][self.pool.tri_idx]
-        self.pool.push_temperature(temps_at_agents)
+    # ------------------------------------------------------------------
+    # Event callbacks
+    # ------------------------------------------------------------------
 
-        # 1. Pick behaviors
-        t3h = self.pool.t3h_mean()
-        self.pool.behavior[alive_mask] = pick_behaviors(
-            t3h[alive_mask], self.pool.target_spawn_hour[alive_mask],
+    def _event_push_temperature(self, population, landscape, t, mask):
+        temps = landscape["fields"]["temperature"][population.tri_idx]
+        population.push_temperature(temps)
+
+    def _event_behavior_selection(self, population, landscape, t, mask):
+        step_mask = landscape["step_alive_mask"]
+        t3h = population.t3h_mean()
+        population.behavior[step_mask] = pick_behaviors(
+            t3h[step_mask], population.target_spawn_hour[step_mask],
             self.beh_params, seed=int(self._rng.integers(2**31)),
         )
+        population.behavior = apply_overrides(population, self.beh_params)
 
-        # 2. Apply overrides
-        self.pool.behavior = apply_overrides(self.pool, self.beh_params)
-
-        # 3. Estuarine overrides
+    def _event_estuarine_overrides(self, population, landscape, t, mask):
         self._apply_estuarine_overrides()
 
-        # 4. Update CWR counters (after all behavior decisions are final)
+    def _event_update_cwr_counters(self, population, landscape, t, mask):
         self._update_cwr_counters()
 
-        # 5. Movement
-        execute_movement(self.pool, self.mesh, self.env.fields,
-                         seed=int(self._rng.integers(2**31)),
-                         cwr_threshold=self.beh_params.temp_bins[0])
-
-        # 5. Update timers
-        self.pool.steps[alive_mask] += 1
-        self.pool.target_spawn_hour[alive_mask] = np.maximum(
-            self.pool.target_spawn_hour[alive_mask] - 1, 0
+    def _event_update_timers(self, population, landscape, t, mask):
+        step_mask = landscape["step_alive_mask"]
+        population.steps[step_mask] += 1
+        population.target_spawn_hour[step_mask] = np.maximum(
+            population.target_spawn_hour[step_mask] - 1, 0
         )
 
-        # 6. Bioenergetics
-        activity = self._activity_lut[self.pool.behavior]
-        sal = self.env.fields.get("salinity", np.zeros(self.mesh.n_triangles))
-        sal_at_agents = sal[self.pool.tri_idx]
+    def _event_bioenergetics(self, population, landscape, t, mask):
+        fields = landscape["fields"]
+        temps_at_agents = fields["temperature"][population.tri_idx]
+        activity = self._activity_lut[population.behavior]
+        sal = fields.get("salinity", np.zeros(self.mesh.n_triangles))
+        sal_at_agents = sal[population.tri_idx]
         s_cfg = self.est_cfg.get("salinity_cost", {})
         sal_cost = salinity_cost(
             sal_at_agents,
@@ -104,40 +121,50 @@ class Simulation:
             S_tol=s_cfg.get("S_tol", 6.0),
             k=s_cfg.get("k", 0.6),
         )
-
-        # 7. Bioenergetics (alive agents only)
-        alive = self.pool.alive & ~self.pool.arrived
+        alive = population.alive & ~population.arrived
         if alive.any():
             new_ed, dead, new_mass = update_energy(
-                self.pool.ed_kJ_g[alive], self.pool.mass_g[alive],
+                population.ed_kJ_g[alive], population.mass_g[alive],
                 temps_at_agents[alive], activity[alive], sal_cost[alive],
                 self.bio_params,
             )
-            self.pool.ed_kJ_g[alive] = new_ed
-            self.pool.mass_g[alive] = new_mass
-            # dead is relative to the alive subset
+            population.ed_kJ_g[alive] = new_ed
+            population.mass_g[alive] = new_mass
             dead_indices = np.where(alive)[0][dead]
-            self.pool.alive[dead_indices] = False
-
-        # 7b. Thermal mortality (alive agents only)
+            population.alive[dead_indices] = False
         thermal_kill = alive & (temps_at_agents >= self.bio_params.T_MAX)
-        self.pool.alive[thermal_kill] = False
+        population.alive[thermal_kill] = False
 
-        # 7. Logging
+    def _event_logging(self, population, landscape, t, mask):
         if self.logger:
-            self.logger.log_step(t, self.pool)
-
+            self.logger.log_step(t, population)
         summary = {
             "time": t,
-            "n_alive": int(self.pool.alive.sum()),
-            "n_arrived": int(self.pool.arrived.sum()),
-            "mean_ed": float(self.pool.ed_kJ_g[self.pool.alive].mean()) if self.pool.alive.any() else 0.0,
-            "mean_mass": float(self.pool.mass_g[self.pool.alive].mean()) if self.pool.alive.any() else 0.0,
+            "n_alive": int(population.alive.sum()),
+            "n_arrived": int(population.arrived.sum()),
+            "mean_ed": float(population.ed_kJ_g[population.alive].mean()) if population.alive.any() else 0.0,
+            "mean_mass": float(population.mass_g[population.alive].mean()) if population.alive.any() else 0.0,
             "behavior_counts": {
-                int(b): int((self.pool.behavior[self.pool.alive] == b).sum()) for b in range(5)
+                int(b): int((population.behavior[population.alive] == b).sum()) for b in range(5)
             },
         }
         self.history.append(summary)
+
+    # ------------------------------------------------------------------
+    # Main step
+    # ------------------------------------------------------------------
+
+    def step(self):
+        t = self.current_t
+        self.env.advance(t)
+        landscape = {
+            "mesh": self.mesh,
+            "fields": self.env.fields,
+            "rng": self._rng,
+            "activity_lut": self._activity_lut,
+            "est_cfg": self.est_cfg,
+        }
+        self._sequencer.step(self.pool, landscape, t)
         self.current_t += 1
 
     def _build_activity_lut(self):
@@ -167,8 +194,10 @@ class Simulation:
 
         # Seiche pause
         seiche_cfg = self.est_cfg.get("seiche_pause", {})
-        thresh = seiche_cfg.get("dSSHdt_thresh_m_per_hour",
-                                seiche_cfg.get("dSSHdt_thresh_m_per_15min", 0.02))
+        thresh = seiche_cfg.get("dSSHdt_thresh_m_per_hour")
+        if thresh is None:
+            # Convert per-15-min threshold to per-hour (dSSH_dt_array returns m/hour)
+            thresh = seiche_cfg.get("dSSHdt_thresh_m_per_15min", 0.02) * 4.0
         dSSH_all = self.env.dSSH_dt_array()
         dSSH = dSSH_all[self.pool.tri_idx] if len(dSSH_all) > 0 else np.zeros(self.pool.n)
         paused = seiche_pause(dSSH, thresh=thresh)
