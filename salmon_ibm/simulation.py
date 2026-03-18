@@ -5,6 +5,7 @@ import numpy as np
 
 from salmon_ibm.agents import AgentPool, Behavior
 from salmon_ibm.behavior import BehaviorParams, pick_behaviors, apply_overrides
+from salmon_ibm.population import Population
 from salmon_ibm.bioenergetics import BioParams, update_energy
 from salmon_ibm.config import load_config, bio_params_from_config, behavior_params_from_config
 from salmon_ibm.environment import Environment
@@ -49,6 +50,7 @@ class Simulation:
         self._rng = np.random.default_rng(base_rng.integers(2**63))
         start_tris = rng.choice(water_ids, size=n_agents)
         self.pool = AgentPool(n=n_agents, start_tri=start_tris, rng_seed=rng_seed)
+        self.population = Population(name="salmon", pool=self.pool)
 
         self.beh_params = behavior_params_from_config(config)
         self.bio_params = bio_params_from_config(config)
@@ -183,7 +185,7 @@ class Simulation:
             "activity_lut": self._activity_lut,
             "est_cfg": self.est_cfg,
         }
-        self._sequencer.step(self.pool, landscape, t)
+        self._sequencer.step(self.population, landscape, t)
         self.current_t += 1
 
     def _build_activity_lut(self):
