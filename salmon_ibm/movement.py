@@ -23,12 +23,22 @@ def _use_numba():
 
 from salmon_ibm.agents import AgentPool, Behavior
 
-def execute_movement(pool, mesh, fields, seed=None, n_micro_steps=3, cwr_threshold=16.0):
+def execute_movement(pool, mesh, fields, seed=None, n_micro_steps=3,
+                     cwr_threshold=16.0, barrier_arrays=None):
+    """Execute movement with optional barrier enforcement.
+
+    Parameters
+    ----------
+    barrier_arrays : tuple (mort, defl, trans) from BarrierMap.to_arrays(), or None
+    """
     rng = np.random.default_rng(seed)
     alive = pool.alive & ~pool.arrived
 
     water_nbrs = mesh._water_nbrs
     water_nbr_count = mesh._water_nbr_count
+
+    # Save pre-movement positions for barrier resolution
+    pre_move = pool.tri_idx.copy() if barrier_arrays is not None else None
 
     # --- RANDOM (vectorized) ---
     mask_random = alive & (pool.behavior == Behavior.RANDOM)
@@ -64,6 +74,18 @@ def execute_movement(pool, mesh, fields, seed=None, n_micro_steps=3, cwr_thresho
         _step_to_cwr_vec(tri_buf, water_nbrs, water_nbr_count,
                          fields["temperature"], n_micro_steps, cwr_threshold)
         pool.tri_idx[idx] = tri_buf
+
+    # --- Barrier enforcement (after all movement, before advection) ---
+    if barrier_arrays is not None:
+        alive_idx = np.where(alive)[0]
+        if len(alive_idx) > 0:
+            mort, defl, trans = barrier_arrays
+            current = pre_move[alive_idx]
+            proposed = pool.tri_idx[alive_idx]
+            final, died = _resolve_barriers_vec(
+                current, proposed, mort, defl, trans, water_nbrs, rng)
+            pool.tri_idx[alive_idx] = final
+            pool.alive[alive_idx[died]] = False
 
     _apply_current_advection_vec(pool, mesh, fields, alive, rng)
 

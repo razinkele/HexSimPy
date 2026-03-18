@@ -18,6 +18,7 @@ class Population:
     pool: AgentPool
     accumulator_mgr: AccumulatorManager | None = None
     trait_mgr: TraitManager | None = None
+    genome: Any = None  # GenomeManager | None (Phase 3)
 
     group_id: np.ndarray = field(init=False)
     _next_id: int = field(init=False, default=0)
@@ -150,6 +151,9 @@ class Population:
             for name in self.trait_mgr._data:
                 self.trait_mgr._data[name] = self.trait_mgr._data[name][alive_idx].copy()
             self.trait_mgr.n_agents = n_new
+        if self.genome is not None:
+            self.genome.genotypes = self.genome.genotypes[alive_idx].copy()
+            self.genome.n_agents = n_new
 
     def add_agents(self, n: int, positions: np.ndarray, *, mass_g=None,
                    ed_kJ_g: float = 6.5, group_id: int = -1) -> np.ndarray:
@@ -186,4 +190,10 @@ class Population:
                 self.trait_mgr._data[name] = np.concatenate([
                     self.trait_mgr._data[name], np.zeros(n, dtype=np.int32)])
             self.trait_mgr.n_agents = new_n
+        if self.genome is not None:
+            n_loci = self.genome.n_loci
+            self.genome.genotypes = np.concatenate([
+                self.genome.genotypes,
+                np.zeros((n, n_loci, 2), dtype=np.int32)])
+            self.genome.n_agents = new_n
         return np.arange(old_n, new_n)

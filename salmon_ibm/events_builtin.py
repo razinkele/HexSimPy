@@ -24,11 +24,13 @@ class MovementEvent(Event):
         mesh = landscape["mesh"]
         fields = landscape["fields"]
         rng = landscape["rng"]
+        barrier_arrays = landscape.get("barrier_arrays")
         execute_movement(
             population, mesh, fields,
             seed=int(rng.integers(2**31)),
             n_micro_steps=self.n_micro_steps,
             cwr_threshold=self.cwr_threshold,
+            barrier_arrays=barrier_arrays,
         )
 
 
