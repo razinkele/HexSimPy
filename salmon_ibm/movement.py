@@ -9,24 +9,45 @@ from salmon_ibm.mesh import TriMesh
 
 def execute_movement(pool, mesh, fields, seed=None, n_micro_steps=3, cwr_threshold=16.0):
     rng = np.random.default_rng(seed)
-    alive_idx = np.where(pool.alive & ~pool.arrived)[0]
+    alive = pool.alive & ~pool.arrived
 
-    for i in alive_idx:
+    water_nbrs = mesh._water_nbrs
+    water_nbr_count = mesh._water_nbr_count
+
+    # --- RANDOM (vectorized) ---
+    mask_random = alive & (pool.behavior == Behavior.RANDOM)
+    if mask_random.any():
+        idx = np.where(mask_random)[0]
+        tri_buf = pool.tri_idx[idx].copy()
+        _step_random_vec(tri_buf, water_nbrs, water_nbr_count, rng, n_micro_steps)
+        pool.tri_idx[idx] = tri_buf
+
+    # --- Per-agent fallback for UPSTREAM, DOWNSTREAM, TO_CWR ---
+    for i in np.where(alive & (pool.behavior >= Behavior.TO_CWR))[0]:
         beh = pool.behavior[i]
         tri = pool.tri_idx[i]
-
-        if beh == Behavior.HOLD:
-            continue
-        elif beh == Behavior.RANDOM:
-            pool.tri_idx[i] = _step_random(tri, mesh, rng, n_micro_steps)
-        elif beh == Behavior.UPSTREAM:
+        if beh == Behavior.UPSTREAM:
             pool.tri_idx[i] = _step_directed(tri, mesh, fields["ssh"], rng, n_micro_steps, ascending=False)
         elif beh == Behavior.DOWNSTREAM:
             pool.tri_idx[i] = _step_directed(tri, mesh, fields["ssh"], rng, n_micro_steps, ascending=True)
         elif beh == Behavior.TO_CWR:
             pool.tri_idx[i] = _step_to_cwr(tri, mesh, fields["temperature"], rng, n_micro_steps, cwr_threshold=cwr_threshold)
 
-    _apply_current_advection(pool, mesh, fields, alive_idx, rng)
+    _apply_current_advection(pool, mesh, fields, np.where(alive)[0], rng)
+
+
+def _step_random_vec(tri_indices, water_nbrs, water_nbr_count, rng, steps):
+    """Vectorized random walk for a batch of agents."""
+    n = len(tri_indices)
+    for _ in range(steps):
+        current = tri_indices
+        counts = water_nbr_count[current]
+        has_nbrs = counts > 0
+        if not has_nbrs.any():
+            break
+        rand_idx = rng.integers(0, np.maximum(counts, 1))
+        chosen = water_nbrs[current, rand_idx]
+        tri_indices[has_nbrs] = chosen[has_nbrs]
 
 
 def _step_random(tri, mesh, rng, steps):

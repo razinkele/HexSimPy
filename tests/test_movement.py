@@ -119,6 +119,21 @@ def test_downstream_follows_ascending_ssh(mesh):
     )
 
 
+def test_random_movement_vectorized_lands_on_water(mesh):
+    """Vectorized random movement should land on valid water cells."""
+    water_ids = np.where(mesh.water_mask)[0]
+    for start in water_ids:
+        if len(mesh.water_neighbors(start)) > 0:
+            break
+    pool = AgentPool(n=50, start_tri=start)
+    pool.behavior[:] = Behavior.RANDOM
+    fields = {"ssh": np.zeros(mesh.n_triangles), "temperature": np.full(mesh.n_triangles, 15.0),
+              "u_current": np.zeros(mesh.n_triangles), "v_current": np.zeros(mesh.n_triangles)}
+    execute_movement(pool, mesh, fields, seed=99)
+    assert np.all(mesh.water_mask[pool.tri_idx])
+    assert (pool.tri_idx != start).sum() > 0
+
+
 def test_to_cwr_seeks_cooler_water(mesh):
     """TO_CWR fish above threshold should move toward cooler neighbors."""
     water_ids = np.where(mesh.water_mask)[0]
