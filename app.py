@@ -1,4 +1,6 @@
 """Baltic Salmon IBM — Shiny for Python Application (Lagoon Field Station theme)."""
+from __future__ import annotations
+
 import asyncio
 import time
 from pathlib import Path
@@ -10,6 +12,7 @@ from shiny import App, reactive, render, ui
 
 from shiny_deckgl import (
     CARTO_DARK,
+    CARTO_POSITRON,
     MapWidget,
     encode_binary_attribute,
     head_includes,
@@ -21,9 +24,11 @@ from shiny_deckgl import (
 from salmon_ibm.config import load_config
 from salmon_ibm.bioenergetics import BioParams
 from salmon_ibm.simulation import Simulation
+from heximpy.hxnparser import HexMap as HxnHexMap, GridMeta
 from ui.sidebar import sidebar_panel
 from ui.run_controls import run_controls_panel
 from ui.science_tab import science_panel
+from ui.viewer_tab import viewer_panel
 
 # --- Plotly theme constants (Lagoon palette) ---
 PLOT_BG = "rgba(11, 31, 44, 0.0)"
@@ -34,6 +39,14 @@ TEXT_COLOR = "#e4e8e6"
 ACCENT_COLOR = "#e8d5b7"
 TEAL = "#3d9b8f"
 SALMON_COLOR = "#d4826a"
+
+# --- Plotly light theme constants ---
+PLOT_BG_LIGHT = "rgba(248, 250, 249, 0.0)"
+PAPER_BG_LIGHT = "rgba(255, 255, 255, 0.0)"
+GRID_COLOR_LIGHT = "rgba(42, 122, 122, 0.1)"
+AXIS_COLOR_LIGHT = "#4a7a7a"
+TEXT_COLOR_LIGHT = "#1a3d50"
+ACCENT_COLOR_LIGHT = "#8a7040"
 
 # Behavior colors — nature-inspired
 BEH_NAMES = ["Hold", "Random", "CWR", "Upstream", "Downstream"]
@@ -60,25 +73,31 @@ TEMP_COLORSCALE = [
 ]
 
 
-def _base_layout(**overrides):
+def _base_layout(theme="dark", **overrides):
     """Shared Plotly layout for all charts."""
+    is_light = theme == "light"
+    _plot_bg = PLOT_BG_LIGHT if is_light else PLOT_BG
+    _paper_bg = PAPER_BG_LIGHT if is_light else PAPER_BG
+    _grid = GRID_COLOR_LIGHT if is_light else GRID_COLOR
+    _axis = AXIS_COLOR_LIGHT if is_light else AXIS_COLOR
+    _text = TEXT_COLOR_LIGHT if is_light else TEXT_COLOR
     layout = dict(
-        plot_bgcolor=PLOT_BG,
-        paper_bgcolor=PAPER_BG,
-        font=dict(family="Work Sans, sans-serif", color=TEXT_COLOR, size=12),
+        plot_bgcolor=_plot_bg,
+        paper_bgcolor=_paper_bg,
+        font=dict(family="Work Sans, sans-serif", color=_text, size=12),
         margin=dict(l=48, r=16, t=36, b=44),
         xaxis=dict(
-            gridcolor=GRID_COLOR, zerolinecolor=GRID_COLOR,
-            tickfont=dict(size=10, color=AXIS_COLOR),
-            title_font=dict(size=11, color=AXIS_COLOR),
+            gridcolor=_grid, zerolinecolor=_grid,
+            tickfont=dict(size=10, color=_axis),
+            title_font=dict(size=11, color=_axis),
         ),
         yaxis=dict(
-            gridcolor=GRID_COLOR, zerolinecolor=GRID_COLOR,
-            tickfont=dict(size=10, color=AXIS_COLOR),
-            title_font=dict(size=11, color=AXIS_COLOR),
+            gridcolor=_grid, zerolinecolor=_grid,
+            tickfont=dict(size=10, color=_axis),
+            title_font=dict(size=11, color=_axis),
         ),
         legend=dict(
-            font=dict(size=11, color=TEXT_COLOR),
+            font=dict(size=11, color=_text),
             bgcolor="rgba(0,0,0,0)",
             borderwidth=0,
         ),
@@ -111,6 +130,27 @@ def _colorscale_rgb(z: np.ndarray, colorscale: list) -> np.ndarray:
 
 BEH_COLORS_RGB = [_hex_to_rgb(c) for c in BEH_COLORS]
 
+# Pre-computed flat-top hex vertex offsets (unit circle, 6 vertices at 0°,60°,...,300°)
+_HEX_ANGLES = np.arange(6) * (np.pi / 3)
+_HEX_DX = np.cos(_HEX_ANGLES).astype(np.float64)
+_HEX_DY = np.sin(_HEX_ANGLES).astype(np.float64)
+
+
+def _build_hex_polygons(cx, cy, edge_scaled):
+    """Compute hex vertex positions from centers.
+
+    Returns flat (n*6, 2) float32 array and startIndices list.
+    cx, cy: 1D arrays of center coordinates (already scaled/flipped).
+    edge_scaled: hex edge length in the same coordinate units.
+    """
+    n = len(cx)
+    # Vectorized: (n, 6) for each vertex
+    vx = cx[:, None] + edge_scaled * _HEX_DX[None, :]
+    vy = cy[:, None] + edge_scaled * _HEX_DY[None, :]
+    verts = np.column_stack([vx.ravel(), vy.ravel()]).astype(np.float32)  # (n*6, 2)
+    start_indices = (np.arange(n, dtype=np.int32) * 6).tolist()
+    return verts, start_indices
+
 
 def _subsample_indices(n, max_pts):
     """Return sorted random indices for subsampling large meshes."""
@@ -122,16 +162,72 @@ def _subsample_indices(n, max_pts):
     return np.arange(n)
 
 
-def _build_water_binary(mesh, z, cscale, idx, scale=1.0):
+# Geo-anchor profiles for meter→lat/lon conversion.
+# Each profile defines two endpoints along the long axis (data_cols)
+# and a meters-per-degree-latitude for cross-axis offset.
+_GEO_ANCHORS = {
+    "columbia": {
+        # Mouth (Astoria, low data_cols) → Bonneville Dam (upstream, high data_cols)
+        "start_lon": -123.83, "start_lat": 46.19,
+        "end_lon": -121.94, "end_lat": 45.64,
+        "m_per_deg_lat": 111_000.0,
+    },
+    "curonian": {
+        # South end (Nemunas delta, low data_cols) → North end (Klaipėda strait, high data_cols)
+        "start_lon": 21.20, "start_lat": 55.26,
+        "end_lon": 21.08, "end_lat": 55.72,
+        "m_per_deg_lat": 111_000.0,
+    },
+}
+_DEFAULT_ANCHOR = "columbia"
+
+
+def _detect_landscape(workspace_path: str | None = None) -> str:
+    """Detect landscape from workspace path name."""
+    if workspace_path:
+        lc = str(workspace_path).lower()
+        if "curonian" in lc or "lagoon" in lc:
+            return "curonian"
+    return "columbia"
+
+
+def _hexsim_to_lonlat(cx, cy, landscape=None):
+    """Convert HexSim meter coordinates to approximate lon/lat.
+
+    cx is the long axis (data_cols direction).
+    cy is the short axis (data_rows direction, cross-axis).
+    Maps linearly between two anchor points defined per landscape,
+    with cy adding a cross-axis latitude offset.
+    """
+    key = landscape or _DEFAULT_ANCHOR
+    a = _GEO_ANCHORS.get(key, _GEO_ANCHORS[_DEFAULT_ANCHOR])
+    cx_max = cx.max() if len(cx) > 0 else 1.0
+    t = cx / cx_max  # 0 = start, 1 = end
+    lon = a["start_lon"] + t * (a["end_lon"] - a["start_lon"])
+    lat = (a["start_lat"] + t * (a["end_lat"] - a["start_lat"])
+           + cy / a["m_per_deg_lat"])
+    return lon, lat
+
+
+def _build_water_binary(mesh, z, cscale, idx, scale=1.0, landscape=None):
     """Build binary-encoded position and color arrays for the water layer.
 
     Returns (positions_binary, colors_binary, n_points).
+    HexSim meshes use grid coordinates scaled to pixel-like range for orthographic view.
     """
     rgb = _colorscale_rgb(z, cscale)
-    positions = np.column_stack([
-        mesh.centroids[idx, 1] * scale,
-        mesh.centroids[idx, 0] * scale,
-    ]).astype(np.float32)
+    is_hexsim = hasattr(mesh, '_edge')
+    if is_hexsim:
+        # Scale grid coordinates; negate Y to flip (row 0 = top of grid → bottom of screen)
+        positions = np.column_stack([
+            mesh.centroids[idx, 1] * scale,
+            -mesh.centroids[idx, 0] * scale,
+        ]).astype(np.float32)
+    else:
+        positions = np.column_stack([
+            mesh.centroids[idx, 1] * scale,
+            mesh.centroids[idx, 0] * scale,
+        ]).astype(np.float32)
     colors = np.column_stack([
         rgb[idx, 0], rgb[idx, 1], rgb[idx, 2],
         np.full(len(idx), 220, dtype=np.uint8),
@@ -153,7 +249,7 @@ def _build_color_binary(mesh, z, cscale, idx):
     return encode_binary_attribute(colors)
 
 
-def _build_agent_data(sim, mesh, scale=1.0):
+def _build_agent_data(sim, mesh, scale=1.0, landscape=None):
     """Build agent layer data: list of dicts with position, color, info."""
     alive = sim.pool.alive
     if not alive.any():
@@ -163,21 +259,33 @@ def _build_agent_data(sim, mesh, scale=1.0):
     behaviors = sim.pool.behavior[alive]
     energies = sim.pool.ed_kJ_g[alive]
     agent_ids = np.where(alive)[0]
+    is_hexsim = hasattr(mesh, '_edge')
 
     pts = []
     for tri, beh, ed, aid in zip(tris, behaviors, energies, agent_ids):
         beh_int = int(beh)
         rc, gc, bc = BEH_COLORS_RGB[beh_int]
+        if is_hexsim:
+            # Scaled grid coordinates; negate Y to flip
+            x = float(mesh.centroids[tri, 1] * scale)
+            y = float(-mesh.centroids[tri, 0] * scale)
+        else:
+            x = float(mesh.centroids[tri, 1] * scale)
+            y = float(mesh.centroids[tri, 0] * scale)
         pts.append({
-            "position": [
-                round(float(mesh.centroids[tri, 1] * scale), 5),
-                round(float(mesh.centroids[tri, 0] * scale), 5),
-            ],
+            "position": [round(x, 2), round(y, 2)],
             "color": [rc, gc, bc, 240],
             "info": f"#{aid} {BEH_NAMES[beh_int]} | {ed:.1f} kJ/g",
         })
     return pts
 
+
+# Blank map style for non-geographic (orthographic) rendering
+import json as _json
+BLANK_STYLE = _json.dumps({"version": 8, "sources": {}, "layers": [
+    {"id": "background", "type": "background",
+     "paint": {"background-color": "#0b1f2c"}}
+]})
 
 # Static assets directory
 WWW_DIR = Path(__file__).parent / "www"
@@ -198,17 +306,87 @@ TOOLTIP_STYLE = {
 
 map_widget = MapWidget(
     "map",
-    view_state={"longitude": 21.07, "latitude": 55.31, "zoom": 10},
-    style=CARTO_DARK,
+    view_state={"longitude": 0, "latitude": 0, "zoom": 1},
+    style=BLANK_STYLE,
     tooltip={"html": "{info}", "style": TOOLTIP_STYLE},
     controller=True,
     parameters={"clearColor": [11/255, 31/255, 44/255, 1]},
 )
 
+viewer_map_widget = MapWidget(
+    "viewer_map",
+    view_state={"longitude": 0, "latitude": 0, "zoom": 1},
+    style=BLANK_STYLE,
+    tooltip={"html": "{info}", "style": TOOLTIP_STYLE},
+    controller=True,
+    parameters={"clearColor": [11/255, 31/255, 44/255, 1]},
+)
+
+# ── HexSim workspace discovery ───────────────────────────────────────────────
+
+def _find_workspaces() -> dict[str, str]:
+    """Find HexSim workspace directories (contain .grid files)."""
+    base = Path(".")
+    workspaces = {}
+    for grid_file in base.rglob("*.grid"):
+        ws_dir = grid_file.parent
+        name = ws_dir.name
+        workspaces[str(ws_dir)] = name
+    return workspaces
+
+
+def _list_hxn_layers(ws_path: str) -> dict[str, str]:
+    """List .hxn layers in a workspace's Spatial Data/Hexagons/ folder."""
+    ws = Path(ws_path)
+    hex_dir = ws / "Spatial Data" / "Hexagons"
+    layers = {}
+    if hex_dir.exists():
+        for subdir in sorted(hex_dir.iterdir()):
+            if not subdir.is_dir():
+                continue
+            hxn_files = list(subdir.glob("*.hxn"))
+            if hxn_files:
+                layers[str(hxn_files[0])] = subdir.name
+    # Also check for .hxn files directly in the workspace
+    for hxn in sorted(ws.glob("*.hxn")):
+        layers[str(hxn)] = hxn.stem
+    return layers
+
+# --- Theme toggle JS (flash prevention + toggle logic) ---
+THEME_JS = """
+(function() {
+    var stored = localStorage.getItem('salmon-ibm-theme') || 'dark';
+    document.documentElement.setAttribute('data-theme', stored);
+})();
+
+function toggleTheme() {
+    var html = document.documentElement;
+    var current = html.getAttribute('data-theme') || 'dark';
+    var next = current === 'dark' ? 'light' : 'dark';
+    html.setAttribute('data-theme', next);
+    localStorage.setItem('salmon-ibm-theme', next);
+    var btn = document.getElementById('theme-toggle-btn');
+    if (btn) btn.textContent = next === 'dark' ? '\\u263E' : '\\u2600';
+    if (window.Shiny) Shiny.setInputValue('theme_mode', next);
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    var btn = document.getElementById('theme-toggle-btn');
+    var theme = document.documentElement.getAttribute('data-theme') || 'dark';
+    if (btn) btn.textContent = theme === 'dark' ? '\\u263E' : '\\u2600';
+});
+
+document.addEventListener('shiny:connected', function() {
+    var theme = document.documentElement.getAttribute('data-theme') || 'dark';
+    Shiny.setInputValue('theme_mode', theme);
+});
+"""
+
 # --- App UI ---
 app_ui = ui.page_sidebar(
     sidebar_panel(),
     ui.head_content(
+        ui.tags.script(THEME_JS),
         ui.tags.link(rel="stylesheet", href="style.css"),
         ui.tags.meta(name="viewport", content="width=device-width, initial-scale=1"),
     ),
@@ -264,17 +442,29 @@ app_ui = ui.page_sidebar(
             science_panel(),
             value="science",
         ),
+        ui.nav_panel(
+            "HexSim Viewer",
+            viewer_panel(),
+            value="viewer",
+        ),
         id="main_tabs",
     ),
     title=ui.div(
         ui.tags.span(
             "Salmon IBM",
-            style="font-family: 'Cormorant Garamond', serif; font-weight: 700; color: #e8d5b7; font-size: 1.35rem;",
+            class_="navbar-title",
         ),
         ui.tags.span(
             " \u2014 Individual-Based Migration Model",
-            style="font-family: 'Work Sans', sans-serif; font-weight: 300; color: #6a8a8a; font-size: 0.9rem;",
+            class_="navbar-subtitle",
         ),
+        ui.tags.button(
+            "\u263E",
+            id="theme-toggle-btn",
+            onclick="toggleTheme()",
+            class_="theme-toggle",
+        ),
+        style="display: flex; align-items: center; width: 100%;",
     ),
 )
 
@@ -293,7 +483,7 @@ def server(input, output, session):
         if landscape == "columbia":
             cfg = load_config("config_columbia.yaml")
         else:
-            cfg = load_config("config_curonian_minimal.yaml")
+            cfg = load_config("config_curonian_hexsim.yaml")
 
         # Apply estuary overrides from UI controls
         est = cfg.setdefault("estuary", {})
@@ -385,6 +575,36 @@ def server(input, output, session):
     @reactive.event(input.btn_pause)
     def _pause():
         running.set(False)
+
+    _cached_theme = ""
+
+    @reactive.effect
+    @reactive.event(input.theme_mode)
+    async def _update_theme():
+        nonlocal _cached_theme
+        theme = input.theme_mode()
+        if not theme or theme == _cached_theme:
+            return
+        _cached_theme = theme
+
+        is_light = theme == "light"
+
+        # HexSim grids use blank style; only non-HexSim (TriMesh) uses basemap
+        sim = sim_state.get()
+        is_hexsim = sim is not None and hasattr(sim.mesh, '_edge')
+        if is_hexsim:
+            # Blank style bg color adapts via CSS, no basemap change needed
+            pass
+        else:
+            style = CARTO_POSITRON if is_light else CARTO_DARK
+            await map_widget.set_style(session, style)
+        await viewer_map_widget.set_style(session, BLANK_STYLE)
+
+        # Force full map rebuild if simulation is loaded
+        if sim is not None:
+            nonlocal _cached_subsample_idx, _cached_landscape
+            _cached_subsample_idx = None
+            _cached_landscape = ""  # force full update on next render
 
     @render.text
     def status_text():
@@ -491,19 +711,26 @@ def server(input, output, session):
             _cached_subsample_idx = np.where(mesh.water_mask)[0]
         return _cached_subsample_idx
 
-    def _view_state(sim):
+    def _view_state(sim, landscape=None):
         """Return the appropriate view_state for the current landscape."""
         mesh = sim.mesh
-        is_hexsim = hasattr(mesh, "n_cells")
+        is_hexsim = hasattr(mesh, '_edge')
         if is_hexsim:
-            cx = float(np.mean(mesh.centroids[:, 1])) * _cached_scale
-            cy = float(np.mean(mesh.centroids[:, 0])) * _cached_scale
-            return {"longitude": cx, "latitude": cy, "zoom": 7}
+            # Use scaled coordinates as pseudo-lon/lat with MapView (no basemap)
+            cx = mesh.centroids[:, 1] * _cached_scale
+            cy = -mesh.centroids[:, 0] * _cached_scale
+            lon = float(cx.mean())
+            lat = float(cy.mean())
+            extent = max(float(cx.max() - cx.min()), float(cy.max() - cy.min()))
+            # zoom so grid fills viewport (~800px)
+            zoom = np.log2(800 / max(extent, 1))
+            return {"longitude": lon, "latitude": lat, "zoom": float(zoom)}
         return {"longitude": 21.07, "latitude": 55.31, "zoom": 10}
 
-    def _agent_layer(sim):
+    def _agent_layer(sim, landscape=None):
         """Build the complete agent ScatterplotLayer dict."""
-        agent_data = _build_agent_data(sim, sim.mesh, scale=_cached_scale)
+        agent_data = _build_agent_data(sim, sim.mesh, scale=_cached_scale,
+                                        landscape=landscape)
         return scatterplot_layer(
             "agents", agent_data,
             getPosition="@@d.position",
@@ -517,48 +744,75 @@ def server(input, output, session):
             pickable=True,
         )
 
-    async def _full_update(sim):
+    async def _full_update(sim, landscape=None):
         """Send everything: positions + colors + agents (~3 MB)."""
         nonlocal _cached_water_n
         z, cscale = _resolve_field(sim)
         idx = _water_idx(sim)
         pos_bin, col_bin, n = _build_water_binary(
-            sim.mesh, z, cscale, idx, scale=_cached_scale
+            sim.mesh, z, cscale, idx, scale=_cached_scale,
+            landscape=landscape,
         )
         _cached_water_n = n
 
         is_hexsim = hasattr(sim.mesh, "n_cells")
-        water = layer(
-            "ScatterplotLayer", "water",
-            data={"length": n},
-            getPosition=pos_bin,
-            getFillColor=col_bin,
-            getRadius=30,
-            radiusMinPixels=3 if is_hexsim else 2,
-            radiusMaxPixels=8 if is_hexsim else 6,
-            pickable=False,
-        )
+        if is_hexsim:
+            # SolidPolygonLayer with pre-computed hex vertices
+            mesh = sim.mesh
+            cx = mesh.centroids[idx, 1] * _cached_scale
+            cy = -mesh.centroids[idx, 0] * _cached_scale
+            edge_s = mesh._edge * _cached_scale
+            verts, start_idx = _build_hex_polygons(cx, cy, edge_s)
+            rgb = _colorscale_rgb(z, cscale)
+            colors = np.column_stack([
+                rgb[idx, 0], rgb[idx, 1], rgb[idx, 2],
+                np.full(n, 220, dtype=np.uint8),
+            ]).astype(np.uint8)
+            water = layer(
+                "SolidPolygonLayer", "water",
+                data={"length": n, "startIndices": start_idx},
+                getPolygon=encode_binary_attribute(verts),
+                getFillColor=encode_binary_attribute(colors),
+                pickable=False,
+                _normalize=False,
+            )
+        else:
+            water = layer(
+                "ScatterplotLayer", "water",
+                data={"length": n},
+                getPosition=pos_bin,
+                getFillColor=col_bin,
+                getRadius=30,
+                radiusMinPixels=2,
+                radiusMaxPixels=6,
+                pickable=False,
+            )
         await map_widget.update(
             session,
-            layers=[water, _agent_layer(sim)],
-            view_state=_view_state(sim),
+            layers=[water, _agent_layer(sim, landscape=landscape)],
+            view_state=_view_state(sim, landscape=landscape),
             views=[map_view(controller=True)],
         )
 
-    async def _color_and_agent_update(sim):
-        """Send new colors + agents, positions stay in JS cache (~805 KB)."""
+    async def _color_and_agent_update(sim, landscape=None):
+        """Send new colors + agents."""
+        is_hexsim = hasattr(sim.mesh, '_edge')
+        if is_hexsim:
+            # SolidPolygonLayer can't do partial color update; do full rebuild
+            await _full_update(sim, landscape=landscape)
+            return
         z, cscale = _resolve_field(sim)
         idx = _water_idx(sim)
         col_bin = _build_color_binary(sim.mesh, z, cscale, idx)
         await map_widget.partial_update(session, [
             {"id": "water", "getFillColor": col_bin,
              "data": {"length": _cached_water_n}},
-            _agent_layer(sim),
+            _agent_layer(sim, landscape=landscape),
         ])
 
-    async def _agent_only_update(sim):
+    async def _agent_only_update(sim, landscape=None):
         """Send only agents, water layer untouched in JS cache (~5 KB)."""
-        await map_widget.partial_update(session, [_agent_layer(sim)])
+        await map_widget.partial_update(session, [_agent_layer(sim, landscape=landscape)])
 
     @reactive.effect
     async def _update_map():
@@ -585,19 +839,23 @@ def server(input, output, session):
             _cached_field = field_name
             _cached_subsample_idx = None
             _cached_scale = scale
-            await map_widget.set_style(session, CARTO_DARK)
-            await _full_update(sim)
+            if is_hexsim:
+                await map_widget.set_style(session, BLANK_STYLE)
+            else:
+                style = CARTO_POSITRON if _cached_theme == "light" else CARTO_DARK
+                await map_widget.set_style(session, style)
+            await _full_update(sim, landscape=landscape)
         elif field_changed:
             _cached_field = field_name
             _cached_scale = scale
-            await _color_and_agent_update(sim)
+            await _color_and_agent_update(sim, landscape=landscape)
         else:
             # Step only — choose path based on field dynamism
             _cached_scale = scale
             if field_name in DYNAMIC_FIELDS:
-                await _color_and_agent_update(sim)
+                await _color_and_agent_update(sim, landscape=landscape)
             else:
-                await _agent_only_update(sim)
+                await _agent_only_update(sim, landscape=landscape)
 
     # --- Chart helper: Plotly → HTML file + iframe (no widget/comm layer) ---
     def _plotly_iframe(fig, name, height="280px"):
@@ -625,9 +883,10 @@ def server(input, output, session):
     @render.ui
     def survival_plot():
         h = history.get()
+        theme = input.theme_mode() or "dark"
         fig = go.Figure()
         if not h:
-            fig.update_layout(**_base_layout(height=280))
+            fig.update_layout(**_base_layout(theme=theme, height=280))
             return _plotly_iframe(fig, "survival")
         times = [r["time"] for r in h]
         alive = [r["n_alive"] for r in h]
@@ -639,6 +898,7 @@ def server(input, output, session):
             name="Alive",
         ))
         fig.update_layout(**_base_layout(
+            theme=theme,
             height=280,
             xaxis_title="Hour",
             yaxis_title="N alive",
@@ -650,15 +910,17 @@ def server(input, output, session):
     @render.ui
     def energy_plot():
         h = history.get()
+        theme = input.theme_mode() or "dark"
         fig = go.Figure()
         if not h:
-            fig.update_layout(**_base_layout(height=280))
+            fig.update_layout(**_base_layout(theme=theme, height=280))
             return _plotly_iframe(fig, "energy")
         times = [r["time"] for r in h]
         ed = [r.get("mean_ed", 0) for r in h]
+        accent = ACCENT_COLOR_LIGHT if theme == "light" else ACCENT_COLOR
         fig.add_trace(go.Scatter(
             x=times, y=ed, mode="lines",
-            line=dict(color=ACCENT_COLOR, width=2.5),
+            line=dict(color=accent, width=2.5),
             fill="tozeroy",
             fillcolor="rgba(232, 213, 183, 0.1)",
             name="Mean ED",
@@ -670,6 +932,7 @@ def server(input, output, session):
             annotation_position="top left",
         )
         fig.update_layout(**_base_layout(
+            theme=theme,
             height=280,
             xaxis_title="Hour",
             yaxis_title="kJ/g",
@@ -681,9 +944,10 @@ def server(input, output, session):
     @render.ui
     def behavior_plot():
         h = history.get()
+        theme = input.theme_mode() or "dark"
         fig = go.Figure()
         if not h:
-            fig.update_layout(**_base_layout(height=280))
+            fig.update_layout(**_base_layout(theme=theme, height=280))
             return _plotly_iframe(fig, "behavior")
         times = [r["time"] for r in h]
         for b in range(5):
@@ -695,6 +959,7 @@ def server(input, output, session):
                 fillcolor=BEH_COLORS[b],
             ))
         fig.update_layout(**_base_layout(
+            theme=theme,
             height=280,
             xaxis_title="Hour",
             yaxis_title="Count",
@@ -704,6 +969,208 @@ def server(input, output, session):
             ),
         ))
         return _plotly_iframe(fig, "behavior")
+
+
+    # ── HexSim Viewer tab ─────────────────────────────────────────────────
+    _viewer_initialized = False
+
+    @reactive.effect
+    async def _init_viewer_workspaces():
+        """Populate workspace dropdown on startup."""
+        workspaces = await asyncio.to_thread(_find_workspaces)
+        if workspaces:
+            ui.update_select("viewer_workspace", choices=workspaces)
+
+    @reactive.effect
+    @reactive.event(input.viewer_workspace)
+    async def _update_viewer_layers():
+        """Update layer dropdown when workspace changes."""
+        ws = input.viewer_workspace()
+        if not ws:
+            return
+        layers = await asyncio.to_thread(_list_hxn_layers, ws)
+        ui.update_select("viewer_layer", choices=layers)
+
+    @render.ui
+    def viewer_map_container():
+        return ui.div(
+            viewer_map_widget.ui(height="520px"),
+            ui.output_ui("viewer_legend"),
+            style="position: relative;",
+        )
+
+    @reactive.effect
+    @reactive.event(input.viewer_load)
+    async def _load_viewer_layer():
+        nonlocal _viewer_initialized
+        hxn_path = input.viewer_layer()
+        ws_path = input.viewer_workspace()
+        if not hxn_path:
+            ui.notification_show("No layer selected", type="warning")
+            return
+
+        try:
+            hm = await asyncio.to_thread(HxnHexMap.from_file, hxn_path)
+        except Exception as e:
+            ui.notification_show(f"Read error: {e}", type="error", duration=10)
+            return
+
+        values = hm.values.astype(np.float32)
+
+        # Determine water cells (non-zero)
+        water_mask = values != 0.0
+        water_flat = np.where(water_mask)[0]
+        n_water = len(water_flat)
+
+        if n_water == 0:
+            ui.notification_show("No non-zero cells found", type="warning")
+            return
+
+        # Get georef from .grid file
+        ws = Path(ws_path)
+        grid_files = list(ws.glob("*.grid"))
+        if grid_files:
+            gm = GridMeta.from_file(grid_files[0])
+            edge = gm.edge
+            grid_x_extent = gm.x_extent
+            grid_y_extent = gm.y_extent
+        elif hm.format == "plain":
+            edge = hm.cell_size if hm.cell_size > 0 else 13.876
+            grid_x_extent = hm.width * 1.5 * edge
+            grid_y_extent = hm.height * np.sqrt(3.0) * edge
+        else:
+            edge = 13.876
+            grid_x_extent = hm.height * 1.5 * edge
+            grid_y_extent = hm.width * np.sqrt(3.0) * edge
+
+        # PATCH_HEXMAP data is row-major with hm.width as stride.
+        # Same layout as hxn_viewer: data_cols → x (long axis, east-west),
+        # data_rows → y (short axis, north-south).  No axis swap.
+        data_stride = hm.width
+        data_rows = water_flat // data_stride   # short axis
+        data_cols = water_flat % data_stride     # long axis
+        col_spacing = 1.5 * edge
+        row_spacing = np.sqrt(3.0) * edge
+        cx = data_cols.astype(np.float64) * col_spacing   # long axis (east-west)
+        cy = data_rows.astype(np.float64) * row_spacing   # short axis (north-south)
+        water_values = values[water_flat]
+
+        # Subsample for deck.gl (max 300K points)
+        max_pts = 300_000
+        if n_water > max_pts:
+            rng = np.random.default_rng(0)
+            idx = np.sort(rng.choice(n_water, max_pts, replace=False))
+        else:
+            idx = np.arange(n_water)
+
+        # Scale grid coordinates; negate Y to flip
+        viewer_scale = 0.0005
+        sx = cx[idx] * viewer_scale
+        sy = -cy[idx] * viewer_scale
+        n_pts = len(idx)
+
+        # Hex polygon vertices
+        edge_s = edge * viewer_scale
+        verts, start_idx = _build_hex_polygons(sx, sy, edge_s)
+
+        # Color by value
+        z = water_values[idx]
+        rgb = _colorscale_rgb(z, TEMP_COLORSCALE)
+        colors = np.column_stack([
+            rgb[:, 0], rgb[:, 1], rgb[:, 2],
+            np.full(n_pts, 220, dtype=np.uint8),
+        ]).astype(np.uint8)
+
+        center_x = float(np.mean(sx))
+        center_y = float(np.mean(sy))
+        extent = max(float(sx.max() - sx.min()), float(sy.max() - sy.min()))
+        zoom = -np.log2(max(extent / 800, 1))
+
+        water_layer = layer(
+            "SolidPolygonLayer", "viewer_water",
+            data={"length": n_pts, "startIndices": start_idx},
+            getPolygon=encode_binary_attribute(verts),
+            getFillColor=encode_binary_attribute(colors),
+            pickable=False,
+            _normalize=False,
+        )
+
+        await viewer_map_widget.set_style(session, BLANK_STYLE)
+        await viewer_map_widget.update(
+            session,
+            layers=[water_layer],
+            view_state={"longitude": center_x, "latitude": center_y, "zoom": float(zoom)},
+            views=[map_view(controller=True)],
+        )
+        _viewer_initialized = True
+
+        # Store metadata for display
+        _viewer_meta.set({
+            "format": hm.format,
+            "version": hm.version,
+            "ncols": hm.height,   # data rows = grid ncols (short axis)
+            "nrows": hm.width,    # data stride = grid nrows (long axis)
+            "total_cells": hm.n_hexagons,
+            "water_cells": n_water,
+            "cell_size": hm.cell_size if hm.cell_size > 0 else None,
+            "edge": edge,
+            "origin": hm.origin,
+            "nodata": hm.nodata,
+            "vmin": float(np.nanmin(water_values)),
+            "vmax": float(np.nanmax(water_values)),
+            "vmean": float(np.nanmean(water_values)),
+            "n_unique": int(len(np.unique(water_values))),
+            "layer_name": Path(hxn_path).parent.name,
+        })
+
+    _viewer_meta = reactive.Value({})
+
+    @render.ui
+    def viewer_metadata():
+        meta = _viewer_meta.get()
+        if not meta:
+            return ui.HTML(
+                '<div class="param-hint">Select a workspace and layer, '
+                'then click Load Layer.</div>'
+            )
+
+        origin = meta.get("origin", (0, 0))
+        cell_size_str = f'{meta["cell_size"]:.3f} m' if meta["cell_size"] else "from .grid"
+        hex_area = (3.0 * np.sqrt(3.0) / 2.0) * meta["edge"] ** 2
+
+        return ui.HTML(f'''
+            <div class="viewer-meta">
+                <strong class="viewer-meta-title">{meta["layer_name"]}</strong><br>
+                <span class="viewer-meta-label">Format:</span> {meta["format"]}<br>
+                <span class="viewer-meta-label">Version:</span> {meta["version"]}<br>
+                <span class="viewer-meta-label">Grid:</span> {meta["ncols"]} &times; {meta["nrows"]}<br>
+                <span class="viewer-meta-label">Total hexagons:</span> {meta["total_cells"]:,}<br>
+                <span class="viewer-meta-label">Water cells:</span> {meta["water_cells"]:,}
+                    ({100*meta["water_cells"]/meta["total_cells"]:.1f}%)<br>
+                <span class="viewer-meta-label">Hex edge:</span> {meta["edge"]:.3f} m<br>
+                <span class="viewer-meta-label">Hex area:</span> {hex_area:.1f} m&sup2;<br>
+                <span class="viewer-meta-label">Cell size:</span> {cell_size_str}<br>
+                <span class="viewer-meta-label">Origin:</span> ({origin[0]:.1f}, {origin[1]:.1f})<br>
+                <hr class="viewer-meta-hr">
+                <span class="viewer-meta-label">Values:</span><br>
+                &nbsp; min={meta["vmin"]:.2f} &nbsp; max={meta["vmax"]:.2f}<br>
+                &nbsp; mean={meta["vmean"]:.2f} &nbsp; unique={meta["n_unique"]}<br>
+            </div>
+        ''')
+
+    @render.ui
+    def viewer_legend():
+        meta = _viewer_meta.get()
+        if not meta:
+            return ui.HTML("")
+        gradient = ", ".join(f"{s[1]} {int(s[0]*100)}%" for s in TEMP_COLORSCALE)
+        return ui.HTML(
+            f'<div class="map-legend">'
+            f'<div class="map-legend-title">{meta["layer_name"]}</div>'
+            f'<div class="map-legend-bar" style="background:linear-gradient(to right,{gradient})"></div>'
+            f'<div class="map-legend-range"><span>{meta["vmin"]:.1f}</span><span>{meta["vmax"]:.1f}</span></div>'
+            f'</div>'
+        )
 
 
 app = App(app_ui, server, static_assets=str(Path(__file__).parent / "www"))

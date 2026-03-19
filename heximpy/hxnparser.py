@@ -4,9 +4,10 @@ Reads/writes HexSim .hxn (hexmap), .grid (workspace geometry),
 and .hbf (barrier) files. Provides hex grid geometry utilities
 and export to GeoDataFrame, shapefile, GeoTIFF, and CSV.
 
-Uses even-q column-offset convention (flat-top hexagons), matching
-the HexSim standard. Note: the older grid.py and HexSim.py.txt
-use odd-r row-offset convention — do not mix neighbor results.
+Uses odd-q column-offset convention (flat-top hexagons), matching
+the HexSim standard: odd columns are shifted down by half a row.
+Note: the older grid.py and HexSim.py.txt use odd-r row-offset
+convention — do not mix neighbor results.
 """
 from __future__ import annotations
 
@@ -115,7 +116,7 @@ class HexMap:
         return 1.0
 
     def neighbors(self, row: int, col: int) -> list[tuple[int, int]]:
-        """Even-q column-offset neighbors (flat-top hex)."""
+        """Odd-q column-offset neighbors (flat-top hex)."""
         if col % 2 == 0:
             offsets = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1)]
         else:
@@ -142,9 +143,9 @@ class HexMap:
 
     @staticmethod
     def _offset_to_cube(row: int, col: int) -> tuple[int, int, int]:
-        """Convert even-q offset coords to cube coords."""
+        """Convert odd-q offset coords to cube coords."""
         qx = col
-        qz = row - (col + (col & 1)) // 2
+        qz = row - col // 2
         qy = -qx - qz
         return (qx, qy, qz)
 
@@ -406,6 +407,48 @@ def read_barriers(path: str | Path) -> list[Barrier]:
                     )
                 )
     return barriers
+
+
+@dataclass
+class WorldFile:
+    """Affine transform from a world file (.bpw, .wld, .pgw, etc.).
+
+    Lines: A (x-scale), D (rotation), B (rotation), E (y-scale), C (x-origin), F (y-origin).
+    Maps pixel (col, row) to map (x, y) via:
+        x = A*col + B*row + C
+        y = D*col + E*row + F
+    """
+
+    A: float
+    D: float
+    B: float
+    E: float
+    C: float
+    F: float
+
+    @classmethod
+    def from_file(cls, path: str | Path) -> WorldFile:
+        """Read a 6-line world file."""
+        lines = Path(path).read_text().strip().splitlines()
+        if len(lines) < 6:
+            raise ValueError(f"World file needs 6 lines, got {len(lines)}: {path}")
+        vals = [float(line.strip()) for line in lines[:6]]
+        return cls(A=vals[0], D=vals[1], B=vals[2], E=vals[3], C=vals[4], F=vals[5])
+
+    def pixel_to_map(self, px, py):
+        """Transform pixel coordinates to map coordinates (scalar or array)."""
+        mx = self.A * px + self.B * py + self.C
+        my = self.D * px + self.E * py + self.F
+        return mx, my
+
+    @property
+    def matrix(self) -> np.ndarray:
+        """3x3 affine transformation matrix."""
+        return np.array([
+            [self.A, self.B, self.C],
+            [self.D, self.E, self.F],
+            [0.0,    0.0,    1.0],
+        ])
 
 
 @dataclass

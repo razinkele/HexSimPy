@@ -32,8 +32,8 @@ def sidebar_panel():
         ui.input_select(
             "landscape", "Study area",
             choices={
-                "curonian": "Curonian Lagoon",
                 "columbia": "Columbia River",
+                "curonian": "Curonian Lagoon",
             },
         ),
 
