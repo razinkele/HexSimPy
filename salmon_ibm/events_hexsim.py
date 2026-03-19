@@ -4,6 +4,109 @@ from dataclasses import dataclass, field
 import numpy as np
 from salmon_ibm.events import Event, register_event
 
+try:
+    from numba import njit
+    HAS_NUMBA = True
+except ImportError:
+    HAS_NUMBA = False
+    def njit(*args, **kwargs):
+        def decorator(func):
+            return func
+        if len(args) == 1 and callable(args[0]):
+            return args[0]
+        return decorator
+
+
+# ---------------------------------------------------------------------------
+# Numba JIT kernels for HexSim movement (hot path)
+# ---------------------------------------------------------------------------
+
+@njit(cache=True)
+def _move_gradient_numba(positions, water_nbrs, water_nbr_count, gradient,
+                         n_steps, walk_up, halt_dist):
+    """JIT kernel: move agents along gradient for n_steps.
+
+    Returns (final_positions, distances_moved).
+    """
+    n = len(positions)
+    distances = np.zeros(n, dtype=np.float64)
+    max_nbrs = water_nbrs.shape[1]
+
+    for step in range(n_steps):
+        any_moved = False
+        for i in range(n):
+            if halt_dist > 0 and distances[i] >= halt_dist:
+                continue
+            c = positions[i]
+            count = water_nbr_count[c]
+            if count <= 0:
+                continue
+            best_nb = c
+            best_val = gradient[c]
+            for k in range(count):
+                nb = water_nbrs[c, k]
+                if nb < 0:
+                    continue
+                val = gradient[nb]
+                if walk_up:
+                    if val > best_val:
+                        best_val = val
+                        best_nb = nb
+                else:
+                    if val < best_val:
+                        best_val = val
+                        best_nb = nb
+            if best_nb != c:
+                positions[i] = best_nb
+                distances[i] += 1.0
+                any_moved = True
+        if not any_moved:
+            break
+    return positions, distances
+
+
+@njit(cache=True)
+def _move_affinity_numba(positions, water_nbrs, water_nbr_count,
+                         centroids_x, centroids_y, targets, n_steps, halt_dist):
+    """JIT kernel: move agents toward affinity targets for n_steps.
+
+    Returns (final_positions, distances_moved).
+    """
+    n = len(positions)
+    distances = np.zeros(n, dtype=np.float64)
+
+    for step in range(n_steps):
+        any_moved = False
+        for i in range(n):
+            if halt_dist > 0 and distances[i] >= halt_dist:
+                continue
+            if targets[i] < 0:
+                continue
+            c = positions[i]
+            count = water_nbr_count[c]
+            if count <= 0:
+                continue
+            target = targets[i]
+            tx = centroids_x[target]
+            ty = centroids_y[target]
+            best_nb = c
+            best_dist_sq = (centroids_x[c] - tx) ** 2 + (centroids_y[c] - ty) ** 2
+            for k in range(count):
+                nb = water_nbrs[c, k]
+                if nb < 0:
+                    continue
+                d_sq = (centroids_x[nb] - tx) ** 2 + (centroids_y[nb] - ty) ** 2
+                if d_sq < best_dist_sq:
+                    best_dist_sq = d_sq
+                    best_nb = nb
+            if best_nb != c:
+                positions[i] = best_nb
+                distances[i] += 1.0
+                any_moved = True
+        if not any_moved:
+            break
+    return positions, distances
+
 
 def _apply_trait_combo_mask(base_mask, uf, population):
     """Narrow base_mask to agents matching the trait combination in a updater dict.
@@ -351,95 +454,119 @@ class HexSimMoveEvent(Event):
         if use_affinity and hasattr(population, 'affinity_targets'):
             affinity_targets = population.affinity_targets[alive_idx]
 
-        # Vectorized movement loop
+        # Movement kernel dispatch
         n_agents = len(alive_idx)
-        distances = np.zeros(n_agents)
         n_steps = max(1, int(halt_dist)) if halt_dist > 0 else 1
         water_nbrs = mesh._water_nbrs
         water_nbr_count = mesh._water_nbr_count
 
-        for step in range(n_steps):
-            counts = water_nbr_count[positions]
-            has_nbrs = counts > 0
-            if not has_nbrs.any():
-                break
+        if affinity_targets is not None and (affinity_targets >= 0).any():
+            # Split: affinity-targeted agents vs gradient-following
+            has_target = affinity_targets >= 0
+            aff_mask = np.where(has_target)[0]
+            grad_mask = np.where(~has_target)[0]
 
-            active = has_nbrs
-            if halt_dist > 0:
-                active = active & (distances < halt_dist)
-                if not active.any():
-                    break
+            distances = np.zeros(n_agents)
 
-            act_idx = np.where(active)[0]
-            act_pos = positions[act_idx]
+            if len(aff_mask) > 0 and HAS_NUMBA:
+                aff_pos = positions[aff_mask].copy()
+                cx = np.ascontiguousarray(mesh.centroids[:, 0])
+                cy = np.ascontiguousarray(mesh.centroids[:, 1])
+                aff_pos, aff_dist = _move_affinity_numba(
+                    aff_pos, water_nbrs, water_nbr_count,
+                    cx, cy, affinity_targets[aff_mask], n_steps, halt_dist)
+                positions[aff_mask] = aff_pos
+                distances[aff_mask] = aff_dist
+            elif len(aff_mask) > 0:
+                # NumPy fallback for affinity
+                for i in aff_mask:
+                    for _ in range(n_steps):
+                        if halt_dist > 0 and distances[i] >= halt_dist:
+                            break
+                        c = positions[i]
+                        tgt = affinity_targets[i]
+                        if tgt < 0 or water_nbr_count[c] <= 0:
+                            break
+                        best = c
+                        best_d = (mesh.centroids[c, 0] - mesh.centroids[tgt, 0]) ** 2 + \
+                                 (mesh.centroids[c, 1] - mesh.centroids[tgt, 1]) ** 2
+                        for k in range(water_nbr_count[c]):
+                            nb = water_nbrs[c, k]
+                            if nb < 0:
+                                continue
+                            d = (mesh.centroids[nb, 0] - mesh.centroids[tgt, 0]) ** 2 + \
+                                (mesh.centroids[nb, 1] - mesh.centroids[tgt, 1]) ** 2
+                            if d < best_d:
+                                best_d = d
+                                best = nb
+                        if best != c:
+                            positions[i] = best
+                            distances[i] += 1.0
 
-            # Gather neighbor matrix for active agents
-            nbr_matrix = water_nbrs[act_pos]  # (n_active, max_nbrs)
-            valid = nbr_matrix >= 0
-
-            if affinity_targets is not None:
-                # Split into affinity-targeted and gradient-following
-                has_target = affinity_targets[act_idx] >= 0
-                aff_idx = np.where(has_target)[0]
-                grad_idx = np.where(~has_target)[0]
-
-                # --- Affinity targeting (move toward target centroid) ---
-                if len(aff_idx) > 0:
-                    aff_pos = act_pos[aff_idx]
-                    aff_targets = affinity_targets[act_idx[aff_idx]]
-                    aff_nbrs = nbr_matrix[aff_idx]
-                    aff_valid = valid[aff_idx]
-                    # Target centroids
-                    tc = mesh.centroids[aff_targets]  # (n_aff, 2)
-                    # Neighbor centroids
-                    safe_nbrs = np.where(aff_nbrs >= 0, aff_nbrs, 0)
-                    nb_cx = mesh.centroids[safe_nbrs, 0]  # (n_aff, max_nbrs)
-                    nb_cy = mesh.centroids[safe_nbrs, 1]
-                    # Distance from each neighbor to target
-                    dx = nb_cx - tc[:, 0:1]
-                    dy = nb_cy - tc[:, 1:2]
-                    dist_to_target = np.sqrt(dx * dx + dy * dy)
-                    dist_to_target[~aff_valid] = np.inf
-                    best_local = np.argmin(dist_to_target, axis=1)
-                    chosen = aff_nbrs[np.arange(len(aff_idx)), best_local]
-                    # Only move if the chosen neighbor is valid
-                    moved = aff_valid[np.arange(len(aff_idx)), best_local]
-                    global_aff = act_idx[aff_idx]
-                    positions[global_aff[moved]] = chosen[moved]
-                    distances[global_aff[moved]] += 1.0
-
-                # --- Gradient following for non-affinity agents ---
-                if len(grad_idx) > 0:
-                    g_pos = act_pos[grad_idx]
-                    g_nbrs = nbr_matrix[grad_idx]
-                    g_valid = valid[grad_idx]
-                    safe_g = np.where(g_nbrs >= 0, g_nbrs, 0)
-                    nbr_vals = gradient[safe_g]
-                    if self.walk_up_gradient:
-                        nbr_vals[~g_valid] = -np.inf
-                        best_local = np.argmax(nbr_vals, axis=1)
-                    else:
-                        nbr_vals[~g_valid] = np.inf
-                        best_local = np.argmin(nbr_vals, axis=1)
-                    chosen = g_nbrs[np.arange(len(grad_idx)), best_local]
-                    moved = g_valid[np.arange(len(grad_idx)), best_local]
-                    global_grad = act_idx[grad_idx]
-                    positions[global_grad[moved]] = chosen[moved]
-                    distances[global_grad[moved]] += 1.0
-            else:
-                # All agents follow gradient (no affinity targets)
-                safe_nbrs = np.where(nbr_matrix >= 0, nbr_matrix, 0)
-                nbr_vals = gradient[safe_nbrs]
-                if self.walk_up_gradient:
-                    nbr_vals[~valid] = -np.inf
-                    best_local = np.argmax(nbr_vals, axis=1)
+            if len(grad_mask) > 0:
+                grad_pos = positions[grad_mask].copy()
+                if HAS_NUMBA:
+                    grad_pos, grad_dist = _move_gradient_numba(
+                        grad_pos, water_nbrs, water_nbr_count,
+                        gradient, n_steps, self.walk_up_gradient, halt_dist)
                 else:
-                    nbr_vals[~valid] = np.inf
-                    best_local = np.argmin(nbr_vals, axis=1)
-                chosen = nbr_matrix[np.arange(len(act_idx)), best_local]
-                moved = valid[np.arange(len(act_idx)), best_local]
-                positions[act_idx[moved]] = chosen[moved]
-                distances[act_idx[moved]] += 1.0
+                    grad_dist = np.zeros(len(grad_mask))
+                    for i in range(len(grad_mask)):
+                        for _ in range(n_steps):
+                            if halt_dist > 0 and grad_dist[i] >= halt_dist:
+                                break
+                            c = grad_pos[i]
+                            if water_nbr_count[c] <= 0:
+                                break
+                            best = c
+                            best_val = gradient[c]
+                            for k in range(water_nbr_count[c]):
+                                nb = water_nbrs[c, k]
+                                if nb < 0:
+                                    continue
+                                val = gradient[nb]
+                                if self.walk_up_gradient and val > best_val:
+                                    best_val = val
+                                    best = nb
+                                elif not self.walk_up_gradient and val < best_val:
+                                    best_val = val
+                                    best = nb
+                            if best != c:
+                                grad_pos[i] = best
+                                grad_dist[i] += 1.0
+                positions[grad_mask] = grad_pos
+                distances[grad_mask] = grad_dist
+        else:
+            # All agents follow gradient — single Numba call
+            if HAS_NUMBA:
+                positions, distances = _move_gradient_numba(
+                    positions, water_nbrs, water_nbr_count,
+                    gradient, n_steps, self.walk_up_gradient, halt_dist)
+            else:
+                distances = np.zeros(n_agents)
+                for i in range(n_agents):
+                    for _ in range(n_steps):
+                        if halt_dist > 0 and distances[i] >= halt_dist:
+                            break
+                        c = positions[i]
+                        if water_nbr_count[c] <= 0:
+                            break
+                        best = c
+                        best_val = gradient[c]
+                        for k in range(water_nbr_count[c]):
+                            nb = water_nbrs[c, k]
+                            if nb < 0:
+                                continue
+                            val = gradient[nb]
+                            if self.walk_up_gradient and val > best_val:
+                                best_val = val
+                                best = nb
+                            elif not self.walk_up_gradient and val < best_val:
+                                best_val = val
+                                best = nb
+                        if best != c:
+                            positions[i] = best
+                            distances[i] += 1.0
 
         population.tri_idx[alive_idx] = positions
 
