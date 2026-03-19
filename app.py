@@ -1015,6 +1015,8 @@ def server(input, output, session):
                 data={"length": n, "startIndices": start_idx},
                 getPolygon=encode_binary_attribute(verts),
                 getFillColor=encode_binary_attribute(colors),
+                filled=True,
+                extruded=False,
                 pickable=False,
             )
         else:
@@ -1380,7 +1382,8 @@ def server(input, output, session):
             data={"length": n_pts, "startIndices": start_idx},
             getPolygon=encode_binary_attribute(verts),
             getFillColor=encode_binary_attribute(colors),
-            coordinateSystem=int(CoordinateSystem.CARTESIAN),
+            filled=True,
+            extruded=False,
             pickable=False,
         )
 
