@@ -119,3 +119,36 @@ class TestBarrierMovementIntegration:
             np.random.default_rng(42))
         assert final[0] == 2
         assert not died[0]  # should NOT die since it didn't move
+
+
+def test_barrier_resolution_numba_produces_same_result():
+    """Numba and NumPy barrier resolution should produce identical results."""
+    import salmon_ibm.movement as mov
+    rng = np.random.default_rng(42)
+    n = 1000
+    n_cells = 500
+    max_nbrs = 6
+    neighbors = np.random.randint(0, n_cells, (n_cells, max_nbrs))
+    current = rng.integers(0, n_cells, n)
+    proposed = rng.integers(0, n_cells, n)
+    for i in range(n):
+        if rng.random() < 0.7:
+            proposed[i] = neighbors[current[i], rng.integers(0, max_nbrs)]
+    mort = rng.random((n_cells, max_nbrs)) * 0.1
+    defl = rng.random((n_cells, max_nbrs)) * 0.2
+    trans = np.ones((n_cells, max_nbrs))
+
+    orig = mov.FORCE_NUMPY
+    try:
+        mov.FORCE_NUMPY = True
+        final_np, died_np = mov._resolve_barriers_vec(
+            current.copy(), proposed.copy(), mort, defl, trans, neighbors,
+            np.random.default_rng(99))
+        mov.FORCE_NUMPY = False
+        final_nb, died_nb = mov._resolve_barriers_vec(
+            current.copy(), proposed.copy(), mort, defl, trans, neighbors,
+            np.random.default_rng(99))
+    finally:
+        mov.FORCE_NUMPY = orig
+    np.testing.assert_array_equal(final_np, final_nb)
+    np.testing.assert_array_equal(died_np, died_nb)
