@@ -140,21 +140,37 @@ class EventGroup(Event):
     def execute(self, population, landscape, t, mask):
         multi_pop = landscape.get("multi_pop_mgr")
 
+        # Pre-filter: resolve triggers and populations once (they don't
+        # change across iterations). This avoids repeating trigger checks
+        # and population lookups inside the inner loop.
+        prepared = []
+        for event in self.sub_events:
+            if not getattr(event, 'enabled', True):
+                continue
+            if not event.trigger.should_fire(t):
+                continue
+            child_pop = population
+            child_pop_name = getattr(event, 'population_name', None)
+            if child_pop_name and multi_pop:
+                child_pop = multi_pop.get(child_pop_name)
+            tf = getattr(event, 'trait_filter', None)
+            prepared.append((event, child_pop, tf))
+
+        if not prepared:
+            return
+
+        _empty_mask = np.ones(0, dtype=bool)
+
         for _ in range(self.iterations):
-            for event in self.sub_events:
-                if not getattr(event, 'enabled', True):
-                    continue
-                if event.trigger.should_fire(t):
-                    # Route to child's population if it has a population_name
-                    child_pop = population
-                    child_pop_name = getattr(event, 'population_name', None)
-                    if child_pop_name and multi_pop:
-                        child_pop = multi_pop.get(child_pop_name)
+            for event, child_pop, tf in prepared:
                     if child_pop is not None:
+                        # Fast path: skip mask computation if population is empty
+                        if getattr(child_pop, 'n_alive', 1) == 0:
+                            event.execute(child_pop, landscape, t, _empty_mask)
+                            continue
                         child_mask = child_pop.alive & ~child_pop.arrived
                         # Apply child's trait filter if present
-                        if hasattr(event, 'trait_filter') and event.trait_filter is not None:
-                            tf = event.trait_filter
+                        if tf is not None:
                             if hasattr(child_pop, 'trait_mgr') and child_pop.trait_mgr is not None:
                                 if isinstance(tf, dict) and "traits" in tf:
                                     from salmon_ibm.events_hexsim import _apply_trait_combo_mask
@@ -163,7 +179,7 @@ class EventGroup(Event):
                                     trait_mask = child_pop.trait_mgr.filter_by_traits(**tf)
                                     child_mask = child_mask & trait_mask
                     else:
-                        child_mask = np.ones(0, dtype=bool)
+                        child_mask = _empty_mask
                     event.execute(child_pop, landscape, t, child_mask)
 
 
