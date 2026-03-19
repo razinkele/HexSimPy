@@ -268,29 +268,38 @@ class SetSpatialAffinityEvent(Event):
         else:
             max_bounds = np.full(len(alive_idx), np.inf)
 
-        # For each agent, find best cell within bounds
+        # Vectorized: find best neighbor within bounds for each agent
         current_cells = population.tri_idx[alive_idx]
-        targets = np.full(len(alive_idx), -1, dtype=np.intp)
+        n = len(alive_idx)
 
-        for i in range(len(alive_idx)):
-            cell = current_cells[i]
-            best_cell = -1
-            best_val = gradient[cell] if self.strategy == "better" else -np.inf
+        # Gather neighbor matrix
+        nbr_matrix = mesh._water_nbrs[current_cells]  # (n, max_nbrs)
+        valid = nbr_matrix >= 0
+        safe_nbrs = np.where(nbr_matrix >= 0, nbr_matrix, 0)
 
-            # Search neighbors within bounds
-            count = mesh._water_nbr_count[cell]
-            for k in range(count):
-                nb = mesh._water_nbrs[cell, k]
-                if nb < 0:
-                    continue
-                dist = abs(gradient[nb] - gradient[cell])
-                if dist < min_bounds[i] or dist > max_bounds[i]:
-                    continue
-                if gradient[nb] > best_val:
-                    best_val = gradient[nb]
-                    best_cell = nb
+        # Gradient values at neighbors and current cells
+        nbr_grad = gradient[safe_nbrs]  # (n, max_nbrs)
+        cur_grad = gradient[current_cells]  # (n,)
 
-            targets[i] = best_cell
+        # Distance = |gradient[nb] - gradient[cell]|
+        dist = np.abs(nbr_grad - cur_grad[:, np.newaxis])
+
+        # Bounds filtering: valid & (dist >= min_bounds) & (dist <= max_bounds)
+        in_bounds = valid & (dist >= min_bounds[:, np.newaxis]) & (dist <= max_bounds[:, np.newaxis])
+
+        # Among in-bounds neighbors, find the one with highest gradient value
+        candidate_vals = np.where(in_bounds, nbr_grad, -np.inf)
+
+        # For "better" strategy: only accept if better than current
+        if self.strategy == "better":
+            candidate_vals = np.where(candidate_vals > cur_grad[:, np.newaxis], candidate_vals, -np.inf)
+
+        best_local = np.argmax(candidate_vals, axis=1)
+        best_vals = candidate_vals[np.arange(n), best_local]
+        has_valid = best_vals > -np.inf
+
+        targets = np.full(n, -1, dtype=np.intp)
+        targets[has_valid] = nbr_matrix[np.where(has_valid)[0], best_local[has_valid]]
 
         # Write targets to population affinity
         population.affinity_targets[alive_idx] = targets
@@ -342,55 +351,95 @@ class HexSimMoveEvent(Event):
         if use_affinity and hasattr(population, 'affinity_targets'):
             affinity_targets = population.affinity_targets[alive_idx]
 
-        # Movement loop: step toward gradient or affinity target
-        distances = np.zeros(len(alive_idx))
+        # Vectorized movement loop
+        n_agents = len(alive_idx)
+        distances = np.zeros(n_agents)
         n_steps = max(1, int(halt_dist)) if halt_dist > 0 else 1
+        water_nbrs = mesh._water_nbrs
+        water_nbr_count = mesh._water_nbr_count
+
         for step in range(n_steps):
-            for i in range(len(alive_idx)):
-                c = positions[i]
-                count = mesh._water_nbr_count[c]
-                if count <= 0:
-                    continue
-
-                if affinity_targets is not None and affinity_targets[i] >= 0:
-                    # Move toward affinity target
-                    target = affinity_targets[i]
-                    best_nb = c
-                    best_dist = np.inf
-                    tc = mesh.centroids[target]
-                    for k in range(count):
-                        nb = mesh._water_nbrs[c, k]
-                        if nb < 0:
-                            continue
-                        d = np.sqrt(
-                            (mesh.centroids[nb, 0] - tc[0]) ** 2 +
-                            (mesh.centroids[nb, 1] - tc[1]) ** 2
-                        )
-                        if d < best_dist:
-                            best_dist = d
-                            best_nb = nb
-                    positions[i] = best_nb
-                else:
-                    # Gradient following
-                    best_nb = c
-                    best_val = gradient[c]
-                    for k in range(count):
-                        nb = mesh._water_nbrs[c, k]
-                        if nb < 0:
-                            continue
-                        val = gradient[nb]
-                        if self.walk_up_gradient and val > best_val:
-                            best_val = val
-                            best_nb = nb
-                        elif not self.walk_up_gradient and val < best_val:
-                            best_val = val
-                            best_nb = nb
-                    positions[i] = best_nb
-
-                distances[i] += 1.0
-
-            if halt_dist > 0 and (distances >= halt_dist).all():
+            counts = water_nbr_count[positions]
+            has_nbrs = counts > 0
+            if not has_nbrs.any():
                 break
+
+            active = has_nbrs
+            if halt_dist > 0:
+                active = active & (distances < halt_dist)
+                if not active.any():
+                    break
+
+            act_idx = np.where(active)[0]
+            act_pos = positions[act_idx]
+
+            # Gather neighbor matrix for active agents
+            nbr_matrix = water_nbrs[act_pos]  # (n_active, max_nbrs)
+            valid = nbr_matrix >= 0
+
+            if affinity_targets is not None:
+                # Split into affinity-targeted and gradient-following
+                has_target = affinity_targets[act_idx] >= 0
+                aff_idx = np.where(has_target)[0]
+                grad_idx = np.where(~has_target)[0]
+
+                # --- Affinity targeting (move toward target centroid) ---
+                if len(aff_idx) > 0:
+                    aff_pos = act_pos[aff_idx]
+                    aff_targets = affinity_targets[act_idx[aff_idx]]
+                    aff_nbrs = nbr_matrix[aff_idx]
+                    aff_valid = valid[aff_idx]
+                    # Target centroids
+                    tc = mesh.centroids[aff_targets]  # (n_aff, 2)
+                    # Neighbor centroids
+                    safe_nbrs = np.where(aff_nbrs >= 0, aff_nbrs, 0)
+                    nb_cx = mesh.centroids[safe_nbrs, 0]  # (n_aff, max_nbrs)
+                    nb_cy = mesh.centroids[safe_nbrs, 1]
+                    # Distance from each neighbor to target
+                    dx = nb_cx - tc[:, 0:1]
+                    dy = nb_cy - tc[:, 1:2]
+                    dist_to_target = np.sqrt(dx * dx + dy * dy)
+                    dist_to_target[~aff_valid] = np.inf
+                    best_local = np.argmin(dist_to_target, axis=1)
+                    chosen = aff_nbrs[np.arange(len(aff_idx)), best_local]
+                    # Only move if the chosen neighbor is valid
+                    moved = aff_valid[np.arange(len(aff_idx)), best_local]
+                    global_aff = act_idx[aff_idx]
+                    positions[global_aff[moved]] = chosen[moved]
+                    distances[global_aff[moved]] += 1.0
+
+                # --- Gradient following for non-affinity agents ---
+                if len(grad_idx) > 0:
+                    g_pos = act_pos[grad_idx]
+                    g_nbrs = nbr_matrix[grad_idx]
+                    g_valid = valid[grad_idx]
+                    safe_g = np.where(g_nbrs >= 0, g_nbrs, 0)
+                    nbr_vals = gradient[safe_g]
+                    if self.walk_up_gradient:
+                        nbr_vals[~g_valid] = -np.inf
+                        best_local = np.argmax(nbr_vals, axis=1)
+                    else:
+                        nbr_vals[~g_valid] = np.inf
+                        best_local = np.argmin(nbr_vals, axis=1)
+                    chosen = g_nbrs[np.arange(len(grad_idx)), best_local]
+                    moved = g_valid[np.arange(len(grad_idx)), best_local]
+                    global_grad = act_idx[grad_idx]
+                    positions[global_grad[moved]] = chosen[moved]
+                    distances[global_grad[moved]] += 1.0
+            else:
+                # All agents follow gradient (no affinity targets)
+                safe_nbrs = np.where(nbr_matrix >= 0, nbr_matrix, 0)
+                nbr_vals = gradient[safe_nbrs]
+                if self.walk_up_gradient:
+                    nbr_vals[~valid] = -np.inf
+                    best_local = np.argmax(nbr_vals, axis=1)
+                else:
+                    nbr_vals[~valid] = np.inf
+                    best_local = np.argmin(nbr_vals, axis=1)
+                chosen = nbr_matrix[np.arange(len(act_idx)), best_local]
+                moved = valid[np.arange(len(act_idx)), best_local]
+                positions[act_idx[moved]] = chosen[moved]
+                distances[act_idx[moved]] += 1.0
 
         population.tri_idx[alive_idx] = positions
 
