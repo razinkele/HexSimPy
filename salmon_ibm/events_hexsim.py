@@ -138,18 +138,21 @@ def _set_affinity_numba(current_cells, water_nbrs, water_nbr_count, gradient,
 
 
 _combo_flags_cache: dict[str, np.ndarray] = {}
+# Per-step cache: (population_id, combos_str) → enabled_mask
+_combo_mask_cache: dict[tuple, np.ndarray] = {}
+_combo_mask_cache_step: int = -1
 
 
 def _apply_trait_combo_mask(base_mask, uf, population):
     """Narrow base_mask to agents matching the trait combination in a updater dict.
 
-    If the updater has 'stratified_traits' and 'trait_combinations', the
-    space-separated '1'/'0' string encodes which Cartesian-product combinations
-    of trait categories are targeted.  We build the intersection of base_mask
-    with all agents that fall in any enabled combination.
+    Caches the enabled-combo mask per (population, combo_string, step) to avoid
+    recomputing the same mixed-radix encoding thousands of times per step.
 
     Returns the (possibly unchanged) mask.
     """
+    global _combo_mask_cache_step
+
     stratified = uf.get("stratified_traits")
     combos_str = uf.get("trait_combinations")
     if not stratified or combos_str is None:
@@ -158,14 +161,20 @@ def _apply_trait_combo_mask(base_mask, uf, population):
     if trait_mgr is None:
         return base_mask
 
-    # Cache parsed combo_flags (same string → same array)
+    # Check per-step cache
+    pop_id = id(population)
+    cache_key = (pop_id, combos_str)
+    cached = _combo_mask_cache.get(cache_key)
+    if cached is not None and len(cached) == len(base_mask):
+        return base_mask & cached
+
+    # Cache parsed combo_flags (same string → same array, permanent)
     combo_flags = _combo_flags_cache.get(combos_str)
     if combo_flags is None:
         combo_flags = np.array([int(x) for x in str(combos_str).split()], dtype=np.int8)
         _combo_flags_cache[combos_str] = combo_flags
 
     # Build flat combo index using mixed-radix encoding
-    n_cats_list = []
     flat_idx = np.zeros(len(base_mask), dtype=np.int32)
     stride = 1
     for tname in reversed(stratified):
@@ -173,15 +182,20 @@ def _apply_trait_combo_mask(base_mask, uf, population):
             return base_mask
         defn = trait_mgr.definitions[tname]
         n_cat = len(defn.categories)
-        n_cats_list.append(n_cat)
         flat_idx += trait_mgr.get(tname).astype(np.int32) * stride
         stride *= n_cat
 
     if len(combo_flags) != stride:
-        return base_mask  # mismatch
+        return base_mask
 
-    # Vectorized lookup
-    return base_mask & (combo_flags[flat_idx] == 1)
+    enabled = combo_flags[flat_idx] == 1
+    _combo_mask_cache[cache_key] = enabled
+    return base_mask & enabled
+
+
+def clear_combo_mask_cache():
+    """Call at the start of each step to invalidate trait-combo caches."""
+    _combo_mask_cache.clear()
 
 
 @register_event("accumulate")  # overrides AccumulateEvent from events_builtin

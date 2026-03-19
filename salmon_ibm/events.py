@@ -113,6 +113,9 @@ class MultiPopEventSequencer:
 
     def step(self, landscape, t):
         landscape["multi_pop_mgr"] = self.multi_pop
+        # Clear per-step caches
+        from salmon_ibm.events_hexsim import clear_combo_mask_cache
+        clear_combo_mask_cache()
         for event in self.events:
             if not getattr(event, 'enabled', True):
                 continue
