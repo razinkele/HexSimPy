@@ -382,6 +382,7 @@ WWW_DIR = Path(__file__).parent / "www"
 
 # Max hex background points for deck.gl (200K → ~5.5 MB HTML, less banding)
 MAX_DECK_POINTS = 200_000
+MAX_HEX_POINTS = 500_000  # SolidPolygonLayer is more GPU-efficient
 
 # --- shiny-deckgl map widget (shared by both landscapes) ---
 TOOLTIP_STYLE = {
@@ -847,9 +848,14 @@ def server(input, output, session):
         is_hexsim = hasattr(mesh, "n_cells")
         if is_hexsim:
             if _cached_subsample_idx is None:
-                _cached_subsample_idx = _subsample_indices(
-                    mesh.n_cells, MAX_DECK_POINTS
-                )
+                n = mesh.n_cells
+                if n > MAX_HEX_POINTS:
+                    # Stride-based subsampling: preserves spatial structure
+                    # (random subsampling scatters hexagons across the grid)
+                    step = max(1, n // MAX_HEX_POINTS)
+                    _cached_subsample_idx = np.arange(0, n, step)
+                else:
+                    _cached_subsample_idx = np.arange(n)
             return _cached_subsample_idx
         if _cached_subsample_idx is None:
             _cached_subsample_idx = np.where(mesh.water_mask)[0]
