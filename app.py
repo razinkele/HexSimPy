@@ -626,6 +626,30 @@ def server(input, output, session):
         running.set(False)
         trail_buffer.clear()
 
+        # Update field selector: HexSim meshes have spatial data layers
+        is_hexsim = hasattr(sim.mesh, "n_cells")
+        if is_hexsim and hasattr(sim, 'landscape') and 'spatial_data' in sim.landscape:
+            sd = sim.landscape["spatial_data"]
+            choices = {name: name for name in sorted(sd.keys())}
+            if not choices:
+                choices = {"depth": "Grid Values"}
+            ui.update_select("map_field", choices=choices)
+        elif is_hexsim:
+            # HexSim without scenario loader — use environment fields
+            choices = {}
+            if hasattr(sim.env, 'fields'):
+                for k in sim.env.fields:
+                    choices[k] = k.replace("_", " ").title()
+            choices["depth"] = "Bathymetry"
+            ui.update_select("map_field", choices=choices)
+        else:
+            ui.update_select("map_field", choices={
+                "temperature": "Temperature",
+                "salinity": "Salinity",
+                "ssh": "Sea Surface Height",
+                "depth": "Bathymetry",
+            })
+
     @reactive.effect
     @reactive.event(input.btn_step)
     async def _step():
@@ -850,11 +874,32 @@ def server(input, output, session):
     def _resolve_field(sim):
         """Resolve current field → (z, colorscale)."""
         field_name = input.map_field()
+        is_hexsim = hasattr(sim.mesh, "n_cells")
+
+        # HexSim: check spatial_data dict first
+        if is_hexsim and hasattr(sim, 'landscape') and 'spatial_data' in sim.landscape:
+            sd = sim.landscape.get("spatial_data", {})
+            if field_name in sd:
+                return sd[field_name], TEMP_COLORSCALE
+
+        # Standard fields
         if field_name == "depth":
-            return sim.mesh.depth, BATHY_COLORSCALE
+            if hasattr(sim.mesh, 'depth'):
+                return sim.mesh.depth, BATHY_COLORSCALE
+            # HexSim meshes don't have depth — return zeros
+            return np.zeros(sim.mesh.n_cells if is_hexsim else sim.mesh.n_triangles), BATHY_COLORSCALE
         elif field_name in sim.env.fields:
             return sim.env.fields[field_name], TEMP_COLORSCALE
-        return sim.mesh.depth, BATHY_COLORSCALE
+
+        # Fallback: first available spatial data layer or temperature
+        if is_hexsim and hasattr(sim, 'landscape'):
+            sd = sim.landscape.get("spatial_data", {})
+            if sd:
+                first_key = next(iter(sd))
+                return sd[first_key], TEMP_COLORSCALE
+        if hasattr(sim.mesh, 'depth'):
+            return sim.mesh.depth, BATHY_COLORSCALE
+        return np.zeros(sim.mesh.n_cells if is_hexsim else 100), BATHY_COLORSCALE
 
     def _water_idx(sim):
         """Return subsample indices for the current mesh."""
@@ -1327,8 +1372,8 @@ def server(input, output, session):
 
         center_x = float(np.mean(sx))
         center_y = float(np.mean(sy))
-        extent = max(float(sx.max() - sx.min()), float(sy.max() - sy.min()))
-        zoom = -np.log2(max(extent / 800, 1))
+        extent = max(float(sx.max() - sx.min()), float(sy.max() - sy.min()), 0.01)
+        zoom = float(np.log2(360 / extent))  # fit extent into ~360 degrees of view
 
         water_layer = layer(
             "SolidPolygonLayer", "viewer_water",
