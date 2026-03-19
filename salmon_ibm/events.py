@@ -157,11 +157,9 @@ class EventGroup(Event):
                             tf = event.trait_filter
                             if hasattr(child_pop, 'trait_mgr') and child_pop.trait_mgr is not None:
                                 if isinstance(tf, dict) and "traits" in tf:
-                                    # HexSim combo format — use _apply_trait_combo_mask
                                     from salmon_ibm.events_hexsim import _apply_trait_combo_mask
                                     child_mask = _apply_trait_combo_mask(child_mask, tf, child_pop)
                                 elif isinstance(tf, dict):
-                                    # Simple {trait_name: value} format
                                     trait_mask = child_pop.trait_mgr.filter_by_traits(**tf)
                                     child_mask = child_mask & trait_mask
                     else:

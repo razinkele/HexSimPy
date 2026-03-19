@@ -132,6 +132,38 @@ def _validate_expression(expr):
             # ast.Attribute calls (e.g., _rng.random) are allowed in HexSim mode
 
 
+class _LazyAccDict:
+    """Dict-like that lazily copies accumulator columns on first access.
+
+    Avoids building a full {name: masked_column} dict for all 74 accumulators
+    when the expression only references 1-2.
+    """
+    __slots__ = ('_data', '_mask', '_idx', '_cache')
+
+    def __init__(self, data, mask, name_to_idx):
+        self._data = data
+        self._mask = mask
+        self._idx = name_to_idx
+        self._cache = {}
+
+    def __getitem__(self, name):
+        if name not in self._cache:
+            col = self._idx.get(name)
+            if col is None:
+                raise KeyError(name)
+            self._cache[name] = self._data[self._mask, col]
+        return self._cache[name]
+
+    def __contains__(self, name):
+        return name in self._idx
+
+    def get(self, name, default=None):
+        try:
+            return self[name]
+        except KeyError:
+            return default
+
+
 def updater_expression(manager, acc_name, mask, *, expression, globals_dict=None, rng=None):
     """Evaluate algebraic expression over accumulators with AST safety validation.
 
@@ -150,7 +182,9 @@ def updater_expression(manager, acc_name, mask, *, expression, globals_dict=None
         from salmon_ibm.hexsim_expr import translate_hexsim_expr, build_hexsim_namespace
         translated = translate_hexsim_expr(expression)
         n_masked = int(mask.sum())
-        acc_dict = {d.name: manager.data[mask, i] for i, d in enumerate(manager.definitions)}
+        # Lazy dict: only copies columns that the expression actually reads
+        # (avoids copying all 74 accumulators when expression uses 1-2)
+        acc_dict = _LazyAccDict(manager.data, mask, manager._name_to_idx)
         if rng is None:
             rng = np.random.default_rng()
         namespace = build_hexsim_namespace(globals_dict, acc_dict, rng, n_masked)
