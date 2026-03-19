@@ -136,9 +136,9 @@ BEH_COLORS_ARRAY = np.array(
     [list(_hex_to_rgb(c)) + [240] for c in BEH_COLORS], dtype=np.uint8
 )
 
-# Pre-computed pointy-top hex vertex offsets (30°,90°,...,330°)
-# HexSim uses pointy-top orientation (vertex at top, not edge at top)
-_HEX_ANGLES = np.arange(6) * (np.pi / 3) + (np.pi / 6)  # +30° rotation
+# Hex vertex offsets — flat-top odd-q convention (matches HexMesh centroid spacing)
+# Vertices at 0°,60°,...,300° — edge at top/bottom, vertex at left/right
+_HEX_ANGLES = np.arange(6) * (np.pi / 3)
 _HEX_DX = np.cos(_HEX_ANGLES).astype(np.float64)
 _HEX_DY = np.sin(_HEX_ANGLES).astype(np.float64)
 
