@@ -40,10 +40,6 @@ class Population:
 
     @property
     def n_alive(self) -> int:
-        # Fast path: use cached count if available (set by event loop)
-        cached = getattr(self, '_n_alive_cache', None)
-        if cached is not None:
-            return cached
         return int(self.pool.alive.sum())
 
     @property

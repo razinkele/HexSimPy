@@ -143,9 +143,11 @@ class EventGroup(Event):
     def execute(self, population, landscape, t, mask):
         multi_pop = landscape.get("multi_pop_mgr")
 
-        # Pre-filter: resolve triggers and populations once (they don't
-        # change across iterations). This avoids repeating trigger checks
-        # and population lookups inside the inner loop.
+        # Pre-filter: resolve triggers, populations, trait_mgr, and filter
+        # type ONCE before the iteration loop. This eliminates all getattr,
+        # hasattr, isinstance, and import calls from the hot inner loop.
+        from salmon_ibm.events_hexsim import _apply_trait_combo_mask
+
         prepared = []
         for event in self.sub_events:
             if not getattr(event, 'enabled', True):
@@ -157,7 +159,17 @@ class EventGroup(Event):
             if child_pop_name and multi_pop:
                 child_pop = multi_pop.get(child_pop_name)
             tf = getattr(event, 'trait_filter', None)
-            prepared.append((event, child_pop, tf))
+            # Pre-resolve filter type: 0=none, 1=combo, 2=simple
+            tf_type = 0
+            trait_mgr = None
+            if tf is not None and child_pop is not None:
+                trait_mgr = getattr(child_pop, 'trait_mgr', None)
+                if trait_mgr is not None:
+                    if isinstance(tf, dict) and "traits" in tf:
+                        tf_type = 1  # combo
+                    elif isinstance(tf, dict):
+                        tf_type = 2  # simple
+            prepared.append((event, child_pop, tf, tf_type, trait_mgr))
 
         if not prepared:
             return
@@ -165,22 +177,15 @@ class EventGroup(Event):
         _empty_mask = np.ones(0, dtype=bool)
 
         for _iter in range(self.iterations):
-            for event, child_pop, tf in prepared:
+            for event, child_pop, tf, tf_type, trait_mgr in prepared:
                     if child_pop is not None:
-                        # Fast path: skip if population has no alive agents
-                        if getattr(child_pop, 'n_alive', 1) == 0:
-                            event.execute(child_pop, landscape, t, _empty_mask)
-                            continue
                         child_mask = child_pop.alive & ~child_pop.arrived
-                        # Apply child's trait filter if present
-                        if tf is not None:
-                            if hasattr(child_pop, 'trait_mgr') and child_pop.trait_mgr is not None:
-                                if isinstance(tf, dict) and "traits" in tf:
-                                    from salmon_ibm.events_hexsim import _apply_trait_combo_mask
-                                    child_mask = _apply_trait_combo_mask(child_mask, tf, child_pop)
-                                elif isinstance(tf, dict):
-                                    trait_mask = child_pop.trait_mgr.filter_by_traits(**tf)
-                                    child_mask = child_mask & trait_mask
+                        # Apply trait filter (but always execute — some events
+                        # like PatchIntroduction need to run with empty masks)
+                        if tf_type == 1:
+                            child_mask = _apply_trait_combo_mask(child_mask, tf, child_pop)
+                        elif tf_type == 2:
+                            child_mask = child_mask & trait_mgr.filter_by_traits(**tf)
                     else:
                         child_mask = _empty_mask
                     event.execute(child_pop, landscape, t, child_mask)
