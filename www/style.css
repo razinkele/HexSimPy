@@ -882,5 +882,5 @@ button[aria-label="Toggle sidebar"] {
 }
 
 .stat-sep { opacity: 0.3; }
-.stat-alive { color: var(--teal); font-weight: 600; }
+.stat-alive { color: var(--lagoon-shallow); font-weight: 600; }
 .stat-behaviors { letter-spacing: 0.5px; }

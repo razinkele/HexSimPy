@@ -318,7 +318,12 @@ class TrailBuffer:
         self._fill = 0
         self._tracked = None
 
-    def update(self, alive_mask, positions_xy):
+    def update(self, alive_mask, all_positions_xy):
+        """Update trail buffer with positions indexed by global agent ID.
+
+        all_positions_xy: (n_total, 2) array — positions for ALL agents,
+        indexed by agent index (not just alive ones).
+        """
         alive_idx = np.where(alive_mask)[0]
         n = len(alive_idx)
         if n == 0:
@@ -333,10 +338,13 @@ class TrailBuffer:
             self._ptr = 0
         nt = min(len(self._tracked), self.MAX_AGENTS)
         valid = self._tracked[:nt]
+        # Filter to tracked agents that are still alive
         still_alive = alive_mask[valid]
-        if still_alive.any() and len(positions_xy) > 0:
-            m = min(int(still_alive.sum()), nt, len(positions_xy))
-            self._buf[:m, self._ptr, :] = positions_xy[:m]
+        alive_tracked = valid[still_alive]
+        if len(alive_tracked) > 0 and len(all_positions_xy) > 0:
+            # Index into full position array by global agent ID
+            m = min(len(alive_tracked), nt)
+            self._buf[:m, self._ptr, :] = all_positions_xy[alive_tracked[:m]]
         self._ptr = (self._ptr + 1) % self.TRAIL_LEN
         self._fill = min(self._fill + 1, self.TRAIL_LEN)
 
@@ -624,17 +632,19 @@ def server(input, output, session):
                 await _init_sim()
                 sim = sim_state.get()
             await asyncio.to_thread(sim.step)
+            # Update trail buffer with full-population position array
             if sim.pool.alive.any():
                 mesh = sim.mesh
-                tris = sim.pool.tri_idx[sim.pool.alive]
+                all_tris = sim.pool.tri_idx
                 is_hex = hasattr(mesh, '_edge')
+                scale = _cached_scale if _cached_scale > 0 else (0.0005 if is_hex else 1.0)
                 if is_hex:
-                    xy = np.column_stack([mesh.centroids[tris, 1] * _cached_scale,
-                                          -mesh.centroids[tris, 0] * _cached_scale]).astype(np.float32)
+                    all_xy = np.column_stack([mesh.centroids[all_tris, 1] * scale,
+                                              -mesh.centroids[all_tris, 0] * scale]).astype(np.float32)
                 else:
-                    xy = np.column_stack([mesh.centroids[tris, 1],
-                                          mesh.centroids[tris, 0]]).astype(np.float32)
-                trail_buffer.update(sim.pool.alive, xy)
+                    all_xy = np.column_stack([mesh.centroids[all_tris, 1],
+                                              mesh.centroids[all_tris, 0]]).astype(np.float32)
+                trail_buffer.update(sim.pool.alive, all_xy)
             history.set(sim.history.copy())
         except Exception as e:
             ui.notification_show(f"Step error: {e}", type="error", duration=10)
@@ -661,15 +671,16 @@ def server(input, output, session):
                 elapsed = time.perf_counter() - t_batch
                 if sim.pool.alive.any():
                     mesh = sim.mesh
-                    tris = sim.pool.tri_idx[sim.pool.alive]
+                    all_tris = sim.pool.tri_idx
                     is_hex = hasattr(mesh, '_edge')
+                    scale = _cached_scale if _cached_scale > 0 else (0.0005 if is_hex else 1.0)
                     if is_hex:
-                        xy = np.column_stack([mesh.centroids[tris, 1] * _cached_scale,
-                                              -mesh.centroids[tris, 0] * _cached_scale]).astype(np.float32)
+                        all_xy = np.column_stack([mesh.centroids[all_tris, 1] * scale,
+                                                  -mesh.centroids[all_tris, 0] * scale]).astype(np.float32)
                     else:
-                        xy = np.column_stack([mesh.centroids[tris, 1],
-                                              mesh.centroids[tris, 0]]).astype(np.float32)
-                    trail_buffer.update(sim.pool.alive, xy)
+                        all_xy = np.column_stack([mesh.centroids[all_tris, 1],
+                                                  mesh.centroids[all_tris, 0]]).astype(np.float32)
+                    trail_buffer.update(sim.pool.alive, all_xy)
                 history.set(sim.history.copy())
                 await asyncio.sleep(max(0.05, 0.25 - elapsed))
         except Exception as e:
@@ -983,6 +994,9 @@ def server(input, output, session):
                     jointRounded=True,
                     capRounded=True,
                 ))
+        else:
+            # Explicitly hide trail layer (shallow merge keeps stale layers visible)
+            layers.insert(0, {"id": "trails", "visible": False})
         await map_widget.partial_update(session, layers)
 
     async def _agent_only_update(sim, landscape=None):
@@ -1000,6 +1014,8 @@ def server(input, output, session):
                     jointRounded=True,
                     capRounded=True,
                 ))
+        else:
+            layers.insert(0, {"id": "trails", "visible": False})
         await map_widget.partial_update(session, layers)
 
     @reactive.effect
@@ -1073,9 +1089,8 @@ def server(input, output, session):
         h = history.get()
         theme = input.theme_mode() or "dark"
         # Throttle during Run: skip chart regeneration every 5th step
-        if running.get() and h and len(h) % 5 != 0:
-            ts = int(time.time() * 1000)
-            return ui.tags.iframe(src=f"survival.html?t={ts}", width="100%",
+        if running.get() and h and len(h) > 5 and len(h) % 5 != 0:
+            return ui.tags.iframe(src="survival.html", width="100%",
                 height="280px", style="border:none;border-radius:8px;background:transparent;")
         fig = go.Figure()
         if not h:
@@ -1104,9 +1119,8 @@ def server(input, output, session):
     def energy_plot():
         h = history.get()
         theme = input.theme_mode() or "dark"
-        if running.get() and h and len(h) % 5 != 0:
-            ts = int(time.time() * 1000)
-            return ui.tags.iframe(src=f"energy.html?t={ts}", width="100%",
+        if running.get() and h and len(h) > 5 and len(h) % 5 != 0:
+            return ui.tags.iframe(src="energy.html", width="100%",
                 height="280px", style="border:none;border-radius:8px;background:transparent;")
         fig = go.Figure()
         if not h:
@@ -1142,9 +1156,8 @@ def server(input, output, session):
     def behavior_plot():
         h = history.get()
         theme = input.theme_mode() or "dark"
-        if running.get() and h and len(h) % 5 != 0:
-            ts = int(time.time() * 1000)
-            return ui.tags.iframe(src=f"behavior.html?t={ts}", width="100%",
+        if running.get() and h and len(h) > 5 and len(h) % 5 != 0:
+            return ui.tags.iframe(src="behavior.html", width="100%",
                 height="280px", style="border:none;border-radius:8px;background:transparent;")
         fig = go.Figure()
         if not h:
