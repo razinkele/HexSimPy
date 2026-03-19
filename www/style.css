@@ -874,6 +874,13 @@ button[aria-label="Toggle sidebar"] {
     margin-top: 8px;
     min-height: 28px;
 }
+.trail-toggle {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.78rem;
+}
+
 .stat-sep { opacity: 0.3; }
 .stat-alive { color: var(--teal); font-weight: 600; }
 .stat-behaviors { letter-spacing: 0.5px; }

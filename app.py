@@ -18,6 +18,7 @@ from shiny_deckgl import (
     head_includes,
     layer,
     map_view,
+    path_layer,
     scatterplot_layer,
 )
 
@@ -306,6 +307,59 @@ def _build_agent_binary(sim, mesh, scale=1.0):
     return encode_binary_attribute(positions), encode_binary_attribute(colors), n
 
 
+class TrailBuffer:
+    """NumPy rolling buffer for agent movement trails."""
+    MAX_AGENTS = 2000
+    TRAIL_LEN = 10
+
+    def __init__(self):
+        self._buf = np.zeros((self.MAX_AGENTS, self.TRAIL_LEN, 2), dtype=np.float32)
+        self._ptr = 0
+        self._fill = 0
+        self._tracked = None
+
+    def update(self, alive_mask, positions_xy):
+        alive_idx = np.where(alive_mask)[0]
+        n = len(alive_idx)
+        if n == 0:
+            return
+        if self._tracked is None:
+            if n <= self.MAX_AGENTS:
+                self._tracked = alive_idx.copy()
+            else:
+                step = max(1, n // self.MAX_AGENTS)
+                self._tracked = alive_idx[::step][:self.MAX_AGENTS]
+            self._fill = 0
+            self._ptr = 0
+        nt = min(len(self._tracked), self.MAX_AGENTS)
+        valid = self._tracked[:nt]
+        still_alive = alive_mask[valid]
+        if still_alive.any() and len(positions_xy) > 0:
+            m = min(int(still_alive.sum()), nt, len(positions_xy))
+            self._buf[:m, self._ptr, :] = positions_xy[:m]
+        self._ptr = (self._ptr + 1) % self.TRAIL_LEN
+        self._fill = min(self._fill + 1, self.TRAIL_LEN)
+
+    def clear(self):
+        self._buf[:] = 0
+        self._fill = 0
+        self._ptr = 0
+        self._tracked = None
+
+    def build_paths(self):
+        if self._fill < 2 or self._tracked is None:
+            return []
+        nt = min(len(self._tracked), self.MAX_AGENTS)
+        order = [(self._ptr - self._fill + i) % self.TRAIL_LEN for i in range(self._fill)]
+        paths = []
+        for i in range(nt):
+            trail = self._buf[i, order, :].tolist()
+            if trail[0] == trail[-1]:
+                continue
+            paths.append({"path": trail, "color": [100, 180, 160, 100]})
+        return paths
+
+
 # Blank map style for non-geographic (orthographic) rendering
 import json as _json
 BLANK_STYLE = _json.dumps({"version": 8, "sources": {}, "layers": [
@@ -500,6 +554,7 @@ def server(input, output, session):
     sim_state = reactive.Value(None)
     running = reactive.Value(False)
     history = reactive.Value([])
+    trail_buffer = TrailBuffer()
 
     @reactive.effect
     @reactive.event(input.btn_reset, input.landscape, ignore_none=False)
@@ -558,6 +613,7 @@ def server(input, output, session):
         sim_state.set(sim)
         history.set([])
         running.set(False)
+        trail_buffer.clear()
 
     @reactive.effect
     @reactive.event(input.btn_step)
@@ -568,6 +624,17 @@ def server(input, output, session):
                 await _init_sim()
                 sim = sim_state.get()
             await asyncio.to_thread(sim.step)
+            if sim.pool.alive.any():
+                mesh = sim.mesh
+                tris = sim.pool.tri_idx[sim.pool.alive]
+                is_hex = hasattr(mesh, '_edge')
+                if is_hex:
+                    xy = np.column_stack([mesh.centroids[tris, 1] * _cached_scale,
+                                          -mesh.centroids[tris, 0] * _cached_scale]).astype(np.float32)
+                else:
+                    xy = np.column_stack([mesh.centroids[tris, 1],
+                                          mesh.centroids[tris, 0]]).astype(np.float32)
+                trail_buffer.update(sim.pool.alive, xy)
             history.set(sim.history.copy())
         except Exception as e:
             ui.notification_show(f"Step error: {e}", type="error", duration=10)
@@ -592,6 +659,17 @@ def server(input, output, session):
                 t_batch = time.perf_counter()
                 await asyncio.to_thread(_batch)
                 elapsed = time.perf_counter() - t_batch
+                if sim.pool.alive.any():
+                    mesh = sim.mesh
+                    tris = sim.pool.tri_idx[sim.pool.alive]
+                    is_hex = hasattr(mesh, '_edge')
+                    if is_hex:
+                        xy = np.column_stack([mesh.centroids[tris, 1] * _cached_scale,
+                                              -mesh.centroids[tris, 0] * _cached_scale]).astype(np.float32)
+                    else:
+                        xy = np.column_stack([mesh.centroids[tris, 1],
+                                              mesh.centroids[tris, 0]]).astype(np.float32)
+                    trail_buffer.update(sim.pool.alive, xy)
                 history.set(sim.history.copy())
                 await asyncio.sleep(max(0.05, 0.25 - elapsed))
         except Exception as e:
@@ -888,15 +966,41 @@ def server(input, output, session):
         z, cscale = _resolve_field(sim)
         idx = _water_idx(sim)
         col_bin = _build_color_binary(sim.mesh, z, cscale, idx)
-        await map_widget.partial_update(session, [
+        layers = [
             {"id": "water", "getFillColor": col_bin,
              "data": {"length": _cached_water_n}},
             _agent_layer_binary(sim, scale=_cached_scale, use_transitions=_should_transition(sim)),
-        ])
+        ]
+        if input.show_trails():
+            trail_data = trail_buffer.build_paths()
+            if trail_data:
+                layers.insert(0, layer("PathLayer", "trails",
+                    data=trail_data,
+                    getPath="@@d.path",
+                    getColor="@@d.color",
+                    widthMinPixels=1,
+                    widthMaxPixels=3,
+                    jointRounded=True,
+                    capRounded=True,
+                ))
+        await map_widget.partial_update(session, layers)
 
     async def _agent_only_update(sim, landscape=None):
         """Send only agents, water layer untouched in JS cache (~5 KB)."""
-        await map_widget.partial_update(session, [_agent_layer_binary(sim, scale=_cached_scale, use_transitions=_should_transition(sim))])
+        layers = [_agent_layer_binary(sim, scale=_cached_scale, use_transitions=_should_transition(sim))]
+        if input.show_trails():
+            trail_data = trail_buffer.build_paths()
+            if trail_data:
+                layers.insert(0, layer("PathLayer", "trails",
+                    data=trail_data,
+                    getPath="@@d.path",
+                    getColor="@@d.color",
+                    widthMinPixels=1,
+                    widthMaxPixels=3,
+                    jointRounded=True,
+                    capRounded=True,
+                ))
+        await map_widget.partial_update(session, layers)
 
     @reactive.effect
     async def _update_map():

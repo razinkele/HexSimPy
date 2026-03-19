@@ -17,6 +17,10 @@ def run_controls_panel():
             ui.input_slider("speed", None, min=1, max=10, value=1, width="120px"),
             class_="speed-control",
         ),
+        ui.div(
+            ui.input_switch("show_trails", "Trails", value=False),
+            class_="trail-toggle",
+        ),
         ui.div(class_="spacer"),
         ui.div(
             ui.output_text("progress_text"),
