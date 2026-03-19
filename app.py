@@ -866,14 +866,15 @@ def server(input, output, session):
         mesh = sim.mesh
         is_hexsim = hasattr(mesh, '_edge')
         if is_hexsim:
-            # OrthographicView uses target=[x, y] instead of lon/lat
+            # MapboxOverlay requires lon/lat view state even for CARTESIAN layers.
+            # Treat scaled grid coords as pseudo-geographic coordinates.
             cx = mesh.centroids[:, 1] * _cached_scale
             cy = -mesh.centroids[:, 0] * _cached_scale
-            target_x = float(cx.mean())
-            target_y = float(cy.mean())
+            lon = float(cx.mean())
+            lat = float(cy.mean())
             extent = max(float(cx.max() - cx.min()), float(cy.max() - cy.min()))
             zoom = np.log2(800 / max(extent, 1))
-            return {"target": [target_x, target_y, 0], "zoom": float(zoom)}
+            return {"longitude": lon, "latitude": lat, "zoom": float(zoom)}
         return {"longitude": 21.07, "latitude": 55.31, "zoom": 10}
 
     def _agent_layer(sim, landscape=None):
@@ -923,8 +924,6 @@ def server(input, output, session):
         )
         if use_transitions:
             props["transitions"] = {"getPosition": {"duration": 200, "type": "spring"}}
-        if is_hex:
-            props["coordinateSystem"] = int(CoordinateSystem.CARTESIAN)
         return scatterplot_layer("agents", {"length": n}, **props)
 
     async def _full_update(sim, landscape=None):
@@ -956,7 +955,6 @@ def server(input, output, session):
                 data={"length": n, "startIndices": start_idx},
                 getPolygon=encode_binary_attribute(verts),
                 getFillColor=encode_binary_attribute(colors),
-                coordinateSystem=int(CoordinateSystem.CARTESIAN),
                 pickable=False,
             )
         else:
@@ -970,13 +968,11 @@ def server(input, output, session):
                 radiusMaxPixels=6,
                 pickable=False,
             )
-        is_hex = hasattr(sim.mesh, '_edge')
-        view = orthographic_view(controller=True) if is_hex else map_view(controller=True)
         await map_widget.update(
             session,
             layers=[water, _agent_layer_binary(sim, scale=_cached_scale)],
             view_state=_view_state(sim, landscape=landscape),
-            views=[view],
+            views=[map_view(controller=True)],
         )
 
     async def _color_and_agent_update(sim, landscape=None):
@@ -1281,11 +1277,11 @@ def server(input, output, session):
         cy = data_rows.astype(np.float64) * row_spacing   # short axis (north-south)
         water_values = values[water_flat]
 
-        # Subsample for deck.gl (max 300K points)
-        max_pts = 300_000
+        # Subsample for deck.gl — stride-based to preserve spatial tiling
+        max_pts = 500_000
         if n_water > max_pts:
-            rng = np.random.default_rng(0)
-            idx = np.sort(rng.choice(n_water, max_pts, replace=False))
+            step = max(1, n_water // max_pts)
+            idx = np.arange(0, n_water, step)
         else:
             idx = np.arange(n_water)
 
@@ -1325,8 +1321,8 @@ def server(input, output, session):
         await viewer_map_widget.update(
             session,
             layers=[water_layer],
-            view_state={"target": [center_x, center_y, 0], "zoom": float(zoom)},
-            views=[orthographic_view(controller=True)],
+            view_state={"longitude": center_x, "latitude": center_y, "zoom": float(zoom)},
+            views=[map_view(controller=True)],
         )
         _viewer_initialized = True
 
