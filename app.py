@@ -1341,8 +1341,9 @@ def server(input, output, session):
         data_cols = water_flat % data_stride     # long axis
         col_spacing = 1.5 * edge
         row_spacing = np.sqrt(3.0) * edge
-        cx = data_cols.astype(np.float64) * col_spacing   # long axis (east-west)
-        cy = data_rows.astype(np.float64) * row_spacing   # short axis (north-south)
+        cx = data_cols.astype(np.float64) * col_spacing
+        # Odd-column offset: flat-top odd-q convention (same as HexMesh.from_hexsim)
+        cy = data_rows.astype(np.float64) * row_spacing + (data_cols % 2) * (row_spacing / 2.0)
         water_values = values[water_flat]
 
         # Subsample for deck.gl — stride-based to preserve spatial tiling
