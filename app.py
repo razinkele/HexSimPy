@@ -13,11 +13,13 @@ from shiny import App, reactive, render, ui
 from shiny_deckgl import (
     CARTO_DARK,
     CARTO_POSITRON,
+    CoordinateSystem,
     MapWidget,
     encode_binary_attribute,
     head_includes,
     layer,
     map_view,
+    orthographic_view,
     path_layer,
     scatterplot_layer,
 )
@@ -858,15 +860,14 @@ def server(input, output, session):
         mesh = sim.mesh
         is_hexsim = hasattr(mesh, '_edge')
         if is_hexsim:
-            # Use scaled coordinates as pseudo-lon/lat with MapView (no basemap)
+            # OrthographicView uses target=[x, y] instead of lon/lat
             cx = mesh.centroids[:, 1] * _cached_scale
             cy = -mesh.centroids[:, 0] * _cached_scale
-            lon = float(cx.mean())
-            lat = float(cy.mean())
+            target_x = float(cx.mean())
+            target_y = float(cy.mean())
             extent = max(float(cx.max() - cx.min()), float(cy.max() - cy.min()))
-            # zoom so grid fills viewport (~800px)
             zoom = np.log2(800 / max(extent, 1))
-            return {"longitude": lon, "latitude": lat, "zoom": float(zoom)}
+            return {"target": [target_x, target_y, 0], "zoom": float(zoom)}
         return {"longitude": 21.07, "latitude": 55.31, "zoom": 10}
 
     def _agent_layer(sim, landscape=None):
@@ -897,6 +898,7 @@ def server(input, output, session):
 
     def _agent_layer_binary(sim, scale=1.0, use_transitions=False):
         pos_bin, col_bin, n = _build_agent_binary(sim, sim.mesh, scale=scale)
+        is_hex = hasattr(sim.mesh, '_edge')
         if n == 0:
             return scatterplot_layer("agents", {"length": 0},
                 getPosition=encode_binary_attribute(np.zeros((0, 2), dtype=np.float32)),
@@ -905,7 +907,7 @@ def server(input, output, session):
         props = dict(
             getPosition=pos_bin,
             getFillColor=col_bin,
-            getRadius=150,
+            getRadius=150 if not is_hex else 0.0001,
             radiusMinPixels=5,
             radiusMaxPixels=12,
             stroked=True,
@@ -915,6 +917,8 @@ def server(input, output, session):
         )
         if use_transitions:
             props["transitions"] = {"getPosition": {"duration": 200, "type": "spring"}}
+        if is_hex:
+            props["coordinateSystem"] = int(CoordinateSystem.CARTESIAN)
         return scatterplot_layer("agents", {"length": n}, **props)
 
     async def _full_update(sim, landscape=None):
@@ -946,8 +950,8 @@ def server(input, output, session):
                 data={"length": n, "startIndices": start_idx},
                 getPolygon=encode_binary_attribute(verts),
                 getFillColor=encode_binary_attribute(colors),
+                coordinateSystem=int(CoordinateSystem.CARTESIAN),
                 pickable=False,
-                _normalize=False,
             )
         else:
             water = layer(
@@ -960,11 +964,13 @@ def server(input, output, session):
                 radiusMaxPixels=6,
                 pickable=False,
             )
+        is_hex = hasattr(sim.mesh, '_edge')
+        view = orthographic_view(controller=True) if is_hex else map_view(controller=True)
         await map_widget.update(
             session,
             layers=[water, _agent_layer_binary(sim, scale=_cached_scale)],
             view_state=_view_state(sim, landscape=landscape),
-            views=[map_view(controller=True)],
+            views=[view],
         )
 
     async def _color_and_agent_update(sim, landscape=None):
@@ -1305,16 +1311,16 @@ def server(input, output, session):
             data={"length": n_pts, "startIndices": start_idx},
             getPolygon=encode_binary_attribute(verts),
             getFillColor=encode_binary_attribute(colors),
+            coordinateSystem=int(CoordinateSystem.CARTESIAN),
             pickable=False,
-            _normalize=False,
         )
 
         await viewer_map_widget.set_style(session, BLANK_STYLE)
         await viewer_map_widget.update(
             session,
             layers=[water_layer],
-            view_state={"longitude": center_x, "latitude": center_y, "zoom": float(zoom)},
-            views=[map_view(controller=True)],
+            view_state={"target": [center_x, center_y, 0], "zoom": float(zoom)},
+            views=[orthographic_view(controller=True)],
         )
         _viewer_initialized = True
 
