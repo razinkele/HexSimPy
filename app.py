@@ -129,6 +129,9 @@ def _colorscale_rgb(z: np.ndarray, colorscale: list) -> np.ndarray:
 
 
 BEH_COLORS_RGB = [_hex_to_rgb(c) for c in BEH_COLORS]
+BEH_COLORS_ARRAY = np.array(
+    [list(_hex_to_rgb(c)) + [240] for c in BEH_COLORS], dtype=np.uint8
+)
 
 # Pre-computed flat-top hex vertex offsets (unit circle, 6 vertices at 0°,60°,...,300°)
 _HEX_ANGLES = np.arange(6) * (np.pi / 3)
@@ -278,6 +281,29 @@ def _build_agent_data(sim, mesh, scale=1.0, landscape=None):
             "info": f"#{aid} {BEH_NAMES[beh_int]} | {ed:.1f} kJ/g",
         })
     return pts
+
+
+def _build_agent_binary(sim, mesh, scale=1.0):
+    """Build binary-encoded agent position + color arrays for deck.gl."""
+    alive = sim.pool.alive
+    if not alive.any():
+        return None, None, 0
+    tris = sim.pool.tri_idx[alive]
+    behaviors = sim.pool.behavior[alive]
+    is_hexsim = hasattr(mesh, '_edge')
+    if is_hexsim:
+        positions = np.column_stack([
+            mesh.centroids[tris, 1] * scale,
+            -mesh.centroids[tris, 0] * scale,
+        ]).astype(np.float32)
+    else:
+        positions = np.column_stack([
+            mesh.centroids[tris, 1] * scale,
+            mesh.centroids[tris, 0] * scale,
+        ]).astype(np.float32)
+    colors = BEH_COLORS_ARRAY[behaviors]
+    n = int(alive.sum())
+    return encode_binary_attribute(positions), encode_binary_attribute(colors), n
 
 
 # Blank map style for non-geographic (orthographic) rendering
@@ -563,9 +589,11 @@ def server(input, output, session):
                         if sim.current_t >= steps:
                             break
                         sim.step()
+                t_batch = time.perf_counter()
                 await asyncio.to_thread(_batch)
+                elapsed = time.perf_counter() - t_batch
                 history.set(sim.history.copy())
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(max(0.05, 0.25 - elapsed))
         except Exception as e:
             ui.notification_show(f"Simulation error: {e}", type="error", duration=10)
         finally:
@@ -744,6 +772,37 @@ def server(input, output, session):
             pickable=True,
         )
 
+    _prev_agent_count = 0
+
+    def _should_transition(sim):
+        nonlocal _prev_agent_count
+        n = int(sim.pool.alive.sum())
+        changed = n != _prev_agent_count
+        _prev_agent_count = n
+        return not changed
+
+    def _agent_layer_binary(sim, scale=1.0, use_transitions=False):
+        pos_bin, col_bin, n = _build_agent_binary(sim, sim.mesh, scale=scale)
+        if n == 0:
+            return scatterplot_layer("agents", {"length": 0},
+                getPosition=encode_binary_attribute(np.zeros((0, 2), dtype=np.float32)),
+                getFillColor=encode_binary_attribute(np.zeros((0, 4), dtype=np.uint8)),
+            )
+        props = dict(
+            getPosition=pos_bin,
+            getFillColor=col_bin,
+            getRadius=150,
+            radiusMinPixels=5,
+            radiusMaxPixels=12,
+            stroked=True,
+            getLineColor=[0, 0, 0, 140],
+            lineWidthMinPixels=1,
+            pickable=True,
+        )
+        if use_transitions:
+            props["transitions"] = {"getPosition": {"duration": 200, "type": "spring"}}
+        return scatterplot_layer("agents", {"length": n}, **props)
+
     async def _full_update(sim, landscape=None):
         """Send everything: positions + colors + agents (~3 MB)."""
         nonlocal _cached_water_n
@@ -789,7 +848,7 @@ def server(input, output, session):
             )
         await map_widget.update(
             session,
-            layers=[water, _agent_layer(sim, landscape=landscape)],
+            layers=[water, _agent_layer_binary(sim, scale=_cached_scale)],
             view_state=_view_state(sim, landscape=landscape),
             views=[map_view(controller=True)],
         )
@@ -807,12 +866,12 @@ def server(input, output, session):
         await map_widget.partial_update(session, [
             {"id": "water", "getFillColor": col_bin,
              "data": {"length": _cached_water_n}},
-            _agent_layer(sim, landscape=landscape),
+            _agent_layer_binary(sim, scale=_cached_scale, use_transitions=_should_transition(sim)),
         ])
 
     async def _agent_only_update(sim, landscape=None):
         """Send only agents, water layer untouched in JS cache (~5 KB)."""
-        await map_widget.partial_update(session, [_agent_layer(sim, landscape=landscape)])
+        await map_widget.partial_update(session, [_agent_layer_binary(sim, scale=_cached_scale, use_transitions=_should_transition(sim))])
 
     @reactive.effect
     async def _update_map():
