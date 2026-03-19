@@ -1072,6 +1072,11 @@ def server(input, output, session):
     def survival_plot():
         h = history.get()
         theme = input.theme_mode() or "dark"
+        # Throttle during Run: skip chart regeneration every 5th step
+        if running.get() and h and len(h) % 5 != 0:
+            ts = int(time.time() * 1000)
+            return ui.tags.iframe(src=f"survival.html?t={ts}", width="100%",
+                height="280px", style="border:none;border-radius:8px;background:transparent;")
         fig = go.Figure()
         if not h:
             fig.update_layout(**_base_layout(theme=theme, height=280))
@@ -1099,6 +1104,10 @@ def server(input, output, session):
     def energy_plot():
         h = history.get()
         theme = input.theme_mode() or "dark"
+        if running.get() and h and len(h) % 5 != 0:
+            ts = int(time.time() * 1000)
+            return ui.tags.iframe(src=f"energy.html?t={ts}", width="100%",
+                height="280px", style="border:none;border-radius:8px;background:transparent;")
         fig = go.Figure()
         if not h:
             fig.update_layout(**_base_layout(theme=theme, height=280))
@@ -1133,6 +1142,10 @@ def server(input, output, session):
     def behavior_plot():
         h = history.get()
         theme = input.theme_mode() or "dark"
+        if running.get() and h and len(h) % 5 != 0:
+            ts = int(time.time() * 1000)
+            return ui.tags.iframe(src=f"behavior.html?t={ts}", width="100%",
+                height="280px", style="border:none;border-radius:8px;background:transparent;")
         fig = go.Figure()
         if not h:
             fig.update_layout(**_base_layout(theme=theme, height=280))
