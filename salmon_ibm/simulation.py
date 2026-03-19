@@ -67,6 +67,7 @@ class Simulation:
         self.bio_params = bio_params_from_config(config)
         self._activity_lut = self._build_activity_lut()
         self.est_cfg = config.get("estuary", {})
+        self._skip_estuarine_overrides = self._detect_estuarine_noop()
 
         self.logger = None
         if output_path:
@@ -128,6 +129,8 @@ class Simulation:
         population.behavior = apply_overrides(population, self.beh_params)
 
     def _event_estuarine_overrides(self, population, landscape, t, mask):
+        if self._skip_estuarine_overrides:
+            return
         self._apply_estuarine_overrides()
 
     def _event_update_cwr_counters(self, population, landscape, t, mask):
@@ -221,6 +224,20 @@ class Simulation:
         was_in_cwr = not_in_cwr & (self.pool.cwr_hours > 0)
         self.pool.cwr_hours[was_in_cwr] = 0
         self.pool.hours_since_cwr[not_in_cwr] += 1
+
+    def _detect_estuarine_noop(self) -> bool:
+        """Return True if estuarine overrides are effectively disabled."""
+        est = self.est_cfg
+        if not est:
+            return True
+        seiche = est.get("seiche_pause", {})
+        thresh = seiche.get("dSSHdt_thresh_m_per_hour")
+        if thresh is None:
+            thresh = seiche.get("dSSHdt_thresh_m_per_15min", 0.02) * 4.0
+        seiche_noop = thresh >= 100.0
+        do_cfg = est.get("do_avoidance", {})
+        do_noop = do_cfg.get("lethal", 0.0) <= 0 and do_cfg.get("high", 0.0) <= 0
+        return seiche_noop and do_noop
 
     def _apply_estuarine_overrides(self):
         alive = self.pool.alive

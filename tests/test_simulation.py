@@ -221,6 +221,29 @@ def test_simulation_reproducibility():
         mov.FORCE_NUMPY = orig
 
 
+def test_estuarine_overrides_skipped_when_disabled():
+    """Simulation should detect disabled estuary config and skip overrides."""
+    from salmon_ibm.simulation import Simulation
+    cfg = {
+        "grid": {"type": "hexsim"},
+        "hexsim": {
+            "workspace": "Columbia River Migration Model/Columbia [small]",
+            "species": "chinook",
+            "temperature_csv": "River Temperature.csv",
+        },
+        "estuary": {
+            "salinity_cost": {"S_opt": 0.5, "S_tol": 999, "k": 0.0},
+            "do_avoidance": {"lethal": 0.0, "high": 0.0},
+            "seiche_pause": {"dSSHdt_thresh_m_per_15min": 999},
+        },
+    }
+    import os
+    if not os.path.exists(cfg["hexsim"]["workspace"]):
+        pytest.skip("Columbia workspace not found")
+    sim = Simulation(cfg, n_agents=10, rng_seed=42)
+    assert sim._skip_estuarine_overrides is True
+
+
 def test_seiche_threshold_per_15min_converted_to_hourly():
     """Config key dSSHdt_thresh_m_per_15min should be multiplied by 4
     to convert to m/hour before comparison with dSSH_dt_array()."""
