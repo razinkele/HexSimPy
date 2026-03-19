@@ -1387,14 +1387,23 @@ def server(input, output, session):
             pickable=False,
         )
 
-        await viewer_map_widget.set_style(session, BLANK_STYLE)
-        await viewer_map_widget.update(
-            session,
-            layers=[water_layer],
-            view_state={"longitude": center_x, "latitude": center_y, "zoom": float(zoom)},
-            views=[map_view(controller=True)],
-        )
-        _viewer_initialized = True
+        try:
+            await viewer_map_widget.set_style(session, BLANK_STYLE)
+            await viewer_map_widget.update(
+                session,
+                layers=[water_layer],
+                view_state={"longitude": center_x, "latitude": center_y, "zoom": float(zoom)},
+                views=[map_view(controller=True)],
+            )
+            _viewer_initialized = True
+            ui.notification_show(
+                f"Loaded {n_pts:,} hexagons (zoom={zoom:.1f})",
+                type="message", duration=5,
+            )
+        except Exception as e:
+            ui.notification_show(f"Map update failed: {e}", type="error", duration=10)
+            import traceback
+            traceback.print_exc()
 
         # Store metadata for display
         _viewer_meta.set({
