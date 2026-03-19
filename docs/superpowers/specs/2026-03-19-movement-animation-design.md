@@ -71,9 +71,20 @@ scatterplot_layer(
 )
 ```
 
-### Update Interval
+### Update Interval — Adaptive Sleep
 
-Change `await asyncio.sleep(0.05)` to `await asyncio.sleep(0.25)` during Run, so the 200ms transition completes before the next position update. Single Step keeps no sleep (immediate update).
+Use adaptive sleep so transitions complete without artificially slowing fast models:
+
+```python
+t_batch_start = time.perf_counter()
+await asyncio.to_thread(_batch)
+elapsed = time.perf_counter() - t_batch_start
+# Ensure at least 200ms total cycle for transition, but don't add delay
+# when the batch itself took longer than that
+await asyncio.sleep(max(0.05, 0.25 - elapsed))
+```
+
+This gives ~4 FPS when steps are fast (<50ms) and doesn't slow down when steps take >200ms. Single Step keeps no extra sleep (immediate update).
 
 ### Agent Count Change Handling
 
@@ -89,43 +100,97 @@ else:
 
 ## Feature 2: Trail Visualization
 
-### Data Structure
+### Data Structure — NumPy Rolling Buffer
 
-Server-side rolling buffer per agent:
+Use a fixed-size NumPy array (not per-agent dicts) with subsampling as
+the default path. This handles both 2K-agent Columbia and 4M-agent
+Gnatcatcher scenarios.
 
 ```python
-from collections import deque
-
-TRAIL_LENGTH = 10  # positions per agent trail
+TRAIL_LENGTH = 10       # positions per trail
+MAX_TRAIL_AGENTS = 2000 # subsample limit
 
 class TrailBuffer:
-    """Per-agent position history for trail rendering."""
-    def __init__(self):
-        self._trails = {}  # agent_index → deque of (x, y)
+    """Fixed-size rolling position buffer for trail rendering."""
+
+    def __init__(self, max_agents=MAX_TRAIL_AGENTS, trail_len=TRAIL_LENGTH):
+        self.max_agents = max_agents
+        self.trail_len = trail_len
+        # (max_agents, trail_len, 2) float32 rolling buffer
+        self._buf = np.zeros((max_agents, trail_len, 2), dtype=np.float32)
+        self._write_ptr = 0          # circular write index
+        self._fill = 0               # how many slots are filled (up to trail_len)
+        self._tracked_idx = None     # which agent indices we're tracking
+        self._initialized = False
 
     def update(self, alive_mask, positions_xy):
-        """Push current positions for all alive agents."""
+        """Push current positions. Subsamples if needed."""
         alive_idx = np.where(alive_mask)[0]
-        for i, (ax, ay) in zip(alive_idx, positions_xy):
-            if i not in self._trails:
-                self._trails[i] = deque(maxlen=TRAIL_LENGTH)
-            self._trails[i].append((float(ax), float(ay)))
+        n_alive = len(alive_idx)
+
+        if n_alive == 0:
+            return
+
+        # Select which agents to track (subsample if too many)
+        if not self._initialized or self._tracked_idx is None:
+            if n_alive <= self.max_agents:
+                self._tracked_idx = alive_idx
+            else:
+                step = n_alive // self.max_agents
+                self._tracked_idx = alive_idx[::step][:self.max_agents]
+            self._initialized = True
+            self._fill = 0
+            self._write_ptr = 0
+
+        # Get positions for tracked agents (vectorized)
+        n_tracked = min(len(self._tracked_idx), self.max_agents)
+        valid = self._tracked_idx[:n_tracked]
+        # Filter to only agents still alive
+        still_alive = alive_mask[valid]
+        xy = positions_xy[still_alive[:len(positions_xy)]] if len(positions_xy) > 0 else np.empty((0, 2))
+
+        # Handle size mismatch gracefully
+        n = min(len(xy), n_tracked)
+        if n > 0:
+            self._buf[:n, self._write_ptr, :] = xy[:n]
+            self._write_ptr = (self._write_ptr + 1) % self.trail_len
+            self._fill = min(self._fill + 1, self.trail_len)
 
     def clear(self):
-        self._trails.clear()
+        self._buf[:] = 0
+        self._fill = 0
+        self._write_ptr = 0
+        self._tracked_idx = None
+        self._initialized = False
 
     def build_path_data(self):
-        """Build PathLayer data: list of paths with fading colors."""
+        """Build PathLayer data as list of path dicts."""
+        if self._fill < 2:
+            return []
+        # Reorder buffer into chronological order
+        n = min(len(self._tracked_idx) if self._tracked_idx is not None else 0,
+                self.max_agents)
+        if n == 0:
+            return []
+        filled = self._fill
+        indices = [(self._write_ptr - filled + i) % self.trail_len
+                   for i in range(filled)]
         paths = []
-        for agent_id, trail in self._trails.items():
-            if len(trail) < 2:
+        for i in range(n):
+            trail = self._buf[i, indices, :].tolist()
+            # Skip if all positions are the same (agent didn't move)
+            if trail[0] == trail[-1]:
                 continue
             paths.append({
-                "path": list(trail),
-                "color": [100, 180, 160, 120],  # teal, semi-transparent
+                "path": trail,
+                "color": [100, 180, 160, 120],
             })
         return paths
 ```
+
+**Scalability:** For 4M agents (Gnatcatcher), only 2000 are tracked. The
+`update()` method is fully vectorized — no Python per-agent loop. Memory:
+`2000 × 10 × 2 × 4 = 160 KB` regardless of population size.
 
 ### PathLayer Configuration
 
@@ -149,7 +214,16 @@ Add a toggle button in `ui/run_controls.py`:
 ui.input_switch("show_trails", "Trails", value=False)
 ```
 
-Only build and send trail data when `input.show_trails()` is True.
+### Trail Toggle Behavior
+
+- **TrailBuffer.update() always runs** for populations ≤10K agents. This
+  ensures trails are immediately visible when toggled ON mid-run.
+- **For populations >10K agents**, `update()` is gated on `show_trails` to
+  avoid the subsampling overhead when trails are hidden.
+- **When toggled OFF:** send the trail layer with `visible=False` via
+  `partial_update` to hide it (don't just omit it — shallow merge keeps
+  stale layers visible).
+- **When toggled ON:** send trail layer with `visible=True` + current path data.
 
 ### Clear on Reset
 
@@ -157,9 +231,9 @@ Only build and send trail data when `input.show_trails()` is True.
 
 ### Payload Estimate
 
-- 2000 agents × 10 trail points × 8 bytes/point = 160 KB
+- 2000 agents × 10 trail points × 8 bytes/point = 160 KB (fixed, regardless of population size)
 - With JSON overhead: ~200 KB per update (acceptable alongside 6 KB agent data)
-- For very large populations (>10K agents), subsample trails to MAX_TRAIL_AGENTS=2000.
+- MAX_TRAIL_AGENTS = 2000 is the default subsample limit for all scenarios.
 
 ## Feature 3: Live Stats Bar
 
@@ -177,9 +251,8 @@ A horizontal stats strip rendered as reactive HTML below the run controls:
 @output
 @render.ui
 def live_stats():
-    sim = sim_state.get()
-    h = history.get()
-    if not sim or not h:
+    h = history.get()  # sole reactive dependency — triggers on every step
+    if not h:
         return ui.div()
     last = h[-1]
     t = last["time"]
@@ -230,7 +303,7 @@ while running.get() and sim.current_t < steps:
     await asyncio.to_thread(_batch)
     history.set(sim.history.copy())  # always update (triggers live stats + map)
     # Plotly charts throttled separately
-    await asyncio.sleep(0.25)
+    await asyncio.sleep(max(0.05, 0.25 - elapsed))  # adaptive
 ```
 
 The Plotly chart render functions check `len(history) % 5 == 0` before regenerating HTML files.
@@ -248,7 +321,7 @@ Run pressed:
           - Trail paths if enabled (<5ms for 2K agents)
           - Sends partial_update with transitions
     3. Plotly charts regenerated every 5th step only
-    4. await asyncio.sleep(0.25) — allows 200ms transition to complete
+    4. await asyncio.sleep(max(0.05, 0.25 - elapsed)) — adaptive sleep
 ```
 
 ## Files to Modify
