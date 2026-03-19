@@ -59,6 +59,34 @@ def test_step_performance_100k_agents():
     assert sim.pool.alive.sum() > 0
 
 
+@pytest.mark.slow
+def test_hexsim_100k_agents_under_half_second_per_step():
+    """100K agents on Columbia workspace should run < 0.5s/step.
+
+    Measures end-to-end performance with config_columbia.yaml settings
+    (estuary overrides disabled via high thresholds).
+    """
+    import os
+    if not os.path.exists("Columbia River Migration Model/Columbia [small]"):
+        pytest.skip("Columbia workspace not found")
+
+    cfg = load_config("config_columbia.yaml")
+    # Warmup Numba
+    sim_warmup = Simulation(cfg, n_agents=10, rng_seed=99)
+    sim_warmup.run(1)
+
+    cfg2 = load_config("config_columbia.yaml")
+    sim = Simulation(cfg2, n_agents=100_000, rng_seed=42)
+    n_steps = 10
+    t0 = time.perf_counter()
+    sim.run(n_steps)
+    elapsed = time.perf_counter() - t0
+    per_step = elapsed / n_steps
+    print(f"\n  HexSim 100K: {per_step:.4f} s/step")
+    assert per_step < 0.5, f"{per_step:.3f}s/step exceeds 0.5s target"
+    assert sim.pool.alive.sum() > 0
+
+
 def test_vectorized_movement_correctness():
     """Full simulation should still produce valid, reproducible results."""
     import salmon_ibm.movement as mov
