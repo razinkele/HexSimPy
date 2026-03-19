@@ -21,6 +21,19 @@ def run_controls_panel():
             ui.input_switch("show_trails", "Trails", value=False),
             class_="trail-toggle",
         ),
+        ui.div(
+            ui.input_select(
+                "map_field", None,
+                choices={
+                    "temperature": "Temperature",
+                    "salinity": "Salinity",
+                    "ssh": "SSH",
+                    "depth": "Bathymetry",
+                },
+                width="140px",
+            ),
+            class_="field-selector",
+        ),
         ui.div(class_="spacer"),
         ui.div(
             ui.output_text("progress_text"),

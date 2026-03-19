@@ -83,16 +83,5 @@ def sidebar_panel():
               "|dSSH/dt| exceeds threshold."),
         ui.input_numeric("seiche_thresh", "dSSH/dt thresh. (m/15min)", value=0.02, step=0.005),
 
-        # --- Display ---
-        _section("Map Display"),
-        ui.input_select(
-            "map_field", "Color mesh by",
-            choices={
-                "temperature": "Temperature",
-                "salinity": "Salinity",
-                "ssh": "Sea Surface Height",
-                "depth": "Bathymetry",
-            },
-        ),
         width=290,
     )
