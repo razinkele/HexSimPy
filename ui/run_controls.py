@@ -26,5 +26,6 @@ def run_controls_panel():
             ui.output_text("status_text"),
             class_="status-badge",
         ),
+        ui.output_ui("live_stats"),
         class_="run-controls-bar",
     )

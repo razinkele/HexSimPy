@@ -645,6 +645,31 @@ def server(input, output, session):
         arrived = int(sim.pool.arrived.sum())
         return f"{alive}/{total} alive \u00b7 {arrived} arrived"
 
+    @output
+    @render.ui
+    def live_stats():
+        h = history.get()
+        if not h:
+            return ui.div(class_="live-stats-bar")
+        last = h[-1]
+        t = last.get("time", 0)
+        n_alive = last.get("n_alive", 0)
+        n_arrived = last.get("n_arrived", 0)
+        beh = last.get("behavior_counts", {})
+        return ui.div(
+            ui.span(f"t = {t} h", class_="stat-val"),
+            ui.span("|", class_="stat-sep"),
+            ui.span(f"{n_alive:,} alive", class_="stat-val stat-alive"),
+            ui.span("|", class_="stat-sep"),
+            ui.span(f"{n_arrived:,} arrived", class_="stat-val"),
+            ui.span("|", class_="stat-sep"),
+            ui.span(
+                f"\u2191{beh.get(3,0)} \u2193{beh.get(1,0)} \u2192{beh.get(0,0)} \u25cb{beh.get(4,0)}",
+                class_="stat-val stat-behaviors",
+            ),
+            class_="live-stats-bar",
+        )
+
     @render.text
     def progress_text():
         _ = history.get()  # re-render on each step
