@@ -462,19 +462,29 @@ class HexSimMoveEvent(Event):
     dispersal_halt_target: float = 0.0
     resource_threshold: float = 0.0
 
+    # Cached references (resolved on first execute, reused on subsequent calls)
+    _cached_mesh: object = field(init=False, default=None, repr=False)
+    _cached_gradient: np.ndarray = field(init=False, default=None, repr=False)
+    _cached_nbrs: np.ndarray = field(init=False, default=None, repr=False)
+    _cached_nbr_count: np.ndarray = field(init=False, default=None, repr=False)
+
     def execute(self, population, landscape, t, mask):
         if not mask.any():
             return
-        mesh = landscape.get("mesh")
-        spatial_data = landscape.get("spatial_data", {})
-        rng = landscape.get("rng", np.random.default_rng())
 
-        if mesh is None:
-            return
-
-        gradient = spatial_data.get(self.dispersal_spatial_data)
-        if gradient is None:
-            gradient = np.ones(mesh.n_cells)
+        # Cache mesh and gradient references (same across all calls within a step)
+        if self._cached_mesh is None:
+            mesh = landscape.get("mesh")
+            if mesh is None:
+                return
+            self._cached_mesh = mesh
+            self._cached_nbrs = mesh._water_nbrs
+            self._cached_nbr_count = mesh._water_nbr_count
+            spatial_data = landscape.get("spatial_data", {})
+            gradient = spatial_data.get(self.dispersal_spatial_data)
+            if gradient is None:
+                gradient = np.ones(mesh.n_cells)
+            self._cached_gradient = gradient
 
         alive_idx = np.where(mask)[0]
         positions = population.tri_idx[alive_idx].copy()
@@ -491,8 +501,10 @@ class HexSimMoveEvent(Event):
         # Movement kernel dispatch
         n_agents = len(alive_idx)
         n_steps = max(1, int(halt_dist)) if halt_dist > 0 else 1
-        water_nbrs = mesh._water_nbrs
-        water_nbr_count = mesh._water_nbr_count
+        water_nbrs = self._cached_nbrs
+        water_nbr_count = self._cached_nbr_count
+        gradient = self._cached_gradient
+        mesh = self._cached_mesh
 
         if affinity_targets is not None and (affinity_targets >= 0).any():
             # Split: affinity-targeted agents vs gradient-following
