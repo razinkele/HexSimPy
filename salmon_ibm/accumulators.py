@@ -116,6 +116,7 @@ _ALLOWED_NODE_TYPES = (
     ast.Expression, ast.BinOp, ast.UnaryOp, ast.Call, ast.Constant,
     ast.Name, ast.Load, ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow,
     ast.Mod, ast.USub, ast.UAdd,
+    ast.Subscript, ast.Attribute,  # needed for _g["name"], _rng.random
 )
 
 
@@ -124,21 +125,47 @@ def _validate_expression(expr):
     for node in ast.walk(tree):
         if not isinstance(node, _ALLOWED_NODE_TYPES):
             raise ValueError(f"Disallowed construct in expression: {type(node).__name__}")
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            if node.func.id not in _SAFE_MATH:
-                raise ValueError(f"Unknown function in expression: {node.func.id}")
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name):
+                if node.func.id not in _SAFE_MATH:
+                    raise ValueError(f"Unknown function in expression: {node.func.id}")
+            # ast.Attribute calls (e.g., _rng.random) are allowed in HexSim mode
 
 
-def updater_expression(manager, acc_name, mask, *, expression):
-    """Evaluate algebraic expression over accumulators with AST safety validation."""
-    _validate_expression(expression)
+def updater_expression(manager, acc_name, mask, *, expression, globals_dict=None, rng=None):
+    """Evaluate algebraic expression over accumulators with AST safety validation.
+
+    If globals_dict is provided, use HexSim DSL translation mode:
+    - Single-quoted names → global variable lookup in globals_dict
+    - Double-quoted names → accumulator lookup
+    - Cond() → vectorised sign-of-difference conditional
+
+    If globals_dict is None, use legacy bare-name mode (backward compatible).
+    """
     idx = manager._resolve_idx(acc_name)
     defn = manager.definitions[idx]
-    namespace = dict(_SAFE_MATH)
-    for name, col_idx in manager._name_to_idx.items():
-        namespace[name] = manager.data[mask, col_idx]
-    result = eval(expression, {"__builtins__": {}}, namespace)
+
+    if globals_dict is not None:
+        # HexSim mode: translate and evaluate with full namespace
+        from salmon_ibm.hexsim_expr import translate_hexsim_expr, build_hexsim_namespace
+        translated = translate_hexsim_expr(expression)
+        n_masked = int(mask.sum())
+        acc_dict = {d.name: manager.data[mask, i] for i, d in enumerate(manager.definitions)}
+        if rng is None:
+            rng = np.random.default_rng()
+        namespace = build_hexsim_namespace(globals_dict, acc_dict, rng, n_masked)
+        result = eval(translated, {"__builtins__": {}}, namespace)
+    else:
+        # Legacy mode: bare accumulator names in namespace
+        _validate_expression(expression)
+        namespace = dict(_SAFE_MATH)
+        for name, col_idx in manager._name_to_idx.items():
+            namespace[name] = manager.data[mask, col_idx]
+        result = eval(expression, {"__builtins__": {}}, namespace)
+
     result = np.asarray(result, dtype=np.float64)
+    if result.ndim == 0:
+        result = np.full(mask.sum(), float(result))
     result = np.nan_to_num(result, nan=0.0,
                            posinf=defn.max_val if defn.max_val is not None else 0.0,
                            neginf=defn.min_val if defn.min_val is not None else 0.0)
