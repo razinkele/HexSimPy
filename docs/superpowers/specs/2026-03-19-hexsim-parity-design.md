@@ -10,13 +10,13 @@
 The Python implementation has the architectural pieces (event engine, accumulators, traits, populations) but the XML parser cannot actually read real HexSim files due to wrong tag names, missing attribute parsing, and missing event types. The gap analysis identified 18 critical, 15 important, and 4 nice-to-have gaps.
 
 **Real scenario complexity (gr_Columbia2017B.xml):**
-- 4 populations (Chinook, Steelhead, Iterator, Refuges)
-- ~65 accumulators per fish population
-- ~30 traits (mix of probabilistic + accumulated)
-- ~360 events using 13 distinct event types
-- ~290 expression updater calls using a HexSim-specific DSL
-- 42 global variable constants
-- 17 spatial data series
+- 4 populations in XML order: Chinook, Iterator, Refuges, Steelhead (NOT alphabetical)
+- ~65 accumulators per fish population (Chinook has `Refuge Zone`, Steelhead does not)
+- ~30 traits per fish population (mix of probabilistic + accumulated)
+- 9 root events (~255 leaf events) using 13 distinct event types
+- ~252 expression updater calls using a HexSim-specific DSL
+- 58 global variable constants (not 42 as previously stated)
+- 18 spatial data series (16 HexMap + 2 Barrier)
 
 ---
 
@@ -57,13 +57,14 @@ Rewrite `xml_parser.py` as `salmon_ibm/xml_parser.py` (same file, new implementa
     "simulation": {
         "n_timesteps": 2928,
         "n_replicates": 1,
-        "start_log_step": 0,
+        "start_log_step": 2929,  # effectively disabled (last step + 1)
     },
     "grid": {
-        "n_hexagons": 880000,
-        "cell_width": 27.752,
-        "columns": 1100,
-        "rows": 800,
+        "n_hexagons": 16046143,
+        "cell_width": 24.028114141347544,
+        "columns": 10195,
+        "rows": 1574,
+        "narrow": True,  # pointy-top hex layout
     },
     "global_variables": {
         "Hexagon Area": 500.0,
@@ -71,8 +72,9 @@ Rewrite `xml_parser.py` as `salmon_ibm/xml_parser.py` (same file, new implementa
         ...
     },
     "spatial_data_series": {
-        "River [ extent ]": {"datatype": "HexMap", "time_series": False},
-        "Fish Ladder Available": {"datatype": "Barrier", "time_series": True, "cycle_length": 24},
+        "River [ extent ]": {"datatype": "HexMap", "time_series": True, "cycle_length": 0},
+        "Fish Ladder Available": {"datatype": "Barrier", "time_series": True, "cycle_length": 0},
+        # Note: ALL 18 series have timeSeries=1 and cycleLength=0 in Columbia XML
         ...
     },
     "populations": [
@@ -698,6 +700,17 @@ This spec was reviewed three times:
 53. **`stratifiedUpdaterFunctions` groups can condition on DIFFERENT traits within same event** — each group is fully independent with its own `<trait>` + `<traitCombinations>`.
 54. **`<p1Traits />` can be empty (self-closing)** — means no p1 filter (all agents qualify). Parser must handle without crashing.
 55. **`<outcomeProbability>` in interaction outcomes** — always `1.0` in Columbia but must be parsed for probabilistic outcomes in other scenarios.
+
+### Delta round 2 findings (items 56-63):
+
+56. **`resetExplored` moveEvents use a separate parameter set** — `<maximumLocalSearchArea>`, `<maxExploreAccumulator>`, `<explorationGoal>`, `<explorationAlgorithm>`, `<explorationSetAffinity>`, `<purgeAffinity>`, `<zeroExplored>`. This is architecturally distinct from `onlyDisperse`, not a minor variant. Requires separate code path in `HexSimMoveEvent`.
+57. **`moveEvent` has `<resourceThreshold>1</resourceThreshold>`** on all events — minimum cell resource value for valid movement targets. Must be parsed.
+58. **`moveEvent` has `<avoidExploredArea>false</avoidExploredArea>`** — boolean controlling whether agent avoids previously visited cells. Must be parsed.
+59. **`<workspace>` XML element** — `<workspace>F:\Marcia\Columbia [small]</workspace>` provides the original workspace path for systematic path remapping of CSV filenames and grid file paths.
+60. **`dataLookupEvent` HAS trait filtering** — `<trait>` + `<traitCombinations>` present (e.g., lines 1796-1797). Phase D.4 design must include trait filter extraction.
+61. **Inline matrix data format** — `<matrices>` element contains raw whitespace-separated text (newline-separated rows of space-separated floats). Access via `elem.text.split()`, not child element iteration.
+62. **Empty `<populationName />`** — self-closing or empty text on group-level events. Parser must treat as `None`, not attempt population lookup.
+63. **`ScenarioLoader` CSV missing-file graceful degradation** — if remapped CSV path doesn't exist, warn and return zeros rather than crash. Temperature data loaded this way is critical for every timestep.
 
 **Event sequence audit (complete event tree mapped, 8 root events, ~255 leaf events):**
 24. **`iterations=N` with trait filter is rejection-sampling** — `EventGroup` with `<trait>` + `<traitCombinations>` as SIBLINGS of child `<event>` elements uses the filter as a loop-continue condition: skip entire iteration if no agents match. Spec's `EventGroup.execute()` runs all iterations unconditionally. Must add: `if group_mask is not empty and no agents match → break loop`.
