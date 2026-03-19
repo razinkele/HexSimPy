@@ -122,11 +122,12 @@ Rewrite `xml_parser.py` as `salmon_ibm/xml_parser.py` (same file, new implementa
             "type": "event_group",
             "name": "Initialize Refuge Population",
             "timestep": 1,  # HexSim semantics: timestep=N means fire ONCE at step N (1-indexed)
-            # Events WITHOUT a timestep attribute fire EVERY step.
-            # <permanent>false</permanent> means one-shot (fire once then deregister).
-            # Convention: timestep=1 + permanent=false → Once(at=0) in Python (0-indexed)
-            # No timestep + permanent=true → EveryStep()
-            "permanent": False,  # one-shot event
+            # The SOLE discriminator is the timestep= attribute on the root <event> wrapper:
+            #   timestep="N" present → Once(at=N-1) in Python (0-indexed)
+            #   timestep attribute ABSENT → EveryStep()
+            # <permanent>false</permanent> is on ALL events in real XML and is NOT
+            # the scheduling discriminator — it is a HexSim internal artifact.
+            # DO NOT use permanent to determine firing schedule.
             "population": None,  # group-level; children specify population
             "iterations": 1,
             "enabled": True,
@@ -680,6 +681,23 @@ This spec was reviewed three times:
 39. **CRITICAL: `upperBound="0"` / `lowerBound="0"` means UNBOUNDED, not clamp-to-zero** — XML uses `0` as sentinel for "no bound". Current `AccumulatorManager.set()` with `max_val=0` clamps every positive result to 0, breaking ALL energy/fitness calculations. Phase E MUST map parsed `0` → `None` when constructing `AccumulatorDef`.
 40. **Division by zero in density formula** — `N_total^2 / (Vol_chinook * N_chinook + Vol_steelhead * N_steelhead)` has zero denominator for empty refuges. Current `nan_to_num(posinf=max_val)` with `max_val=0` accidentally gives correct 0.0 but is fragile. Document and test explicitly.
 41. **Nested `Exp(Exp(...))` overflow risk** — `Exp(RTO * ACT * weight^RK4 * Exp(BACT * T))` can overflow to `inf` at high temperatures. With `max_val=0` (item 39 fix resolves this to `None`/unbounded), overflow produces `inf` in accumulator. Must be clamped to a biologically reasonable maximum or documented as expected behavior.
+
+### Review 4 continued — XML schema delta (items 42-55):
+
+42. **CRITICAL: `permanent=false` is on ALL events — spec's `permanent=true` → EveryStep rule is FABRICATED.** The `timestep="N"` attribute presence/absence on the root `<event>` wrapper is the SOLE discriminator: `timestep="N"` → fire once at step N; no `timestep` attribute → fire every step. The `<permanent>` field is a HexSim internal artifact unrelated to scheduling. MUST fix Phase A/C to use this rule.
+43. **Event type identified by CHILD TAG NAME** — `<event><accumulateEvent>...</accumulateEvent></event>`. The inner tag name (`accumulateEvent`, `transitionEvent`, `moveEvent`, etc.) is the type identifier. Parser must extract the first child element's tag and strip the `Event` suffix to get the type key.
+44. **`<function>` uses fully-qualified names** — `HexSimDomain.ExpressionUpdaterFunction`. Parser must strip `HexSimDomain.` prefix and `UpdaterFunction` suffix to get bare name (`Expression`, `Clear`, `Increment`, etc.).
+45. **`ExpressionUpdaterFunction` always has 2 `<parameter>` children** — first is expression string, second is always `0` (unused). Parser must take `parameters[0]` only. `IncrementUpdaterFunction` `<parameter>` can be negative (e.g., `-1` for decrement).
+46. **`<sourceTrait>` inside `<updaterFunction>`** — used by `TraitIdUpdaterFunction`. Direct child at same level as `<accumulator>` and `<function>`. Phase A parser must extract this (not in current `_parse_events_recursive` child list).
+47. **`<interactionEvent>` has OUTER-LEVEL `<presence>`/`<colocation>` for p1** — separate from per-`<interaction>` sub-block attributes for p2. Both levels must be parsed independently.
+48. **`<matrixSet>` has `rowsReversed` attribute** — always `false` in Columbia. Parse and store; apply row reversal if `true`.
+49. **`<dataLookupEvent>` has vestigial `<matrixSet>` with `matrixCount=0`** — parser must not crash on empty `<matrices />` self-closing element.
+50. **`<setSpatialAffinityEvent>` has literal `<min>`/`<max>` siblings of `<minAccumulator>`/`<maxAccumulator>`** — literal values are defaults; accumulator values take precedence. Parser must read both.
+51. **`<timeSeries>1</timeSeries>` uses integer `1`/`0`, not boolean** — parser must use `int(text) != 0`, not `text == "true"`.
+52. **`<hexagonGrid>` has `<narrow>true</narrow>`** — affects hex neighbor geometry (pointy-top vs flat-top). Actual grid: 16M hexes, 10195 cols, 1574 rows. Parser must extract and store.
+53. **`stratifiedUpdaterFunctions` groups can condition on DIFFERENT traits within same event** — each group is fully independent with its own `<trait>` + `<traitCombinations>`.
+54. **`<p1Traits />` can be empty (self-closing)** — means no p1 filter (all agents qualify). Parser must handle without crashing.
+55. **`<outcomeProbability>` in interaction outcomes** — always `1.0` in Columbia but must be parsed for probabilistic outcomes in other scenarios.
 
 **Event sequence audit (complete event tree mapped, 8 root events, ~255 leaf events):**
 24. **`iterations=N` with trait filter is rejection-sampling** — `EventGroup` with `<trait>` + `<traitCombinations>` as SIBLINGS of child `<event>` elements uses the filter as a loop-continue condition: skip entire iteration if no agents match. Spec's `EventGroup.execute()` runs all iterations unconditionally. Must add: `if group_mask is not empty and no agents match → break loop`.
