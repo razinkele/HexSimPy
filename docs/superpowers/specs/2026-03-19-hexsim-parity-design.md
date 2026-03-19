@@ -121,9 +121,12 @@ Rewrite `xml_parser.py` as `salmon_ibm/xml_parser.py` (same file, new implementa
         {
             "type": "event_group",
             "name": "Initialize Refuge Population",
-            "timestep": 1,  # HexSim semantics: period=1 means every step; period=0 means one-shot at t=0
-            # Convention: timestep=N on top-level <event> means Periodic(interval=N)
-            # For one-shot init events, they use timestep="1" + iterations=1 (fires once at t=0)
+            "timestep": 1,  # HexSim semantics: timestep=N means fire ONCE at step N (1-indexed)
+            # Events WITHOUT a timestep attribute fire EVERY step.
+            # <permanent>false</permanent> means one-shot (fire once then deregister).
+            # Convention: timestep=1 + permanent=false → Once(at=0) in Python (0-indexed)
+            # No timestep + permanent=true → EveryStep()
+            "permanent": False,  # one-shot event
             "population": None,  # group-level; children specify population
             "iterations": 1,
             "enabled": True,
@@ -314,47 +317,119 @@ Add `population_name: str | None` and `enabled: bool = True` fields to `Event` b
 
 ## Phase D: Missing Event Types
 
-### 5 critical event types to implement
+### 8 event types to implement (7 critical + 1 important)
 
-#### D.1: `HexSimMoveEvent`
+#### D.1: `HexSimMoveEvent` (CRITICAL)
 
-The real HexSim `<moveEvent>` is fundamentally different from our `MovementEvent`:
-- Uses spatial affinity goals (not SSH gradients)
-- Has `<moveStrategy>` (dispersal, exploration, migration)
-- Supports `<walkUpGradient>` / `<walkDownGradient>` on named spatial data
-- Has `<barrierSeries>` for barrier interaction
-- Has `<dispersalAccumulator>` for tracking movement distance
-- Filters by trait combinations
+The real HexSim `<moveEvent>` is fundamentally different from our `MovementEvent`. Key parameters from the Columbia XML:
+- `<moveStrategy>onlyDisperse</moveStrategy>` — note: the XML value is `onlyDisperse`, NOT `dispersal`
+- `<dispersalSpatialData>Gradient [ upstream ]</dispersalSpatialData>` — named spatial gradient
+- `<walkUpGradient>true/false</walkUpGradient>` — follow gradient up or down
+- `<dispersalAccumulator>` — accumulator tracking distance moved this event
+- `<barrierSeries>` — named barrier layer
+- `<dispersalAutoCorrelation>` — directional persistence (0 to 1)
+- `<dispersalHaltMinimum>`, `<dispersalHaltTarget>`, `<dispersalHaltMemory>` — stopping conditions
+- **`<dispersalUseAffinity />`** — CRITICAL: when present (empty element), the move event uses the affinity target set by `setSpatialAffinityEvent` as the gradient direction instead of the raw spatial data gradient. This is the mechanism for upstream migration and CWR seeking.
+- `<attractionCoefficients>` — four floats controlling directional bias (e.g., `0 0 100 100`)
+- `<attractionMultiplier>` — overall attraction strength
+- `<trendPeriod>` — autocorrelation memory window
+- `<priorityExplore>` — boolean for exploration priority
+- Trait filtering via `<trait>` + `<traitCombinations>`
 
-**Design:** Create `salmon_ibm/events_hexsim.py` with `HexSimMoveEvent` registered as `"move"`. This event reads spatial data by name from landscape, uses the existing mesh neighbor arrays for gradient-following, and writes distance to a named accumulator.
+**Design:** Create `salmon_ibm/events_hexsim.py` with `HexSimMoveEvent` registered as `"move"`. This event reads spatial data by name from landscape, supports both raw gradient following and affinity-targeted movement, uses the existing mesh neighbor arrays, and writes distance to a named accumulator. The `dispersalUseAffinity` flag switches between gradient-following and affinity-targeted modes.
 
-#### D.2: `HexSimSurvivalEvent`
+#### D.2: `HexSimSurvivalEvent` (CRITICAL)
 
-The real `<survivalEvent>` is accumulator-driven: if `<survivalAccumulator>` value is 0 ("Will Die"), the agent dies. This is different from our bioenergetics-based `SurvivalEvent`.
+The real `<survivalEvent>` is trait-category-driven, NOT raw-accumulator-driven:
+- `<useAccumulator>true</useAccumulator>` + `<survivalAccumulator>Survival [ switch ]</survivalAccumulator>`
+- The linked accumulated trait has categories: category 0 = "Will Die", category 1 = "Will Live"
+- Agents in trait category 0 die (deterministic, no probability)
+- The mechanism: check the trait category derived from the accumulator value, NOT the raw accumulator value
 
-**Design:** Register as `"hexsim_survival"`. Reads named accumulator, kills agents where value ≤ 0 (or matches a "die" threshold).
+**Design:** Register as `"hexsim_survival"`. Reads the named accumulator's linked trait, kills agents in category 0. This correctly handles any threshold arrangement, not just the ≤ 0 special case.
 
-#### D.3: `DataLookupEvent`
+#### D.3: `TransitionEvent` (CRITICAL — was entirely absent from spec)
+
+The Columbia scenario makes HEAVY use of `<transitionEvent>` for all fish behavioral state transitions (movement mode, thermal response, refuge history). Without this, fish behavior is frozen.
+
+Structure from XML:
+- `<transitionTrait>Fish Status [ movement ]</transitionTrait>` — trait being updated
+- One or more `<trait>` elements — conditioning traits (row dimensions of the matrix)
+- `<traitCombinations>` — flat bitfield for multi-trait conditioning
+- `<matrixSet transposed= rows= columns= matrixCount=>` with inline probability matrix
+
+**Design:** The existing `TransitionEvent` in `events_phase3.py` handles single-trait transitions. Extend it to support:
+1. Multi-trait conditioning via `<trait>` + `<traitCombinations>` bitfield
+2. `<matrixSet>` inline probability matrix parsing (from Phase A parser output)
+3. Register as `"transition"` (already registered, but parser must extract the full structure)
+
+#### D.4: `DataLookupEvent` (CRITICAL)
 
 Looks up values from an external CSV using accumulator values as row/column keys.
 
-**Design:** Register as `"data_lookup"`. Reads `<fileName>`, `<rowAccumulator>`, `<columnAccumulator>`, `<targetAccumulator>`. Loads CSV at init. **Reuse** the existing `updater_data_lookup()` in `accumulators.py` (lines 374-384) for 1D lookup; extend it for 2D lookup (row + column accumulators). The event is a thin wrapper that calls the existing updater function.
+**Design:** Register as `"data_lookup"`. **Reuse** the existing `updater_data_lookup()` in `accumulators.py` (lines 374-384) for 1D lookup; extend it for 2D lookup (row + column accumulators). Must handle:
+- `<hasColumnHeader>` and `<hasRowHeader>` flags (whether first row/col is header)
+- **CSV path remapping:** XML contains absolute Windows paths (e.g., `F:\Marcia\...`). ScenarioLoader must remap relative to workspace `Analysis/Data Lookup/` directory.
 
-#### D.4: `SetSpatialAffinityEvent`
+#### D.5: `SetSpatialAffinityEvent` (CRITICAL)
 
 Sets a spatial affinity goal for agents — picks best cell within bounds based on a spatial gradient.
 
-**Design:** Register as `"set_spatial_affinity"`. Reads spatial data by name, computes best cell within `[minAccumulator, maxAccumulator]` bounds, writes to affinity target.
+Key parameters from XML:
+- `<affinity>Movement Goal</affinity>` — named affinity slot (must match population's `<affinity>` definitions)
+- `<strategy>better</strategy>` — search only for cells that improve on current value
+- `<spatialSeries>` — the gradient spatial data
+- `<useBounds>true</useBounds>` with `<minAccumulator>` and `<maxAccumulator>` — bound search range
+- **`<errorAccumulator>Affinity Switch</errorAccumulator>`** — set to 1 if no valid cell found within bounds. This drives a trait used in trait filtering throughout movement logic.
 
-#### D.5: `PatchIntroductionEvent`
+**Design:** Register as `"set_spatial_affinity"`. Must implement the error accumulator write on failure — without it, fish behavior after failed affinity searches will be wrong.
 
-Places one agent on every non-zero cell of a named spatial data layer.
+#### D.6: `PatchIntroductionEvent` (CRITICAL)
+
+Places one agent on every non-zero cell of a named spatial data layer. Used for Refuges population.
 
 **Design:** Register as `"patch_introduction"`. Reads hex-map by name, finds non-zero cells, calls `population.add_agents()`.
 
+#### D.7: `IntroductionEvent` (CRITICAL — was conflated with PatchIntroduction)
+
+Distinct from `PatchIntroductionEvent`. Used for Chinook and Steelhead fish initialization:
+- `<initialSize>N</initialSize>` — total number of agents to add
+- `<initializationSpatialData>Special Sites [ initialization ]</initializationSpatialData>` — place agents on non-zero cells of this layer
+
+**Design:** The existing `IntroductionEvent` in `events_builtin.py` must be extended to support spatial data layer placement (resolve layer name → cell positions via `landscape["spatial_data"]`).
+
+#### D.8: `InteractionEvent` (CRITICAL — semantics were unspecified)
+
+The refuge density control mechanism — central ecological feature of the Columbia scenario:
+- `<presence>explored</presence>` — agents must have explored their current cell
+- `<colocation type="always" />` — populations must be co-located (same hex cell)
+- `<encounterProbability>1</encounterProbability>` — certain encounter
+- Multiple `<interaction>` sub-blocks, each naming a second population (e.g., Chinook, Steelhead)
+- `<outcomes>` with `<p1Traits>` (Refuges traits) and `<p2Traits>` (fish traits): when p1ComboIndex and p2ComboIndex match, `<p1Changes>` and `<p2Changes>` modify accumulators via `updater="assign"` or `updater="increment"`
+
+**Design:** The existing `InteractionEvent` in `interactions.py` provides a basic framework. Extend it to support:
+1. p1/p2 trait-filtered encounter outcomes
+2. `assign` and `increment` accumulator modification modes
+3. Multi-interaction blocks within a single event
+4. Access both populations through `landscape["multi_pop_mgr"]`
+
+### Additional updater functions needed (Phase A/B)
+
+Three updater types are used in the Columbia XML but missing from spec:
+
+1. **`ExploredRunningSumUpdaterFunction`** — sums a spatial data layer across all hexes in the agent's explored range. Used for computing refuge effective volumes. Add to `accumulators.py`.
+
+2. **`QuantifyLocationUpdaterFunction`** — returns the gradient value at the agent's current cell, multiplied by a scale parameter. Distinct from `IndividualLocationsUpdaterFunction` (which returns the spatial data value). Add to `accumulators.py`.
+
+3. **`TraitIdUpdaterFunction`** — writes the integer category index of a named trait (via `<sourceTrait>` element) into the target accumulator. Add to `accumulators.py`.
+
+### EventGroup trait filtering
+
+`<eventGroupEvent>` elements can have their own `<trait>` + `<traitCombinations>` filters that gate the entire group. The spec's `EventGroup.execute()` must apply this group-level filter mask before iterating children.
+
 ### Tests
 
-Each event type gets its own test file with unit tests using synthetic data (no workspace dependency).
+Each event type gets unit tests with synthetic data (no workspace dependency).
 
 ---
 
@@ -440,9 +515,17 @@ This registry is injected into `landscape["spatial_data"]` so events can look up
 5. Runs for 100 timesteps without crashes
 6. Produces plausible agent behavior (agents move, energy changes, some die)
 
+**M1 REQUIRES (minimum for plausible behavior):**
+- `timestep="N"` correctly fires events once at step N (not periodically)
+- `transitionEvent` working (fish behavioral state transitions)
+- `introductionEvent` working (fish initialization from spatial data)
+- `moveEvent` with `dispersalUseAffinity` working (correct migration direction)
+- `interactionEvent` with p1/p2 outcomes working (refuge density control)
+
 **M1 does NOT require:**
 - Exact numerical match with HexSim C++ output (that's M6 per roadmap)
-- All 13 event types working perfectly (some can be no-ops with warnings)
+- `dataProbeEvent` output logging
+- `reanimationEvent` (disabled in Columbia XML)
 - Network mode or non-Columbia scenarios
 
 ---
@@ -474,9 +557,24 @@ Phases A and B are independent and can be parallelized. C depends on A (needs pa
 
 | Phase | New/Modified Files | LOC | Tests |
 |-------|-------------------|-----|-------|
-| A: XML Parser | 1 modified | ~400 | ~12 |
-| B: Expression DSL | 1 new + 1 modified | ~200 | ~10 |
-| C: Multi-Pop Router | 1 new + 1 modified | ~150 | ~6 |
-| D: Missing Events | 1 new | ~300 | ~15 |
-| E: ScenarioLoader | 1 new | ~250 | ~8 |
-| **Total** | **5 files** | **~1,300** | **~51** |
+| A: XML Parser | 1 modified | ~500 | ~12 |
+| B: Expression DSL | 1 new + 1 modified | ~250 | ~12 |
+| C: Multi-Pop Router | 2 modified (events.py, interactions.py) | ~200 | ~8 |
+| D: Missing Events (8 types + 3 updaters) | 1 new + 3 modified | ~600 | ~25 |
+| E: ScenarioLoader | 1 new | ~300 | ~10 |
+| **Total** | **~8 files** | **~1,850** | **~67** |
+
+## Parity Review Fixes Applied
+
+This spec was reviewed twice. The second review (HexSim domain expert) identified these critical issues, all now fixed:
+
+1. **`timestep="N"` semantics:** Fixed from "periodic" to "fire once at step N" with `permanent` flag
+2. **`transitionEvent` added:** Was entirely absent; now D.3 with multi-trait conditioning
+3. **`introductionEvent` separated from `patchIntroductionEvent`:** Now D.6 + D.7
+4. **`dispersalUseAffinity` added to moveEvent:** Critical for upstream migration direction
+5. **`interactionEvent` semantics specified:** p1/p2 trait-filtered outcomes with assign/increment
+6. **3 missing updater types added:** ExploredRunningSum, QuantifyLocation, TraitId
+7. **`setSpatialAffinityEvent` error accumulator added:** Affinity Switch on search failure
+8. **CSV path remapping noted:** DataLookupEvent must remap absolute Windows paths
+9. **EventGroup trait filtering added:** Group-level trait gates
+10. **`HexSimSurvivalEvent` corrected:** Trait category 0 = die, not raw accumulator ≤ 0
