@@ -640,7 +640,8 @@ def server(input, output, session):
                 mesh = sim.mesh
                 all_tris = sim.pool.tri_idx
                 is_hex = hasattr(mesh, '_edge')
-                scale = _cached_scale if _cached_scale > 0 else (0.0005 if is_hex else 1.0)
+                scale = _cached_scale if _cached_scale not in (0, 1.0) and is_hex else (
+                        80.0 / max(abs(mesh.centroids).max(), 1) if is_hex else 1.0)
                 if is_hex:
                     all_xy = np.column_stack([mesh.centroids[all_tris, 1] * scale,
                                               -mesh.centroids[all_tris, 0] * scale]).astype(np.float32)
@@ -676,7 +677,8 @@ def server(input, output, session):
                     mesh = sim.mesh
                     all_tris = sim.pool.tri_idx
                     is_hex = hasattr(mesh, '_edge')
-                    scale = _cached_scale if _cached_scale > 0 else (0.0005 if is_hex else 1.0)
+                    scale = _cached_scale if _cached_scale not in (0, 1.0) and is_hex else (
+                        80.0 / max(abs(mesh.centroids).max(), 1) if is_hex else 1.0)
                     if is_hex:
                         all_xy = np.column_stack([mesh.centroids[all_tris, 1] * scale,
                                                   -mesh.centroids[all_tris, 0] * scale]).astype(np.float32)
@@ -800,20 +802,33 @@ def server(input, output, session):
         z_max = f"{float(np.nanmax(z)):.1f}"
         gradient = ", ".join(f"{s[1]} {int(s[0]*100)}%" for s in cscale)
 
-        # Behavior chips (only if agents alive)
+        # Grid type label
+        is_hexsim = hasattr(sim.mesh, "n_cells")
+        grid_label = f"Hexagonal Grid ({sim.mesh.n_cells:,} cells)" if is_hexsim else "Triangular Mesh"
+
+        # Behavior chips + agent count (only if agents alive)
         beh_html = ""
-        if sim.pool.alive.any():
+        n_alive = int(sim.pool.alive.sum())
+        if n_alive > 0:
             chips = []
+            beh_counts = {}
+            for b in range(5):
+                beh_counts[b] = int((sim.pool.behavior[sim.pool.alive] == b).sum())
             for i, (name, color) in enumerate(zip(BEH_NAMES, BEH_COLORS)):
+                count = beh_counts.get(i, 0)
                 chips.append(
                     f'<span class="map-legend-beh-item">'
                     f'<span class="map-legend-beh-dot" style="background:{color}"></span>'
-                    f'{name}</span>'
+                    f'{name} ({count})</span>'
                 )
-            beh_html = f'<div class="map-legend-behaviors">{"".join(chips)}</div>'
+            beh_html = (
+                f'<div class="map-legend-section">Agents ({n_alive:,})</div>'
+                f'<div class="map-legend-behaviors">{"".join(chips)}</div>'
+            )
 
         return ui.HTML(
             f'<div class="map-legend">'
+            f'<div class="map-legend-section">{grid_label}</div>'
             f'<div class="map-legend-title">{cbar_title}</div>'
             f'<div class="map-legend-bar" style="background:linear-gradient(to right,{gradient})"></div>'
             f'<div class="map-legend-range"><span>{z_min}</span><span>{z_max}</span></div>'
@@ -1039,7 +1054,13 @@ def server(input, output, session):
         landscape = input.landscape()
         field_name = input.map_field()
         is_hexsim = hasattr(sim.mesh, "n_cells")
-        scale = 0.0005 if is_hexsim else 1.0
+        if is_hexsim:
+            # Compute scale to keep pseudo-lat/lon within ±80 degrees
+            max_coord = max(abs(sim.mesh.centroids[:, 0]).max(),
+                            abs(sim.mesh.centroids[:, 1]).max())
+            scale = 80.0 / max(max_coord, 1)
+        else:
+            scale = 1.0
 
         # Detect what changed
         landscape_changed = landscape != _cached_landscape
@@ -1285,8 +1306,9 @@ def server(input, output, session):
         else:
             idx = np.arange(n_water)
 
-        # Scale grid coordinates; negate Y to flip
-        viewer_scale = 0.0005
+        # Scale to keep pseudo-lat/lon within ±80 degrees
+        max_coord = max(abs(cy).max(), abs(cx).max(), 1)
+        viewer_scale = 80.0 / max_coord
         sx = cx[idx] * viewer_scale
         sy = -cy[idx] * viewer_scale
         n_pts = len(idx)

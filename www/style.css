@@ -884,3 +884,14 @@ button[aria-label="Toggle sidebar"] {
 .stat-sep { opacity: 0.3; }
 .stat-alive { color: var(--lagoon-shallow); font-weight: 600; }
 .stat-behaviors { letter-spacing: 0.5px; }
+
+/* Legend sections */
+.map-legend-section {
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-top: 4px;
+    margin-bottom: 2px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
