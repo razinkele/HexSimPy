@@ -1334,18 +1334,32 @@ def server(input, output, session):
             grid_x_extent = hm.height * 1.5 * edge
             grid_y_extent = hm.width * np.sqrt(3.0) * edge
 
-        # PATCH_HEXMAP data is row-major with hm.width as stride.
-        # Same layout as hxn_viewer: data_cols → x (long axis, east-west),
-        # data_rows → y (short axis, north-south).  No axis swap.
-        data_stride = hm.width
-        data_rows = water_flat // data_stride   # short axis
-        data_cols = water_flat % data_stride     # long axis
-        col_spacing = 1.5 * edge
-        row_spacing = np.sqrt(3.0) * edge
-        cx = data_cols.astype(np.float64) * col_spacing
-        # Odd-column offset: flat-top odd-q convention (same as HexMesh.from_hexsim)
-        cy = data_rows.astype(np.float64) * row_spacing + (data_cols % 2) * (row_spacing / 2.0)
+        # Build row/col arrays properly (handles narrow grids where odd
+        # rows have width-1 cells — simple flat//width is WRONG for those).
+        # This matches hxn_viewer.py _hex_centers() exactly.
+        h, w = hm.height, hm.width
+        if hm.flag == 0:
+            # Wide grid: all rows have w cells
+            all_rows = np.repeat(np.arange(h), w)
+            all_cols = np.tile(np.arange(w), h)
+        else:
+            # Narrow grid: even rows have w cells, odd rows have w-1
+            row_list, col_list = [], []
+            for r in range(h):
+                rw = w if r % 2 == 0 else w - 1
+                row_list.append(np.full(rw, r, dtype=np.int32))
+                col_list.append(np.arange(rw, dtype=np.int32))
+            all_rows = np.concatenate(row_list)
+            all_cols = np.concatenate(col_list)
+
+        # Filter to non-zero (water) cells
+        data_rows = all_rows[water_flat]
+        data_cols = all_cols[water_flat]
         water_values = values[water_flat]
+
+        # Hex center coordinates (matches hxnparser.HexMap.hex_to_xy)
+        cx = 1.5 * edge * data_cols.astype(np.float64)
+        cy = np.sqrt(3.0) * edge * (data_rows.astype(np.float64) + 0.5 * (data_cols % 2))
 
         # Subsample for deck.gl — stride-based to preserve spatial tiling
         max_pts = 500_000

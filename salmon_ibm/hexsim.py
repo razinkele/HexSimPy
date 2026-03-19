@@ -183,16 +183,29 @@ class HexMesh:
         for compact_idx, full_idx in enumerate(water_flat):
             full_to_compact[int(full_idx)] = compact_idx
 
-        # 3. Compute centroids — flat-top odd-q convention
-        #    Decompose flat indices using data stride (hm.width).
-        #    Same layout as hxn_viewer: data_cols → x (long axis),
-        #    data_rows → y (short axis).  No axis swap needed.
-        data_rows = water_flat // data_stride   # 0..data_nrows-1  (short axis)
-        data_cols = water_flat % data_stride     # 0..data_stride-1 (long axis)
-        col_spacing = 1.5 * edge
-        row_spacing = np.sqrt(3.0) * edge
-        cx = data_cols.astype(np.float64) * col_spacing
-        cy = data_rows.astype(np.float64) * row_spacing + (data_cols % 2) * (row_spacing / 2.0)
+        # 3. Compute centroids using proper narrow-grid row/col mapping
+        #    (matches hxn_viewer.py _hex_centers exactly).
+        #    For narrow grids (flag=1), odd rows have width-1 cells,
+        #    so flat_index // width gives WRONG row/col.
+        h, w = data_nrows, data_stride
+        if extent_hm.flag == 0:
+            all_rows = np.repeat(np.arange(h), w)
+            all_cols = np.tile(np.arange(w), h)
+        else:
+            row_list, col_list = [], []
+            for r in range(h):
+                rw = w if r % 2 == 0 else w - 1
+                row_list.append(np.full(rw, r, dtype=np.int32))
+                col_list.append(np.arange(rw, dtype=np.int32))
+            all_rows = np.concatenate(row_list)
+            all_cols = np.concatenate(col_list)
+
+        data_rows = all_rows[water_flat]
+        data_cols = all_cols[water_flat]
+
+        # Hex center coordinates (matches hxnparser.HexMap.hex_to_xy)
+        cx = 1.5 * edge * data_cols.astype(np.float64)
+        cy = np.sqrt(3.0) * edge * (data_rows.astype(np.float64) + 0.5 * (data_cols % 2))
         centroids = np.column_stack([cy, cx])  # (N_water, 2) as [y, x] in meters
 
         # 4. Read depth (try specific, then generic names)
@@ -211,11 +224,12 @@ class HexMesh:
             depth = np.ones(n_water)
 
         # 5. Build neighbor graph (compact indices)
-        #    Use data_stride for flat-index neighbor computation
+        #    Use pre-computed row/col (correct for narrow grids)
         neighbors = np.full((n_water, 6), -1, dtype=np.intp)
         for ci in range(n_water):
             fi = int(water_flat[ci])
-            r, c = fi // data_stride, fi % data_stride
+            r = int(data_rows[ci])
+            c = int(data_cols[ci])
             full_nbrs = _hex_neighbors_offset(r, c, data_stride, data_nrows, n_data)
             ni = 0
             for fn in full_nbrs:
