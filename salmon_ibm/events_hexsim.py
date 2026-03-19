@@ -108,6 +108,38 @@ def _move_affinity_numba(positions, water_nbrs, water_nbr_count,
     return positions, distances
 
 
+@njit(cache=True)
+def _set_affinity_numba(current_cells, water_nbrs, water_nbr_count, gradient,
+                        min_bounds, max_bounds, better_strategy):
+    """JIT kernel: find best neighbor within bounds for each agent."""
+    n = len(current_cells)
+    targets = np.full(n, -1, dtype=np.intp)
+    for i in range(n):
+        cell = current_cells[i]
+        count = water_nbr_count[cell]
+        if count <= 0:
+            continue
+        cur_val = gradient[cell]
+        best_nb = -1
+        best_val = cur_val if better_strategy else -1e30
+        for k in range(count):
+            nb = water_nbrs[cell, k]
+            if nb < 0:
+                continue
+            nb_val = gradient[nb]
+            diff = abs(nb_val - cur_val)
+            if diff < min_bounds[i] or diff > max_bounds[i]:
+                continue
+            if nb_val > best_val:
+                best_val = nb_val
+                best_nb = nb
+        targets[i] = best_nb
+    return targets
+
+
+_combo_flags_cache: dict[str, np.ndarray] = {}
+
+
 def _apply_trait_combo_mask(base_mask, uf, population):
     """Narrow base_mask to agents matching the trait combination in a updater dict.
 
@@ -126,36 +158,30 @@ def _apply_trait_combo_mask(base_mask, uf, population):
     if trait_mgr is None:
         return base_mask
 
-    combo_flags = np.array([int(x) for x in str(combos_str).split()], dtype=np.int8)
+    # Cache parsed combo_flags (same string → same array)
+    combo_flags = _combo_flags_cache.get(combos_str)
+    if combo_flags is None:
+        combo_flags = np.array([int(x) for x in str(combos_str).split()], dtype=np.int8)
+        _combo_flags_cache[combos_str] = combo_flags
 
-    # Build list of category arrays and category counts for each trait
-    cat_arrays = []
-    n_cats = []
-    for tname in stratified:
-        if tname not in trait_mgr.definitions:
-            return base_mask  # trait unknown, can't filter
-        defn = trait_mgr.definitions[tname]
-        cat_arrays.append(trait_mgr.get(tname))
-        n_cats.append(len(defn.categories))
-
-    total_combos = 1
-    for n in n_cats:
-        total_combos *= n
-    if len(combo_flags) != total_combos:
-        return base_mask  # mismatch, skip filtering
-
-    # Compute a flat combo index for each agent using mixed-radix encoding
-    # flat_idx = cat0 * (n1 * n2 * ...) + cat1 * (n2 * ...) + ...
-    n_agents = len(base_mask)
-    flat_idx = np.zeros(n_agents, dtype=np.int32)
+    # Build flat combo index using mixed-radix encoding
+    n_cats_list = []
+    flat_idx = np.zeros(len(base_mask), dtype=np.int32)
     stride = 1
-    for arr, n in zip(reversed(cat_arrays), reversed(n_cats)):
-        flat_idx += arr.astype(np.int32) * stride
-        stride *= n
+    for tname in reversed(stratified):
+        if tname not in trait_mgr.definitions:
+            return base_mask
+        defn = trait_mgr.definitions[tname]
+        n_cat = len(defn.categories)
+        n_cats_list.append(n_cat)
+        flat_idx += trait_mgr.get(tname).astype(np.int32) * stride
+        stride *= n_cat
 
-    # Agents matching any enabled combination
-    enabled_combo = combo_flags[flat_idx] == 1  # vectorized lookup
-    return base_mask & enabled_combo
+    if len(combo_flags) != stride:
+        return base_mask  # mismatch
+
+    # Vectorized lookup
+    return base_mask & (combo_flags[flat_idx] == 1)
 
 
 @register_event("accumulate")  # overrides AccumulateEvent from events_builtin
@@ -371,38 +397,32 @@ class SetSpatialAffinityEvent(Event):
         else:
             max_bounds = np.full(len(alive_idx), np.inf)
 
-        # Vectorized: find best neighbor within bounds for each agent
+        # Find best neighbor within bounds for each agent
         current_cells = population.tri_idx[alive_idx]
-        n = len(alive_idx)
 
-        # Gather neighbor matrix
-        nbr_matrix = mesh._water_nbrs[current_cells]  # (n, max_nbrs)
-        valid = nbr_matrix >= 0
-        safe_nbrs = np.where(nbr_matrix >= 0, nbr_matrix, 0)
-
-        # Gradient values at neighbors and current cells
-        nbr_grad = gradient[safe_nbrs]  # (n, max_nbrs)
-        cur_grad = gradient[current_cells]  # (n,)
-
-        # Distance = |gradient[nb] - gradient[cell]|
-        dist = np.abs(nbr_grad - cur_grad[:, np.newaxis])
-
-        # Bounds filtering: valid & (dist >= min_bounds) & (dist <= max_bounds)
-        in_bounds = valid & (dist >= min_bounds[:, np.newaxis]) & (dist <= max_bounds[:, np.newaxis])
-
-        # Among in-bounds neighbors, find the one with highest gradient value
-        candidate_vals = np.where(in_bounds, nbr_grad, -np.inf)
-
-        # For "better" strategy: only accept if better than current
-        if self.strategy == "better":
-            candidate_vals = np.where(candidate_vals > cur_grad[:, np.newaxis], candidate_vals, -np.inf)
-
-        best_local = np.argmax(candidate_vals, axis=1)
-        best_vals = candidate_vals[np.arange(n), best_local]
-        has_valid = best_vals > -np.inf
-
-        targets = np.full(n, -1, dtype=np.intp)
-        targets[has_valid] = nbr_matrix[np.where(has_valid)[0], best_local[has_valid]]
+        if HAS_NUMBA:
+            targets = _set_affinity_numba(
+                current_cells, mesh._water_nbrs, mesh._water_nbr_count,
+                gradient, min_bounds, max_bounds,
+                self.strategy == "better")
+        else:
+            # NumPy fallback
+            n = len(alive_idx)
+            nbr_matrix = mesh._water_nbrs[current_cells]
+            valid = nbr_matrix >= 0
+            safe_nbrs = np.where(nbr_matrix >= 0, nbr_matrix, 0)
+            nbr_grad = gradient[safe_nbrs]
+            cur_grad = gradient[current_cells]
+            dist = np.abs(nbr_grad - cur_grad[:, np.newaxis])
+            in_bounds = valid & (dist >= min_bounds[:, np.newaxis]) & (dist <= max_bounds[:, np.newaxis])
+            candidate_vals = np.where(in_bounds, nbr_grad, -np.inf)
+            if self.strategy == "better":
+                candidate_vals = np.where(candidate_vals > cur_grad[:, np.newaxis], candidate_vals, -np.inf)
+            best_local = np.argmax(candidate_vals, axis=1)
+            best_vals = candidate_vals[np.arange(n), best_local]
+            has_valid = best_vals > -np.inf
+            targets = np.full(n, -1, dtype=np.intp)
+            targets[has_valid] = nbr_matrix[np.where(has_valid)[0], best_local[has_valid]]
 
         # Write targets to population affinity
         population.affinity_targets[alive_idx] = targets
