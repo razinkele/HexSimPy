@@ -164,10 +164,10 @@ class EventGroup(Event):
 
         _empty_mask = np.ones(0, dtype=bool)
 
-        for _ in range(self.iterations):
+        for _iter in range(self.iterations):
             for event, child_pop, tf in prepared:
                     if child_pop is not None:
-                        # Fast path: skip mask computation if population is empty
+                        # Fast path: skip if population has no alive agents
                         if getattr(child_pop, 'n_alive', 1) == 0:
                             event.execute(child_pop, landscape, t, _empty_mask)
                             continue

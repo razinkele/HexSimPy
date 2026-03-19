@@ -204,12 +204,38 @@ class HexSimAccumulateEvent(Event):
     """HexSim-style accumulate event that dispatches updater_functions dicts at runtime."""
     updater_functions: list = field(default_factory=list)
 
+    # Lazy-initialized dispatch table (avoids repeated imports + string comparisons)
+    _dispatch: dict = field(init=False, default=None, repr=False)
+
+    def _init_dispatch(self):
+        from salmon_ibm.accumulators import (
+            updater_expression, updater_clear, updater_increment,
+            updater_time_step, updater_quantify_location,
+            updater_trait_value_index,
+        )
+        try:
+            from salmon_ibm.accumulators import updater_individual_locations
+        except ImportError:
+            updater_individual_locations = updater_quantify_location
+        self._dispatch = {
+            "Expression": updater_expression,
+            "Clear": updater_clear,
+            "Increment": updater_increment,
+            "TimeStep": updater_time_step,
+            "IndividualLocations": "individual_locations",
+            "QuantifyLocation": updater_quantify_location,
+            "TraitId": updater_trait_value_index,
+            "ExploredRunningSum": updater_quantify_location,
+        }
+
     def execute(self, population, landscape, t, mask):
         if not mask.any() or not population:
             return
         acc_mgr = population.accumulator_mgr
         if acc_mgr is None:
             return
+        if self._dispatch is None:
+            self._init_dispatch()
 
         rng = landscape.get("rng", np.random.default_rng())
         spatial_data = landscape.get("spatial_data", {})
@@ -231,64 +257,44 @@ class HexSimAccumulateEvent(Event):
                 continue
 
             try:
+                handler = self._dispatch.get(func_name)
+                if handler is None:
+                    continue
+
                 if func_name == "Expression":
                     expr_str = params[0] if params else ""
                     if expr_str:
-                        from salmon_ibm.accumulators import updater_expression
-                        updater_expression(acc_mgr, acc_name, uf_mask,
-                                           expression=expr_str,
-                                           globals_dict=global_vars,
-                                           rng=rng)
-
+                        handler(acc_mgr, acc_name, uf_mask,
+                                expression=expr_str,
+                                globals_dict=global_vars, rng=rng)
                 elif func_name == "Clear":
-                    from salmon_ibm.accumulators import updater_clear
-                    updater_clear(acc_mgr, acc_name, uf_mask)
-
+                    handler(acc_mgr, acc_name, uf_mask)
                 elif func_name == "Increment":
-                    from salmon_ibm.accumulators import updater_increment
                     amount = float(params[0]) if params else 1.0
-                    updater_increment(acc_mgr, acc_name, uf_mask, amount=amount)
-
+                    handler(acc_mgr, acc_name, uf_mask, amount=amount)
                 elif func_name == "TimeStep":
-                    from salmon_ibm.accumulators import updater_time_step
                     modulus = int(float(params[0])) if params else 0
-                    updater_time_step(acc_mgr, acc_name, uf_mask,
-                                     timestep=t,
-                                     modulus=modulus if modulus > 0 else None)
-
-                elif func_name == "IndividualLocations":
-                    if spatial and spatial in spatial_data:
-                        layer = spatial_data[spatial]
-                        from salmon_ibm.accumulators import updater_quantify_location
-                        updater_quantify_location(acc_mgr, acc_name, uf_mask,
-                                                  hex_map=layer,
-                                                  cell_indices=population.tri_idx)
-                    else:
-                        from salmon_ibm.accumulators import updater_individual_locations
-                        updater_individual_locations(acc_mgr, acc_name, uf_mask,
-                                                    cell_indices=population.tri_idx)
-
-                elif func_name == "QuantifyLocation":
-                    if spatial and spatial in spatial_data:
-                        layer = spatial_data[spatial]
-                        from salmon_ibm.accumulators import updater_quantify_location
-                        updater_quantify_location(acc_mgr, acc_name, uf_mask,
-                                                  hex_map=layer,
-                                                  cell_indices=population.tri_idx)
-
+                    handler(acc_mgr, acc_name, uf_mask,
+                            timestep=t,
+                            modulus=modulus if modulus > 0 else None)
                 elif func_name == "TraitId":
                     if source_trait and population.trait_mgr:
-                        from salmon_ibm.accumulators import updater_trait_value_index
-                        updater_trait_value_index(acc_mgr, acc_name, uf_mask,
-                                                  trait_mgr=population.trait_mgr,
-                                                  trait_name=source_trait)
-
-                elif func_name == "ExploredRunningSum":
+                        self._dispatch["TraitId"](
+                            acc_mgr, acc_name, uf_mask,
+                            trait_mgr=population.trait_mgr,
+                            trait_name=source_trait)
+                else:
+                    # Spatial data updaters (IndividualLocations, QuantifyLocation, ExploredRunningSum)
                     if spatial and spatial in spatial_data:
                         layer = spatial_data[spatial]
+                        self._dispatch.get("QuantifyLocation", handler)(
+                            acc_mgr, acc_name, uf_mask,
+                            hex_map=layer,
+                            cell_indices=population.tri_idx)
+                    elif func_name == "IndividualLocations":
                         from salmon_ibm.accumulators import updater_quantify_location
                         updater_quantify_location(acc_mgr, acc_name, uf_mask,
-                                                  hex_map=layer,
+                                                  hex_map=np.zeros(1),
                                                   cell_indices=population.tri_idx)
 
             except Exception as e:
