@@ -35,8 +35,14 @@ class TransitionEvent(Event):
     transition_matrix: np.ndarray = field(default_factory=lambda: np.array([]))
 
     def execute(self, population, landscape, t: int, mask: np.ndarray) -> None:
+        if not self.trait_name:
+            return
+        if self.transition_matrix.size == 0:
+            return
         traits = getattr(population, 'trait_mgr', None) or getattr(population, 'traits', None)
         if traits is None:
+            return
+        if self.trait_name not in traits.definitions:
             return
         defn = traits.definitions[self.trait_name]
         n_categories = len(defn.categories)
@@ -55,6 +61,8 @@ class TransitionEvent(Event):
             if not cat_mask.any():
                 continue
             n = cat_mask.sum()
+            if cat_val >= len(self.transition_matrix):
+                continue
             probs = self.transition_matrix[cat_val]
             drawn = rng.choice(n_categories, size=n, p=probs)
             new_cats[cat_mask] = drawn

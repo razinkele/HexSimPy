@@ -106,6 +106,8 @@ class InteractionEvent(Event):
 
     def execute(self, population, landscape, t: int, mask: np.ndarray) -> None:
         """Run encounters. Retrieves MultiPopulationManager from landscape."""
+        if not self.pop_a_name or not self.pop_b_name:
+            return
         multi_pop_mgr = landscape["multi_pop_mgr"]
         rng = landscape.get("rng", np.random.default_rng())
         pairs = multi_pop_mgr.co_located_pairs(self.pop_a_name, self.pop_b_name)
