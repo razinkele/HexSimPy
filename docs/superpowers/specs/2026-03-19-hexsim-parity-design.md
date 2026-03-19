@@ -25,7 +25,7 @@ The Python implementation has the architectural pieces (event engine, accumulato
 | Phase | What | Critical Gaps Closed | Testable Milestone |
 |-------|------|---------------------|-------------------|
 | **A: XML Parser Rewrite** | Fix tag names, parse traits/accumulators/events from real XML | #1-4, #18, #22-24 | `load_scenario_xml()` returns correct counts for Columbia scenario |
-| **B: Expression DSL Translator** | Translate HexSim expression syntax to evaluable Python | #5-6, #17 | All 290 expressions from Columbia XML evaluate without error |
+| **B: Expression DSL Translator** | Translate HexSim expression syntax to evaluable Python | #5-6, #17 | All 252 expressions from Columbia XML evaluate without error |
 | **C: Multi-Population Router** | Route events to named populations | #13-14 | EventSequencer dispatches to 4 named populations |
 | **D: Missing Event Types** | `moveEvent`, `survivalEvent`, `dataLookupEvent`, `setSpatialAffinityEvent`, `patchIntroductionEvent` | #7-12, #15-16 | All 13 event types instantiate from parsed XML |
 | **E: ScenarioLoader** | Wire everything into `load_scenario(workspace, xml)` | End-to-end | Columbia scenario loads, initializes, runs 10 steps |
@@ -177,8 +177,8 @@ Rewrite `xml_parser.py` as `salmon_ibm/xml_parser.py` (same file, new implementa
 - `test_parses_four_populations()` — names match
 - `test_parses_chinook_accumulators()` — count=~65, attributes present
 - `test_parses_chinook_traits()` — probabilistic + accumulated, thresholds including -INF
-- `test_parses_global_variables()` — 42 entries
-- `test_parses_spatial_data_series()` — 17 entries
+- `test_parses_global_variables()` — 58 entries
+- `test_parses_spatial_data_series()` — 18 entries
 - `test_parses_nested_events()` — event groups with sub-events
 - `test_parses_updater_functions()` — accumulate events have updater_functions list
 - `test_parses_event_timestep_attribute()` — timestep=1 events marked correctly
@@ -577,7 +577,7 @@ This registry is injected into `landscape["spatial_data"]` so events can look up
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| Expression DSL has edge cases not covered by Columbia XML | Some expressions fail at runtime | Parse all 290 expressions from XML as test cases |
+| Expression DSL has edge cases not covered by Columbia XML | Some expressions fail at runtime | Parse all 252 expressions from XML as test cases |
 | Multi-population event routing has ordering dependencies | Wrong simulation behavior | Preserve XML event order exactly |
 | Spatial data loading is slow for large workspaces | Long startup time | Lazy-load layers on first access |
 | Some event types need deep HexSim domain knowledge | Incorrect behavior | Focus on Columbia scenario specifically; warn on unsupported features |
@@ -657,7 +657,7 @@ This spec was reviewed three times:
     Same approach for `Floor`, `Pow`, `Exp`, `Max`, `Min`, `GasDev`, `Rand` — inject as namespace functions, translate only quote references via regex.
 18. **AST validator `ast.Call` guard crashes on `ast.Attribute` nodes** — line 127 in `accumulators.py` calls `node.func.id` which raises `AttributeError` when `node.func` is `ast.Attribute`. Must check `isinstance(node.func, ast.Name)` first.
 19. **`GasDev( )` with space inside parens** — 2 instances in XML. Regex must use `r'GasDev\s*\(\s*\)'`.
-20. **32 global variables referenced in expressions** (of 42 total); 53 unique accumulator names referenced in expressions. All cataloged.
+20. **32 global variables referenced in expressions** (of 58 total); 53 unique accumulator names referenced in expressions. All cataloged.
 
 **Python implementation audit:**
 21. **Phase B namespace change breaks `GeneratedHexmapEvent`** — `events_phase3.py` line 73 calls `_validate_expression()` and `_SAFE_MATH` directly. Must maintain backward compatibility by keeping both old (bare accumulator names) and new (`_a["name"]`) namespace patterns, or update `GeneratedHexmapEvent` simultaneously.
@@ -712,10 +712,10 @@ This spec was reviewed three times:
 62. **Empty `<populationName />`** — self-closing or empty text on group-level events. Parser must treat as `None`, not attempt population lookup.
 63. **`ScenarioLoader` CSV missing-file graceful degradation** — if remapped CSV path doesn't exist, warn and return zeros rather than crash. Temperature data loaded this way is critical for every timestep.
 
-**Event sequence audit (complete event tree mapped, 8 root events, ~255 leaf events):**
+**Event sequence audit (complete event tree mapped, 9 root events, ~255 leaf events):**
 24. **`iterations=N` with trait filter is rejection-sampling** — `EventGroup` with `<trait>` + `<traitCombinations>` as SIBLINGS of child `<event>` elements uses the filter as a loop-continue condition: skip entire iteration if no agents match. Spec's `EventGroup.execute()` runs all iterations unconditionally. Must add: `if group_mask is not empty and no agents match → break loop`.
 25. **`assign_accumulator_value` is a 3rd interaction outcome mode** — `<change updater="assign_accumulator_value" value="Current Refuge Density">` copies the VALUE of p1's named accumulator to p2's target. Distinct from `assign` (literal value) and `increment`. Without this, refuge density signal never reaches fish — breaks density-dependence entirely.
 26. **`moveStrategy: resetExplored`** — 2 moveEvents use this strategy (lines 8388, 8414) with `<zeroExplored>true</zeroExplored>`. Resets agent explored area before density counting. Parser must handle this as a distinct strategy from `onlyDisperse`.
 27. **`dataProbeEvent` and `censusEvent` must be registered as no-op events** — 17 + 20 instances. Even if they produce no output, unregistered types cause parse failure blocking scenario loading. Register both as event types that log a warning and return.
 28. **`<traitCombinations>` position in eventGroupEvent** — is a DIRECT CHILD sibling of `<event>` elements inside `<eventGroupEvent>`, NOT nested inside a sub-element. Parser must look for `elem.find("traitCombinations")` on the eventGroupEvent element itself.
-29. **Execution order is strictly XML document order** — confirmed by dependency analysis. Root events 1-3 (init, timestep=1) run before 4-8 (recurring). Within recurring events, order is: pre-movement state → movement behavior → perform movement → post-movement state → density dependence → data collection. Swapping any two breaks the simulation.
+29. **Execution order is strictly XML document order** — confirmed by dependency analysis. Root events 1-3 (init, timestep=1) run before 4-9 (recurring). Within recurring events, order is: pre-movement state → movement behavior → perform movement → post-movement state → density dependence → data collection. Swapping any two breaks the simulation.
