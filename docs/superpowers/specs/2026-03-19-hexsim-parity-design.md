@@ -208,28 +208,68 @@ Rewrite `xml_parser.py` as `salmon_ibm/xml_parser.py` (same file, new implementa
 
 Create `salmon_ibm/hexsim_expr.py` — a translator that converts HexSim expression strings to Python-evaluable form.
 
+**CRITICAL DESIGN DECISION: Function injection, NOT regex substitution.**
+
+Regex-based function translation fails on nested `Cond()` calls (5 confirmed instances in Columbia XML). Instead:
+
+1. **Quote replacement only via regex:** `'name'` → `_g["name"]`, `"name"` → `_a["name"]`
+2. **Function names injected into eval namespace** — Python's own parser handles all nesting:
+
 ```python
 def translate_hexsim_expr(expr: str) -> str:
     """Translate HexSim expression DSL to Python-evaluable string.
 
+    Only translates quoted references. Function names are NOT translated —
+    they are injected into the eval namespace directly (see build_hexsim_namespace).
+
     Transformations:
     1. 'single quoted' → _g["single quoted"]  (global variable lookup)
     2. "double quoted" → _a["double quoted"]   (accumulator lookup)
-    3. GasDev() → _rng.standard_normal(_n)
-    4. Rand() → _rng.random(_n)
-    5. Cond(test, t, f) → np.where(test > 0, t, f)
-    6. Floor(x) → np.floor(x)
-    7. Pow(b, e) → np.power(b, e)
-    8. Exp(x) → np.exp(x)
+    3. Cond → _cond                            (simple name replacement)
     """
+    # Replace single-quoted globals: 'name' → _g["name"]
+    expr = re.sub(r"'([^']+)'", r'_g["\1"]', expr)
+    # Replace double-quoted accumulators: "name" → _a["name"]
+    expr = re.sub(r'"([^"]+)"', r'_a["\1"]', expr)
+    # Rename Cond to _cond (sign-of-difference semantics)
+    expr = re.sub(r'\bCond\b', '_cond', expr)
+    return expr
+
+
+def build_hexsim_namespace(globals_dict, acc_dict, rng, n_masked):
+    """Build eval namespace with HexSim DSL functions + data."""
+    return {
+        # Data lookups
+        '_g': globals_dict,           # global variables dict
+        '_a': acc_dict,               # accumulator arrays dict (masked)
+        '_n': n_masked,               # mask.sum() — array length for vectorized RNG
+        '_rng': rng,
+        # HexSim functions (injected by name — Python parser handles nesting)
+        '_cond': lambda test, t, f: np.where(np.asarray(test) > 0, t, f),
+        'Floor': np.floor,
+        'Pow': np.power,
+        'Exp': np.exp,
+        'Max': np.maximum,
+        'Min': np.minimum,
+        'GasDev': lambda: rng.standard_normal(n_masked),
+        'Rand': lambda: rng.random(n_masked),
+        # Standard math
+        'np': np,
+        'sqrt': np.sqrt, 'abs': np.abs, 'exp': np.exp,
+        'log': np.log, 'log10': np.log10,
+        'minimum': np.minimum, 'maximum': np.maximum,
+        'clip': np.clip, 'where': np.where,
+        'pi': np.pi, 'e': np.e,
+    }
 ```
 
 Update `updater_expression()` in `accumulators.py` to:
-1. Accept a `globals_dict` parameter (from parsed `<globalVariables>`)
-2. Call `translate_hexsim_expr()` before evaluation
-3. Inject `_g` (globals), `_a` (accumulators as dict of name→array), `_rng`, `_n` (`mask.sum()`, NOT total agent count — must match masked array lengths) into namespace
-4. Extend `_ALLOWED_NODE_TYPES` to include `ast.Subscript`, `ast.Attribute`, `ast.Index` — required for translated `_g["name"]` and `_rng.random(_n)` syntax
-5. Add `_rng` attribute access (`standard_normal`, `random`) to allowed function calls
+1. Accept `globals_dict=None` parameter (optional, backward-compatible)
+2. When `globals_dict` is provided, call `translate_hexsim_expr()` + `build_hexsim_namespace()`
+3. When `globals_dict` is None, use existing bare-name namespace (backward compat for `GeneratedHexmapEvent`)
+4. Extend `_ALLOWED_NODE_TYPES` to include `ast.Subscript`, `ast.Attribute`, `ast.Index`
+5. Fix AST validator: check `isinstance(node.func, ast.Name)` BEFORE accessing `.id` to prevent AttributeError on Attribute nodes
+6. `_n` MUST be `mask.sum()`, NOT total agent count
 
 ### Tests
 
@@ -564,9 +604,25 @@ Phases A and B are independent and can be parallelized. C depends on A (needs pa
 | E: ScenarioLoader | 1 new | ~300 | ~10 |
 | **Total** | **~8 files** | **~1,850** | **~67** |
 
+## Pre-Implementation Fixes Required
+
+These existing code bugs must be fixed BEFORE any Phase work begins:
+
+1. **`InteractionEvent` live bug:** `interactions.py` line 113 uses `pop_a.accumulators` — should be `pop_a.accumulator_mgr`. AttributeError on any use.
+2. **`Population` missing arrays:** Add `spatial_affinity` and `affinity_targets` per-agent arrays to `Population.__post_init__()` and `add_agents()`. Required by SetAffinityEvent and HexSimMoveEvent.
+3. **`Workspace.from_dir()` overwrites time-series layers:** Only last `.hxn` file per layer survives. Must collect lists for time-series layers with multiple timestep files.
+4. **`EventGroup._compute_sub_mask()` is a stub:** Line 121 has `pass` where trait filtering should happen.
+
+---
+
 ## Parity Review Fixes Applied
 
-This spec was reviewed twice. The second review (HexSim domain expert) identified these critical issues, all now fixed:
+This spec was reviewed three times:
+- Review 1: Code structure review (12 issues, all fixed)
+- Review 2: HexSim domain expert (10 issues, all fixed)
+- Review 3: Four parallel specialist audits (XML schema, expression DSL, event sequence, Python implementation)
+
+### Review 3 findings (13 new issues):
 
 1. **`timestep="N"` semantics:** Fixed from "periodic" to "fire once at step N" with `permanent` flag
 2. **`transitionEvent` added:** Was entirely absent; now D.3 with multi-trait conditioning
@@ -578,3 +634,29 @@ This spec was reviewed twice. The second review (HexSim domain expert) identifie
 8. **CSV path remapping noted:** DataLookupEvent must remap absolute Windows paths
 9. **EventGroup trait filtering added:** Group-level trait gates
 10. **`HexSimSurvivalEvent` corrected:** Trait category 0 = die, not raw accumulator ≤ 0
+
+### Review 3 findings (specialist audits):
+
+**XML Schema audit:**
+11. **`ClearUpdaterFunction` missing from spec** — ~50 instances; resets counters to 0 each step. Already implemented in `accumulators.py` as `updater_clear()` but spec never mentions wiring it from XML.
+12. **`IncrementUpdaterFunction` missing from spec** — ~20 instances; increments counters. Already implemented as `updater_increment()` but spec never mentions wiring from XML.
+13. **`TimeStepUpdaterFunction` missing from spec** — 6 instances; writes current timestep. Already implemented as `updater_time_step()` but spec never mentions wiring.
+14. **Named `<dispersalUseAffinity>Movement Goal</dispersalUseAffinity>`** — spec only describes empty-element form; XML also uses named form specifying which affinity slot.
+15. **Capital-case `Name`/`Value` on `<globalVariable>`** — parser must use `.get("Name")` not `.get("name")`.
+16. **`<distanceAccumulator>` vs `<dispersalAccumulator>`** — two separate XML elements, not one. `distanceAccumulator` = lifetime total; `dispersalAccumulator` = per-event halt condition distance.
+
+**Expression DSL audit (252 expressions cataloged):**
+17. **Nested `Cond()` breaks regex approach** — 5 instances of 2-deep nesting confirmed. MUST use function injection into eval namespace, NOT regex substitution:
+    ```python
+    namespace['_cond'] = lambda test, t, f: np.where(np.asarray(test) > 0, t, f)
+    expr = expr.replace('Cond', '_cond')  # simple name replacement only
+    ```
+    Same approach for `Floor`, `Pow`, `Exp`, `Max`, `Min`, `GasDev`, `Rand` — inject as namespace functions, translate only quote references via regex.
+18. **AST validator `ast.Call` guard crashes on `ast.Attribute` nodes** — line 127 in `accumulators.py` calls `node.func.id` which raises `AttributeError` when `node.func` is `ast.Attribute`. Must check `isinstance(node.func, ast.Name)` first.
+19. **`GasDev( )` with space inside parens** — 2 instances in XML. Regex must use `r'GasDev\s*\(\s*\)'`.
+20. **32 global variables referenced in expressions** (of 42 total); 53 unique accumulator names referenced in expressions. All cataloged.
+
+**Python implementation audit:**
+21. **Phase B namespace change breaks `GeneratedHexmapEvent`** — `events_phase3.py` line 73 calls `_validate_expression()` and `_SAFE_MATH` directly. Must maintain backward compatibility by keeping both old (bare accumulator names) and new (`_a["name"]`) namespace patterns, or update `GeneratedHexmapEvent` simultaneously.
+22. **`Population.add_agents()` uses salmon-specific fields** — For general HexSim populations (Iterator, Refuges), salmon fields (`mass_g`, `ed_kJ_g`, `temp_history`) are allocated but unused. Not a crash risk, but memory waste and conceptual confusion.
+23. **`AccumulatorDef` missing `birth_lower`/`birth_upper`/`inherit`** — Phase E must either extend the dataclass or explicitly filter these keys when constructing `AccumulatorDef` objects from parsed XML dicts.
