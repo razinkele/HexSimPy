@@ -64,6 +64,8 @@ class Event(ABC):
     name: str
     trigger: EventTrigger = field(default_factory=EveryStep)
     trait_filter: dict | None = None
+    population_name: str | None = None
+    enabled: bool = True
 
     @abstractmethod
     def execute(self, population, landscape, t: int, mask: np.ndarray) -> None: ...
@@ -99,6 +101,34 @@ class EventSequencer:
 
 
 # ---------------------------------------------------------------------------
+# Multi-Population Event Sequencer
+# ---------------------------------------------------------------------------
+
+class MultiPopEventSequencer:
+    """Executes events, routing each to its target population."""
+
+    def __init__(self, events, multi_pop_mgr):
+        self.events = events
+        self.multi_pop = multi_pop_mgr
+
+    def step(self, landscape, t):
+        landscape["multi_pop_mgr"] = self.multi_pop
+        for event in self.events:
+            if not getattr(event, 'enabled', True):
+                continue
+            if not event.trigger.should_fire(t):
+                continue
+            pop_name = getattr(event, 'population_name', None)
+            if pop_name:
+                population = self.multi_pop.get(pop_name)
+                mask = population.alive & ~population.arrived
+            else:
+                population = None
+                mask = np.ones(0, dtype=bool)
+            event.execute(population, landscape, t, mask)
+
+
+# ---------------------------------------------------------------------------
 # Event Group
 # ---------------------------------------------------------------------------
 
@@ -108,18 +138,29 @@ class EventGroup(Event):
     iterations: int = 1
 
     def execute(self, population, landscape, t, mask):
+        multi_pop = landscape.get("multi_pop_mgr")
+
         for _ in range(self.iterations):
             for event in self.sub_events:
+                if not getattr(event, 'enabled', True):
+                    continue
                 if event.trigger.should_fire(t):
-                    sub_mask = self._compute_sub_mask(population, event.trait_filter, mask)
-                    event.execute(population, landscape, t, sub_mask)
-
-    @staticmethod
-    def _compute_sub_mask(population, trait_filter, parent_mask):
-        child_mask = population.alive & ~population.arrived
-        if trait_filter is not None:
-            pass
-        return parent_mask & child_mask
+                    # Route to child's population if it has a population_name
+                    child_pop = population
+                    child_pop_name = getattr(event, 'population_name', None)
+                    if child_pop_name and multi_pop:
+                        child_pop = multi_pop.get(child_pop_name)
+                    if child_pop is not None:
+                        child_mask = child_pop.alive & ~child_pop.arrived
+                        # Apply child's trait filter if present
+                        if hasattr(event, 'trait_filter') and event.trait_filter is not None:
+                            if hasattr(child_pop, 'trait_mgr') and child_pop.trait_mgr is not None:
+                                trait_mask = child_pop.trait_mgr.filter_by_traits(
+                                    **event.trait_filter) if isinstance(event.trait_filter, dict) else child_mask
+                                child_mask = child_mask & trait_mask
+                    else:
+                        child_mask = np.ones(0, dtype=bool)
+                    event.execute(child_pop, landscape, t, child_mask)
 
 
 # ---------------------------------------------------------------------------

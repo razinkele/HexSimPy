@@ -20,7 +20,20 @@ class MultiPopulationManager:
         self.populations: dict[str, Any] = {}  # name -> Population
         self._cell_index: dict[str, dict[int, np.ndarray]] = {}  # pop_name -> {cell_id -> agent_indices}
 
-    def register(self, name: str, population) -> None:
+    def register(self, name_or_population, population=None) -> None:
+        """Register a population.
+
+        Supports two calling conventions:
+          - register("name", population)  — explicit name
+          - register(population)           — uses population.name attribute
+        """
+        if population is None:
+            # Single-argument form: register(population)
+            population = name_or_population
+            name = population.name
+        else:
+            # Two-argument form: register("name", population)
+            name = name_or_population
         self.populations[name] = population
 
     def get(self, name: str):
