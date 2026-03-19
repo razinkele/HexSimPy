@@ -661,6 +661,26 @@ This spec was reviewed three times:
 22. **`Population.add_agents()` uses salmon-specific fields** — For general HexSim populations (Iterator, Refuges), salmon fields (`mass_g`, `ed_kJ_g`, `temp_history`) are allocated but unused. Not a crash risk, but memory waste and conceptual confusion.
 23. **`AccumulatorDef` missing `birth_lower`/`birth_upper`/`inherit`** — Phase E must either extend the dataclass or explicitly filter these keys when constructing `AccumulatorDef` objects from parsed XML dicts.
 
+### Review 4 findings (delta reviews — items 30-41):
+
+**Python implementation delta (6 new issues):**
+30. **CRITICAL: `np.digitize` off-by-one with `-INF` threshold** — if `-INF` is included in `TraitDefinition.thresholds`, all agents shift one category up. Phase E MUST strip the leading `-inf` entry when building thresholds: `thresholds = [t for t in parsed_thresholds if t != float('-inf')]`. The `-inf` is implicit in `np.digitize` (returns 0 for values below first bin).
+31. **`Population.compact()` will skip `spatial_affinity`/`affinity_targets`** — hardcoded attribute list doesn't include them. Must add `hasattr` checks when pre-impl fix 2 is applied.
+32. **`"census"` registry collision** — existing functional `CensusEvent` registered as `"census"`. Do NOT register a no-op under `"census"`. Register `dataProbeEvent` as `"data_probe"` no-op. XML parser must route `<censusEvent>` → `"census"` (existing impl) and `<survivalEvent>` → `"hexsim_survival"` (new impl).
+33. **`_compute_sub_mask()` crashes with `None` population** — distinct from stub fix (pre-impl 4). When `population is None` in group-level events, `population.alive` raises `AttributeError`. Must guard or compute masks inline.
+34. **Circular import risk: `hexsim_expr.py` must NOT import from `accumulators.py`** — if it imports `_SAFE_MATH`, cycle: `accumulators.py` → `hexsim_expr.py` → `accumulators.py`. Constraint: `hexsim_expr.py` imports only `re`, `numpy`, `ast`.
+35. **`Event` base class needs `population_name`/`enabled` fields added FIRST** — before any Phase C/D work. Without `enabled`, `MultiPopEventSequencer` raises `AttributeError` on every event.
+
+**Event semantics delta (3 new issues):**
+36. **CRITICAL: `transitionEvent` row index is row-major Cartesian product, NOT bitfield** — `row = cat[0] * n_cats[1] + cat[1]` for 2 conditioning traits. First `<trait>` is outer/slow dimension. The spec's mention of "traitCombinations bitfield" is WRONG for transitionEvent — that applies only to `stratifiedUpdaterFunctions`.
+37. **CRITICAL: `<presence>explored</presence>` requires per-agent explored-cells tracking** — `interactionEvent` filters agents by whether they have the current cell in their explored set. `Population` needs a per-agent explored-cells data structure. Without this, all agents pass the filter regardless of movement history — breaks refuge density mechanism.
+38. **`attractionCoefficients` positional semantics unresolved** — 4 floats appear as `[w_low, w_low, w_high, w_high]` pairs, with negative values on upstream events. Exact hex-direction mapping cannot be determined from XML alone. OPEN QUESTION for Phase D.1 implementation.
+
+**Expression edge cases delta (2 new issues):**
+39. **CRITICAL: `upperBound="0"` / `lowerBound="0"` means UNBOUNDED, not clamp-to-zero** — XML uses `0` as sentinel for "no bound". Current `AccumulatorManager.set()` with `max_val=0` clamps every positive result to 0, breaking ALL energy/fitness calculations. Phase E MUST map parsed `0` → `None` when constructing `AccumulatorDef`.
+40. **Division by zero in density formula** — `N_total^2 / (Vol_chinook * N_chinook + Vol_steelhead * N_steelhead)` has zero denominator for empty refuges. Current `nan_to_num(posinf=max_val)` with `max_val=0` accidentally gives correct 0.0 but is fragile. Document and test explicitly.
+41. **Nested `Exp(Exp(...))` overflow risk** — `Exp(RTO * ACT * weight^RK4 * Exp(BACT * T))` can overflow to `inf` at high temperatures. With `max_val=0` (item 39 fix resolves this to `None`/unbounded), overflow produces `inf` in accumulator. Must be clamped to a biologically reasonable maximum or documented as expected behavior.
+
 **Event sequence audit (complete event tree mapped, 8 root events, ~255 leaf events):**
 24. **`iterations=N` with trait filter is rejection-sampling** — `EventGroup` with `<trait>` + `<traitCombinations>` as SIBLINGS of child `<event>` elements uses the filter as a loop-continue condition: skip entire iteration if no agents match. Spec's `EventGroup.execute()` runs all iterations unconditionally. Must add: `if group_mask is not empty and no agents match → break loop`.
 25. **`assign_accumulator_value` is a 3rd interaction outcome mode** — `<change updater="assign_accumulator_value" value="Current Refuge Density">` copies the VALUE of p1's named accumulator to p2's target. Distinct from `assign` (literal value) and `increment`. Without this, refuge density signal never reaches fish — breaks density-dependence entirely.
