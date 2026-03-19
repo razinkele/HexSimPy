@@ -30,6 +30,8 @@ class Population:
         self.group_id = np.full(n, -1, dtype=np.int32)
         self.agent_ids = np.arange(n, dtype=np.int64)
         self._next_id = n
+        self.affinity_targets = np.full(n, -1, dtype=np.intp)  # target cell for affinity
+        self.spatial_affinity = np.zeros(n, dtype=np.float64)   # affinity strength
 
     # --- Core properties ---
     @property
@@ -145,6 +147,8 @@ class Population:
         self.pool.n = n_new
         self.group_id = self.group_id[alive_idx].copy()
         self.agent_ids = self.agent_ids[alive_idx].copy()
+        self.affinity_targets = self.affinity_targets[alive_idx].copy()
+        self.spatial_affinity = self.spatial_affinity[alive_idx].copy()
         if self.accumulator_mgr is not None:
             self.accumulator_mgr.data = self.accumulator_mgr.data[alive_idx].copy()
             self.accumulator_mgr.n_agents = n_new
@@ -178,6 +182,10 @@ class Population:
         self.pool.n = new_n
         self.group_id = np.concatenate([
             self.group_id, np.full(n, group_id, dtype=np.int32)])
+        self.affinity_targets = np.concatenate([
+            self.affinity_targets, np.full(n, -1, dtype=np.intp)])
+        self.spatial_affinity = np.concatenate([
+            self.spatial_affinity, np.zeros(n, dtype=np.float64)])
         new_ids = np.arange(self._next_id, self._next_id + n, dtype=np.int64)
         self.agent_ids = np.concatenate([self.agent_ids, new_ids])
         self._next_id += n
