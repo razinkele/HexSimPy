@@ -1,9 +1,12 @@
-"""Tests for HexSim binary readers, HexMesh, and HexSimEnvironment."""
+"""Tests for HexSim workspace loading, HexMesh, and HexSimEnvironment."""
+import os
+
 import numpy as np
 import pytest
 
+from heximpy.hxnparser import GridMeta, HexMap, Workspace, read_barriers
 from salmon_ibm.config import load_config
-from salmon_ibm.hexsim import read_grid, read_hexmap, read_barriers, HexMesh
+from salmon_ibm.hexsim import HexMesh, _hex_neighbors_offset
 
 
 # ── Workspace path ───────────────────────────────────────────────────────────
@@ -13,17 +16,28 @@ HEX_DIR = f"{WS}/Spatial Data/Hexagons"
 GRID_FILE = f"{WS}/Columbia Fish Model [small].grid"
 
 
-# ── Binary reader tests ─────────────────────────────────────────────────────
+# ── hxnparser reader tests ──────────────────────────────────────────────────
 
 def test_read_grid_returns_dimensions():
-    meta = read_grid(GRID_FILE)
-    assert meta["ncols"] == 1574
-    assert meta["nrows"] == 10195
+    meta = GridMeta.from_file(GRID_FILE)
+    assert meta.ncols == 1574
+    assert meta.nrows == 10195
+
+
+def test_read_grid_returns_georef():
+    """Grid file should contain georeferencing with valid hex geometry."""
+    meta = GridMeta.from_file(GRID_FILE)
+    # row_spacing ≈ 24.028 m, edge ≈ 13.876 m
+    assert 23.0 < meta.row_spacing < 25.0
+    assert 13.0 < meta.edge < 15.0
+    # Verify flat-top relationship: row_spacing = √3 × edge
+    assert abs(meta.row_spacing - np.sqrt(3.0) * meta.edge) < 0.01
 
 
 def test_read_hexmap_river_extent():
     """River extent values should be 0 (land) or small integers (water types)."""
-    arr = read_hexmap(f"{HEX_DIR}/River [ extent ]/River [ extent ].1.hxn")
+    hm = HexMap.from_file(f"{HEX_DIR}/River [ extent ]/River [ extent ].1.hxn")
+    arr = hm.values
     assert arr.dtype == np.float32
     assert len(arr) > 1_000_000  # should be ~16M values
 
@@ -39,7 +53,8 @@ def test_read_hexmap_river_extent():
 
 def test_read_hexmap_temperature_zones():
     """Temperature zone values should be 0 (land) or integers 1–45."""
-    arr = read_hexmap(f"{HEX_DIR}/Temperature Zones/Temperature Zones.1.hxn")
+    hm = HexMap.from_file(f"{HEX_DIR}/Temperature Zones/Temperature Zones.1.hxn")
+    arr = hm.values
     # Filter to non-zero (water cells only)
     water = arr[arr != 0]
     unique_water = np.unique(water)
@@ -50,15 +65,57 @@ def test_read_hexmap_temperature_zones():
         assert v == int(v), f"Non-integer zone value: {v}"
 
 
+def test_read_hxn_patch_hexmap_format():
+    """HexMap.from_file should handle PATCH_HEXMAP files."""
+    hm = HexMap.from_file(f"{HEX_DIR}/River [ extent ]/River [ extent ].1.hxn")
+    assert hm.format == "patch_hexmap"
+    assert len(hm.values) > 1_000_000
+    # Water cells have nonzero values
+    water = hm.values[hm.values != 0]
+    assert len(water) > 50_000
+
+
 def test_read_barriers_parses_text():
     hbf = f"{WS}/Spatial Data/barriers/Fish Ladder Available/Fish Ladder Available.1.hbf"
-    edges = read_barriers(hbf)
-    assert len(edges) > 0
-    first = edges[0]
-    assert "hex_id" in first
-    assert "edge" in first
-    assert "classification" in first
-    assert isinstance(first["hex_id"], int)
+    barriers = read_barriers(hbf)
+    assert len(barriers) > 0
+    first = barriers[0]
+    assert isinstance(first.hex_id, int)
+    assert isinstance(first.edge, int)
+    assert isinstance(first.classification, int)
+
+
+def test_workspace_from_dir():
+    """Workspace.from_dir should load grid, hexmaps, and barriers."""
+    ws = Workspace.from_dir(WS)
+    assert ws.grid.ncols == 1574
+    assert ws.grid.nrows == 10195
+    assert "River [ extent ]" in ws.hexmaps
+    assert len(ws.barriers) > 0
+
+
+# ── Flat-top neighbor convention tests ────────────────────────────────────────
+
+def test_flat_top_odd_q_neighbors():
+    """Odd-q flat-top: even column neighbors differ from odd column."""
+    ncols, nrows, n_data = 10, 10, 100
+    # Even column (col=4): neighbors should shift up for diagonal
+    nbrs_even = _hex_neighbors_offset(5, 4, ncols, nrows, n_data)
+    # Odd column (col=5): neighbors should shift down for diagonal
+    nbrs_odd = _hex_neighbors_offset(5, 5, ncols, nrows, n_data)
+    # Both should have 6 neighbors (interior cell)
+    assert len(nbrs_even) == 6
+    assert len(nbrs_odd) == 6
+    # Even col: diagonals go to row-1 (up)
+    # Expected: (4,4),(6,4),(5,3),(5,5),(4,3),(4,5) → flat: 44,64,53,55,43,45
+    assert 44 in nbrs_even  # (row-1, same col)
+    assert 64 in nbrs_even  # (row+1, same col)
+    assert 43 in nbrs_even  # (row-1, col-1) — even col shifts up
+    # Odd col: diagonals go to row+1 (down)
+    # Expected: (4,5),(6,5),(5,4),(5,6),(6,4),(6,6) → flat: 45,65,54,56,64,66
+    assert 45 in nbrs_odd   # (row-1, same col)
+    assert 65 in nbrs_odd   # (row+1, same col)
+    assert 64 in nbrs_odd   # (row+1, col-1) — odd col shifts down
 
 
 # ── HexMesh tests ────────────────────────────────────────────────────────────
@@ -126,6 +183,28 @@ def test_hexmesh_areas_positive(mesh):
     assert (mesh.areas > 0).all()
 
 
+def test_hexmesh_areas_approx_500m2(mesh):
+    """HexSim hex area should be ≈500 m² (edge ≈ 13.876 m)."""
+    assert abs(mesh.areas[0] - 500.0) < 5.0  # within 5 m²
+
+
+def test_hexmesh_centroids_in_meters(mesh):
+    """Centroids should be in meters, not arbitrary grid units."""
+    # Columbia River extent is ~32 km wide and ~245 km tall
+    y_range = mesh.centroids[:, 0].max() - mesh.centroids[:, 0].min()
+    x_range = mesh.centroids[:, 1].max() - mesh.centroids[:, 1].min()
+    # Should be in the thousands-of-meters range, not single digits
+    assert y_range > 10_000   # at least 10 km
+    assert x_range > 1_000    # at least 1 km
+
+
+def test_hexmesh_stores_workspace(mesh):
+    """HexMesh should store the parsed Workspace for reuse."""
+    assert mesh._workspace is not None
+    assert isinstance(mesh._workspace, Workspace)
+    assert mesh._workspace.grid.ncols == 1574
+
+
 # ── HexSimEnvironment tests ──────────────────────────────────────────────────
 
 @pytest.fixture(scope="module")
@@ -183,6 +262,55 @@ def test_hexsim_env_dSSH_dt(env, mesh):
     env.advance(1)
     val = env.dSSH_dt(0)
     assert isinstance(val, float)
+
+
+def test_hexsim_env_advance_reuses_temp_array_dtype():
+    """Temperature field should be float64 without per-step conversion."""
+    from salmon_ibm.hexsim import HexMesh
+    from salmon_ibm.hexsim_env import HexSimEnvironment
+    WS = "Columbia River Migration Model/Columbia [small]"
+    if not os.path.exists(WS):
+        pytest.skip("Columbia workspace not found")
+    mesh = HexMesh.from_hexsim(WS)
+    env = HexSimEnvironment(WS, mesh)
+    env.advance(0)
+    assert env.fields["temperature"].dtype == np.float64
+    # Advance again — should reuse the same buffer (identity check)
+    env.advance(1)
+    assert env.fields["temperature"] is env._temp_buf
+
+
+def test_hexsim_env_ssh_is_static_no_copy():
+    """SSH field should not be re-copied each step for static gradient."""
+    from salmon_ibm.hexsim import HexMesh
+    from salmon_ibm.hexsim_env import HexSimEnvironment
+    WS = "Columbia River Migration Model/Columbia [small]"
+    if not os.path.exists(WS):
+        pytest.skip("Columbia workspace not found")
+    mesh = HexMesh.from_hexsim(WS)
+    env = HexSimEnvironment(WS, mesh)
+    env.advance(0)
+    ssh0 = env.fields["ssh"]
+    env.advance(1)
+    ssh1 = env.fields["ssh"]
+    assert ssh0 is ssh1
+
+
+def test_hexsim_env_dssh_dt_always_zero():
+    """dSSH_dt_array should return zeros for static SSH (no computation)."""
+    from salmon_ibm.hexsim import HexMesh
+    from salmon_ibm.hexsim_env import HexSimEnvironment
+    WS = "Columbia River Migration Model/Columbia [small]"
+    if not os.path.exists(WS):
+        pytest.skip("Columbia workspace not found")
+    mesh = HexMesh.from_hexsim(WS)
+    env = HexSimEnvironment(WS, mesh)
+    env.advance(0)
+    env.advance(1)
+    dssh = env.dSSH_dt_array()
+    assert (dssh == 0.0).all()
+    dssh2 = env.dSSH_dt_array()
+    assert dssh is dssh2
 
 
 # ── Integration test ─────────────────────────────────────────────────────────

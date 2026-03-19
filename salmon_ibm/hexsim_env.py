@@ -10,7 +10,8 @@ from pathlib import Path
 
 import numpy as np
 
-from salmon_ibm.hexsim import HexMesh, read_hexmap
+from heximpy.hxnparser import HexMap
+from salmon_ibm.hexsim import HexMesh
 
 
 class HexSimEnvironment:
@@ -32,10 +33,10 @@ class HexSimEnvironment:
 
         # ── Temperature zones ────────────────────────────────────────────
         tz_path = hex_dir / "Temperature Zones" / "Temperature Zones.1.hxn"
-        tz_full = read_hexmap(tz_path)
+        tz_hm = HexMap.from_file(tz_path)
         # Zone IDs for water cells (float → int, 0-based: subtract 1,
         # since zone values 1-45 map to CSV rows 0-44)
-        tz_water = tz_full[mesh._water_full_idx]
+        tz_water = tz_hm.values[mesh._water_full_idx]
         self._zone_ids = np.clip(tz_water.astype(int) - 1, 0, None)
 
         # ── Temperature lookup table ─────────────────────────────────────
@@ -49,8 +50,8 @@ class HexSimEnvironment:
         # ── Upstream gradient (static SSH proxy) ─────────────────────────
         up_path = hex_dir / "Gradient [ upstream ]" / "Gradient [ upstream ].1.hxn"
         if up_path.exists():
-            up_full = read_hexmap(up_path)
-            self._upstream = up_full[mesh._water_full_idx].astype(np.float64)
+            up_hm = HexMap.from_file(up_path)
+            self._upstream = up_hm.values[mesh._water_full_idx].astype(np.float64)
         else:
             self._upstream = np.zeros(mesh.n_cells)
 
@@ -61,29 +62,23 @@ class HexSimEnvironment:
 
         # ── Fields dict (populated by advance()) ─────────────────────────
         n = mesh.n_cells
+        self._temp_buf = np.zeros(n, dtype=np.float64)
+        self._zero_buf = np.zeros(n, dtype=np.float64)
+        self._zero_buf.flags.writeable = False
         self.fields: dict[str, np.ndarray] = {
-            "temperature": np.zeros(n, dtype=np.float64),
+            "temperature": self._temp_buf,
             "salinity": np.zeros(n, dtype=np.float64),
-            "ssh": self._ssh_static.copy(),
+            "ssh": self._ssh_static,
             "u_current": np.zeros(n, dtype=np.float64),
             "v_current": np.zeros(n, dtype=np.float64),
         }
-        self._prev_ssh: np.ndarray | None = None
         self.current_t: int = -1
 
     def advance(self, t: int) -> None:
         """Update fields for timestep *t* (wraps around)."""
-        self._prev_ssh = self.fields["ssh"].copy()
         self.current_t = t
         t_idx = t % self.n_timesteps
-
-        # Zone-based temperature lookup
-        self.fields["temperature"] = self._temp_table[
-            self._zone_ids, t_idx
-        ].astype(np.float64)
-
-        # SSH stays static (river gradient doesn't change hourly)
-        self.fields["ssh"] = self._ssh_static.copy()
+        self._temp_buf[:] = self._temp_table[self._zone_ids, t_idx]
 
     def sample(self, cell_idx: int) -> dict[str, float]:
         """All field values at a single cell."""
@@ -94,16 +89,12 @@ class HexSimEnvironment:
         return self.mesh.gradient(self.fields[field_name], cell_idx)
 
     def dSSH_dt(self, cell_idx: int) -> float:
-        """Rate of change of SSH. Always ~0 for static river gradient."""
-        if self._prev_ssh is None:
-            return 0.0
-        return float(self.fields["ssh"][cell_idx] - self._prev_ssh[cell_idx])
+        """Rate of change of SSH. Always 0 for static river gradient."""
+        return 0.0
 
     def dSSH_dt_array(self) -> np.ndarray:
-        """Rate of SSH change (m/timestep) for all cells. Always ~0 for static gradient."""
-        if self._prev_ssh is None:
-            return np.zeros(self.mesh.n_cells)
-        return self.fields["ssh"] - self._prev_ssh
+        """Rate of SSH change (m/timestep) for all cells. Always 0 for static gradient."""
+        return self._zero_buf
 
     def close(self) -> None:
         """No-op (no open file handles to release)."""
