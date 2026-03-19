@@ -178,17 +178,15 @@ class EventGroup(Event):
 
         for _iter in range(self.iterations):
             for event, child_pop, tf, tf_type, trait_mgr in prepared:
-                    if child_pop is not None:
-                        child_mask = child_pop.alive & ~child_pop.arrived
-                        # Apply trait filter (but always execute — some events
-                        # like PatchIntroduction need to run with empty masks)
-                        if tf_type == 1:
-                            child_mask = _apply_trait_combo_mask(child_mask, tf, child_pop)
-                        elif tf_type == 2:
-                            child_mask = child_mask & trait_mgr.filter_by_traits(**tf)
-                    else:
-                        child_mask = _empty_mask
-                    event.execute(child_pop, landscape, t, child_mask)
+                if child_pop is not None:
+                    child_mask = child_pop.alive & ~child_pop.arrived
+                    if tf_type == 1:
+                        child_mask = _apply_trait_combo_mask(child_mask, tf, child_pop)
+                    elif tf_type == 2:
+                        child_mask = child_mask & trait_mgr.filter_by_traits(**tf)
+                else:
+                    child_mask = _empty_mask
+                event.execute(child_pop, landscape, t, child_mask)
 
 
 # ---------------------------------------------------------------------------

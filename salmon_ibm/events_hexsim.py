@@ -139,8 +139,9 @@ def _set_affinity_numba(current_cells, water_nbrs, water_nbr_count, gradient,
 
 _combo_flags_cache: dict[str, np.ndarray] = {}
 # Per-step cache: (population_id, combos_str) → enabled_mask
+# Cleared at start of each step by clear_combo_mask_cache().
+# Thread safety: assumes single-threaded event dispatch (no concurrent runs).
 _combo_mask_cache: dict[tuple, np.ndarray] = {}
-_combo_mask_cache_step: int = -1
 
 
 def _apply_trait_combo_mask(base_mask, uf, population):
@@ -151,7 +152,6 @@ def _apply_trait_combo_mask(base_mask, uf, population):
 
     Returns the (possibly unchanged) mask.
     """
-    global _combo_mask_cache_step
 
     stratified = uf.get("stratified_traits")
     combos_str = uf.get("trait_combinations")
@@ -468,7 +468,9 @@ class HexSimMoveEvent(Event):
     dispersal_halt_target: float = 0.0
     resource_threshold: float = 0.0
 
-    # Cached references (resolved on first execute, reused on subsequent calls)
+    # Cached references (resolved on first execute, reused on subsequent calls).
+    # NOTE: assumes gradient is static (loaded once from workspace hex-maps).
+    # If time-varying spatial data is added, invalidate _cached_gradient per step.
     _cached_mesh: object = field(init=False, default=None, repr=False)
     _cached_gradient: np.ndarray = field(init=False, default=None, repr=False)
     _cached_nbrs: np.ndarray = field(init=False, default=None, repr=False)
