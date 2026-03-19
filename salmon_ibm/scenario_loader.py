@@ -69,25 +69,29 @@ class ScenarioLoader:
         # 3. Build spatial data registry from workspace hex-maps
         spatial_data = self._build_spatial_registry(mesh, config)
 
-        # 4. Create populations
+        # 4. Create populations (with derived RNG for reproducibility)
+        base_rng = np.random.default_rng(rng_seed)
         multi_pop = MultiPopulationManager()
         for pop_def in config["populations"]:
-            pop = self._create_population(pop_def, mesh)
+            pop_rng = np.random.default_rng(base_rng.integers(2**63))
+            pop = self._create_population(pop_def, mesh, pop_rng)
             multi_pop.register(pop)
 
         # 5. Build event tree
         events = self._build_events(config["events"], config.get("global_variables", {}))
 
+        # 5b. Load lookup tables from workspace CSVs
+        self._load_lookup_tables(events, str(ws_dir))
+
         # 6. Build sequencer
         sequencer = MultiPopEventSequencer(events, multi_pop)
 
-        # 7. Build landscape dict
-        rng = np.random.default_rng(rng_seed)
+        # 7. Build landscape dict (reuse base_rng so the full sequence is reproducible)
         landscape = {
             "mesh": mesh,
             "spatial_data": spatial_data,
             "global_variables": config.get("global_variables", {}),
-            "rng": rng,
+            "rng": base_rng,
         }
 
         return HexSimSimulation(
@@ -111,8 +115,11 @@ class ScenarioLoader:
                 registry[name] = hm.values[mesh._water_full_idx].astype(np.float64)
         return registry
 
-    def _create_population(self, pop_def: dict, mesh: HexMesh) -> Population:
+    def _create_population(self, pop_def: dict, mesh: HexMesh,
+                           rng=None) -> Population:
         """Create a Population from parsed XML definition."""
+        if rng is None:
+            rng = np.random.default_rng()
         n = pop_def.get("initial_size", 0)
         # For populations initialized later by events (e.g., introductionEvent),
         # start with n=0 and a minimal pool
@@ -122,7 +129,6 @@ class ScenarioLoader:
             pool.alive[0] = False  # placeholder, not a real agent
         else:
             water_ids = np.where(mesh.water_mask)[0]
-            rng = np.random.default_rng()
             start_tris = rng.choice(water_ids, size=n, replace=True) if len(water_ids) > 0 else np.zeros(n, dtype=int)
             pool = AgentPool(n=n, start_tri=start_tris)
 
@@ -131,13 +137,15 @@ class ScenarioLoader:
         # Create accumulators
         acc_defs = []
         for acc in pop_def.get("accumulators", []):
-            # upperBound=0 and lowerBound=0 means UNBOUNDED in HexSim
-            min_val = acc.get("min_val", 0)
-            max_val = acc.get("max_val", 0)
+            # HexSim convention: BOTH being 0 (or absent) means unbounded.
+            # If either is non-zero, both are explicit bounds.
+            min_val_raw = acc.get("min_val")
+            max_val_raw = acc.get("max_val")
+            both_zero = (min_val_raw in (0, None)) and (max_val_raw in (0, None))
             acc_defs.append(AccumulatorDef(
                 name=acc["name"],
-                min_val=None if min_val == 0 else min_val,
-                max_val=None if max_val == 0 else max_val,
+                min_val=None if both_zero else (min_val_raw if min_val_raw is not None else 0),
+                max_val=None if both_zero else (max_val_raw if max_val_raw is not None else 0),
             ))
         if acc_defs:
             pop.accumulator_mgr = AccumulatorManager(pop.pool.n, acc_defs)
@@ -248,6 +256,8 @@ class ScenarioLoader:
         _PARAM_ALIASES = {
             "transition_trait": "trait_name",
             "survival_accumulator": "survival_accumulator",
+            "initial_size": "n_agents",
+            "initialization_spatial_data": "initialization_spatial_data",
         }
         params = edef.get("params", {})
         for key, val in params.items():
@@ -257,4 +267,25 @@ class ScenarioLoader:
             elif hasattr(evt, key):
                 setattr(evt, key, val)
 
+        # Wire updater_functions for accumulate events
+        if etype == "accumulate":
+            updater_functions = edef.get("updater_functions", [])
+            if updater_functions and hasattr(evt, "updater_functions"):
+                evt.updater_functions = updater_functions
+
         return evt
+
+    def _load_lookup_tables(self, events, workspace_dir: str) -> None:
+        """Post-process events: load CSV files for DataLookupEvents."""
+        from salmon_ibm.events_hexsim import DataLookupEvent
+        ws = Path(workspace_dir)
+        lookup_dir = ws / "Analysis" / "Data Lookup"
+
+        for evt in events:
+            if isinstance(evt, DataLookupEvent) and evt.file_name and evt.lookup_table is None:
+                csv_path = lookup_dir / evt.file_name
+                if csv_path.exists():
+                    evt.lookup_table = np.loadtxt(csv_path, delimiter=",", dtype=np.float64)
+            # Recurse into EventGroups
+            if hasattr(evt, 'sub_events'):
+                self._load_lookup_tables(evt.sub_events, workspace_dir)

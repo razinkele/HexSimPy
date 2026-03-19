@@ -127,9 +127,24 @@ def _parse_spatial_data_series(root) -> dict[str, dict]:
         name = _text(elem, "name")
         if not name:
             continue
+        # timeSeries can be a single "0"/"1" flag OR a space-separated list
+        # of timestep indices (e.g. "1 2 3 ... 100"); either way, non-empty
+        # non-zero means it IS a time series.
+        ts_raw = _text(elem, "timeSeries", "0")
+        if " " in ts_raw:
+            # Space-separated timestep list — parse as int array
+            try:
+                ts_steps = [int(x) for x in ts_raw.split()]
+            except ValueError:
+                ts_steps = None
+            is_time_series = ts_steps is not None and len(ts_steps) > 0
+        else:
+            ts_steps = None
+            is_time_series = ts_raw not in ("0", "")
         result[name] = {
             "datatype": _text(elem, "datatype", "HexMap"),
-            "time_series": _int_text(elem, "timeSeries", 0) != 0,
+            "time_series": is_time_series,
+            "time_steps": ts_steps,
             "cycle_length": _int_text(elem, "cycleLength", 0),
         }
     return result
@@ -515,8 +530,11 @@ def _parse_trait_filter(elem) -> dict | None:
     """
     traits = [t.text.strip() for t in elem.findall("trait") if t.text]
     combos = _text(elem, "traitCombinations")
-    if traits:
-        return {"traits": traits, "combinations": combos}
+    if not traits:
+        return None
+    if combos:
+        return {"traits": traits, "combinations": combos,
+                "stratified_traits": traits, "trait_combinations": combos}
     return None
 
 

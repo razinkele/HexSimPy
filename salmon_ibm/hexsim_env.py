@@ -31,21 +31,30 @@ class HexSimEnvironment:
         ws = Path(workspace_dir)
         hex_dir = ws / "Spatial Data" / "Hexagons"
 
-        # ── Temperature zones ────────────────────────────────────────────
+        # ── Temperature zones (optional — absent in non-fish workspaces) ──
         tz_path = hex_dir / "Temperature Zones" / "Temperature Zones.1.hxn"
-        tz_hm = HexMap.from_file(tz_path)
-        # Zone IDs for water cells (float → int, 0-based: subtract 1,
-        # since zone values 1-45 map to CSV rows 0-44)
-        tz_water = tz_hm.values[mesh._water_full_idx]
-        self._zone_ids = np.clip(tz_water.astype(int) - 1, 0, None)
+        self._has_temperature = False
+        if tz_path.exists():
+            tz_hm = HexMap.from_file(tz_path)
+            # Zone IDs for water cells (float → int, 0-based: subtract 1,
+            # since zone values 1-45 map to CSV rows 0-44)
+            tz_water = tz_hm.values[mesh._water_full_idx]
+            self._zone_ids = np.clip(tz_water.astype(int) - 1, 0, None)
 
-        # ── Temperature lookup table ─────────────────────────────────────
-        csv_path = ws / "Analysis" / "Data Lookup" / temperature_csv
-        # CSV has no header row; each row = a zone, each column = a timestep
-        self._temp_table = np.loadtxt(csv_path, delimiter=",",
-                                      dtype=np.float32)
-        # Shape: (n_zones, n_timesteps)
-        self.n_timesteps = self._temp_table.shape[1]
+            # ── Temperature lookup table ─────────────────────────────────
+            csv_path = ws / "Analysis" / "Data Lookup" / temperature_csv
+            if csv_path.exists():
+                # CSV has no header row; each row = a zone, each column = a timestep
+                self._temp_table = np.loadtxt(csv_path, delimiter=",",
+                                              dtype=np.float32)
+                # Shape: (n_zones, n_timesteps)
+                self.n_timesteps = self._temp_table.shape[1]
+                self._has_temperature = True
+
+        if not self._has_temperature:
+            self._zone_ids = np.zeros(mesh.n_cells, dtype=int)
+            self._temp_table = np.full((1, 1), 15.0, dtype=np.float32)
+            self.n_timesteps = 1
 
         # ── Upstream gradient (static SSH proxy) ─────────────────────────
         up_path = hex_dir / "Gradient [ upstream ]" / "Gradient [ upstream ].1.hxn"

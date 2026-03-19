@@ -141,14 +141,24 @@ class HexMesh:
         ws = Workspace.from_dir(workspace_dir)
         edge = ws.grid.edge
 
-        # 1. Read water extent (auto-detect: "River [ extent ]" or "Lagoon [ extent ]")
+        # 1. Read water extent (auto-detect from common layer names)
+        extent_hm = None
         if extent_layer:
             extent_hm = ws.hexmaps.get(extent_layer)
         else:
-            for name in ["River [ extent ]", "Lagoon [ extent ]"]:
+            # Try known extent layer names in priority order
+            _EXTENT_CANDIDATES = [
+                "River [ extent ]", "Lagoon [ extent ]",
+                "Habitat Map", "Species Range", "Study Area",
+            ]
+            for name in _EXTENT_CANDIDATES:
                 extent_hm = ws.hexmaps.get(name)
                 if extent_hm is not None:
                     break
+            # Last resort: use the first available hexmap
+            if extent_hm is None and ws.hexmaps:
+                first_name = next(iter(ws.hexmaps))
+                extent_hm = ws.hexmaps[first_name]
         if extent_hm is None:
             raise FileNotFoundError(
                 f"No extent layer found in {workspace_dir}"

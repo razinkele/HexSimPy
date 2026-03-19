@@ -120,13 +120,15 @@ class InteractionEvent(Event):
             # Each agent in A encounters each agent in B with probability p
             for a_idx in agents_a:
                 for b_idx in agents_b:
+                    if not pop_b.alive[b_idx]:
+                        continue  # Skip already-dead prey
                     if rng.random() < self.encounter_probability:
                         stats["encounters"] += 1
                         if self.outcome == InteractionOutcome.PREDATION:
                             pop_b.alive[b_idx] = False
                             stats["kills"] += 1
-                            if self.resource_gain_acc and pop_a.accumulators is not None:
-                                acc_idx = pop_a.accumulators._resolve_idx(self.resource_gain_acc)
-                                pop_a.accumulators.data[a_idx, acc_idx] += self.resource_gain_amount
+                            if self.resource_gain_acc and pop_a.accumulator_mgr is not None:
+                                acc_idx = pop_a.accumulator_mgr._resolve_idx(self.resource_gain_acc)
+                                pop_a.accumulator_mgr.data[a_idx, acc_idx] += self.resource_gain_amount
 
         return stats

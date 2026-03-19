@@ -72,7 +72,9 @@ class SurvivalEvent(Event):
             population.alive[dead_indices] = False
 
         if self.thermal:
-            thermal_kill = alive & (temps >= self.bio_params.T_MAX)
+            # Recompute alive mask after starvation kills
+            current_alive = population.alive & ~getattr(population, 'arrived', np.zeros(0, dtype=bool))
+            thermal_kill = current_alive & (temps >= self.bio_params.T_MAX)
             population.alive[thermal_kill] = False
 
 
@@ -152,13 +154,26 @@ class IntroductionEvent(Event):
     initial_ed: float = 6.5
     initial_traits: dict[str, str] = field(default_factory=dict)
     initial_accumulators: dict[str, float] = field(default_factory=dict)
+    initialization_spatial_data: str = ""
 
     def execute(self, population, landscape, t, mask):
         rng = landscape.get("rng", np.random.default_rng())
         n = self.n_agents
-        pos_arr = np.array(self.positions, dtype=int)
-        if len(pos_arr) < n:
-            pos_arr = np.tile(pos_arr, (n // len(pos_arr)) + 1)[:n]
+        if self.initialization_spatial_data:
+            spatial_data = landscape.get("spatial_data", {})
+            layer = spatial_data.get(self.initialization_spatial_data)
+            if layer is not None:
+                nonzero = np.where(layer != 0)[0]
+                if len(nonzero) > 0:
+                    pos_arr = rng.choice(nonzero, size=n, replace=True)
+                else:
+                    pos_arr = np.zeros(n, dtype=int)
+            else:
+                pos_arr = np.zeros(n, dtype=int)
+        else:
+            pos_arr = np.array(self.positions, dtype=int)
+            if len(pos_arr) < n:
+                pos_arr = np.tile(pos_arr, (n // len(pos_arr)) + 1)[:n]
         mass = np.clip(
             rng.normal(self.initial_mass_mean, self.initial_mass_std, n),
             self.initial_mass_mean * 0.5, self.initial_mass_mean * 1.5)
@@ -214,13 +229,25 @@ class ReproductionEvent(Event):
             cat_idx = defn.categories.index(self.offspring_trait_value)
             population.trait_mgr._data[self.offspring_trait_name][new_idx] = cat_idx
 
-        # Genetic recombination: offspring inherit from parents
-        if population.genome is not None:
-            parent1_idx = np.repeat(reproducer_idx, clutch_sizes)
-            # Simple model: self-fertilization (same parent for both gametes)
-            # For sexual reproduction, pair selection should be added later
-            parent2_idx = parent1_idx.copy()
-            population.genome.recombine(parent1_idx, parent2_idx, new_idx)
+        # --- Genome recombination with mate selection ---
+        if population.genome is not None and total_offspring > 0:
+            parent1_indices = np.repeat(reproducer_idx, clutch_sizes)
+            parent2_indices = parent1_indices.copy()
+            # Select a mate: random group member that is not self
+            offset = 0
+            for i, rep_idx in enumerate(reproducer_idx):
+                gid = population.group_id[rep_idx]
+                cs = clutch_sizes[i]
+                if gid >= 0:
+                    group_members = np.where(
+                        (population.group_id == gid) & population.alive
+                        & (np.arange(population.n) != rep_idx)
+                    )[0]
+                    if len(group_members) > 0:
+                        mate = rng.choice(group_members)
+                        parent2_indices[offset:offset + cs] = mate
+                offset += cs
+            population.genome.recombine(parent1_indices, parent2_indices, new_idx)
 
 
 @register_event("floater_creation")

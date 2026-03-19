@@ -5,6 +5,157 @@ import numpy as np
 from salmon_ibm.events import Event, register_event
 
 
+def _apply_trait_combo_mask(base_mask, uf, population):
+    """Narrow base_mask to agents matching the trait combination in a updater dict.
+
+    If the updater has 'stratified_traits' and 'trait_combinations', the
+    space-separated '1'/'0' string encodes which Cartesian-product combinations
+    of trait categories are targeted.  We build the intersection of base_mask
+    with all agents that fall in any enabled combination.
+
+    Returns the (possibly unchanged) mask.
+    """
+    stratified = uf.get("stratified_traits")
+    combos_str = uf.get("trait_combinations")
+    if not stratified or combos_str is None:
+        return base_mask
+    trait_mgr = getattr(population, "trait_mgr", None)
+    if trait_mgr is None:
+        return base_mask
+
+    combo_flags = np.array([int(x) for x in str(combos_str).split()], dtype=np.int8)
+
+    # Build list of category arrays and category counts for each trait
+    cat_arrays = []
+    n_cats = []
+    for tname in stratified:
+        if tname not in trait_mgr.definitions:
+            return base_mask  # trait unknown, can't filter
+        defn = trait_mgr.definitions[tname]
+        cat_arrays.append(trait_mgr.get(tname))
+        n_cats.append(len(defn.categories))
+
+    total_combos = 1
+    for n in n_cats:
+        total_combos *= n
+    if len(combo_flags) != total_combos:
+        return base_mask  # mismatch, skip filtering
+
+    # Compute a flat combo index for each agent using mixed-radix encoding
+    # flat_idx = cat0 * (n1 * n2 * ...) + cat1 * (n2 * ...) + ...
+    n_agents = len(base_mask)
+    flat_idx = np.zeros(n_agents, dtype=np.int32)
+    stride = 1
+    for arr, n in zip(reversed(cat_arrays), reversed(n_cats)):
+        flat_idx += arr.astype(np.int32) * stride
+        stride *= n
+
+    # Agents matching any enabled combination
+    enabled_combo = combo_flags[flat_idx] == 1  # vectorized lookup
+    return base_mask & enabled_combo
+
+
+@register_event("accumulate")  # overrides AccumulateEvent from events_builtin
+@dataclass
+class HexSimAccumulateEvent(Event):
+    """HexSim-style accumulate event that dispatches updater_functions dicts at runtime."""
+    updater_functions: list = field(default_factory=list)
+
+    def execute(self, population, landscape, t, mask):
+        if not mask.any() or not population:
+            return
+        acc_mgr = population.accumulator_mgr
+        if acc_mgr is None:
+            return
+
+        rng = landscape.get("rng", np.random.default_rng())
+        spatial_data = landscape.get("spatial_data", {})
+        global_vars = landscape.get("global_variables", {})
+
+        for uf in self.updater_functions:
+            func_name = uf.get("function", "")
+            acc_name = uf.get("accumulator", "")
+            params = uf.get("parameters", [])
+            spatial = uf.get("spatial_data")
+            source_trait = uf.get("source_trait")
+
+            if not acc_name or acc_name not in acc_mgr._name_to_idx:
+                continue
+
+            # Apply trait-combination sub-filtering if specified
+            uf_mask = _apply_trait_combo_mask(mask, uf, population)
+            if not uf_mask.any():
+                continue
+
+            try:
+                if func_name == "Expression":
+                    expr_str = params[0] if params else ""
+                    if expr_str:
+                        from salmon_ibm.accumulators import updater_expression
+                        updater_expression(acc_mgr, acc_name, uf_mask,
+                                           expression=expr_str,
+                                           globals_dict=global_vars,
+                                           rng=rng)
+
+                elif func_name == "Clear":
+                    from salmon_ibm.accumulators import updater_clear
+                    updater_clear(acc_mgr, acc_name, uf_mask)
+
+                elif func_name == "Increment":
+                    from salmon_ibm.accumulators import updater_increment
+                    amount = float(params[0]) if params else 1.0
+                    updater_increment(acc_mgr, acc_name, uf_mask, amount=amount)
+
+                elif func_name == "TimeStep":
+                    from salmon_ibm.accumulators import updater_time_step
+                    modulus = int(float(params[0])) if params else 0
+                    updater_time_step(acc_mgr, acc_name, uf_mask,
+                                     timestep=t,
+                                     modulus=modulus if modulus > 0 else None)
+
+                elif func_name == "IndividualLocations":
+                    if spatial and spatial in spatial_data:
+                        layer = spatial_data[spatial]
+                        from salmon_ibm.accumulators import updater_quantify_location
+                        updater_quantify_location(acc_mgr, acc_name, uf_mask,
+                                                  hex_map=layer,
+                                                  cell_indices=population.tri_idx)
+                    else:
+                        from salmon_ibm.accumulators import updater_individual_locations
+                        updater_individual_locations(acc_mgr, acc_name, uf_mask,
+                                                    cell_indices=population.tri_idx)
+
+                elif func_name == "QuantifyLocation":
+                    if spatial and spatial in spatial_data:
+                        layer = spatial_data[spatial]
+                        from salmon_ibm.accumulators import updater_quantify_location
+                        updater_quantify_location(acc_mgr, acc_name, uf_mask,
+                                                  hex_map=layer,
+                                                  cell_indices=population.tri_idx)
+
+                elif func_name == "TraitId":
+                    if source_trait and population.trait_mgr:
+                        from salmon_ibm.accumulators import updater_trait_value_index
+                        updater_trait_value_index(acc_mgr, acc_name, uf_mask,
+                                                  trait_mgr=population.trait_mgr,
+                                                  trait_name=source_trait)
+
+                elif func_name == "ExploredRunningSum":
+                    if spatial and spatial in spatial_data:
+                        layer = spatial_data[spatial]
+                        from salmon_ibm.accumulators import updater_quantify_location
+                        updater_quantify_location(acc_mgr, acc_name, uf_mask,
+                                                  hex_map=layer,
+                                                  cell_indices=population.tri_idx)
+
+            except Exception as e:
+                import warnings
+                warnings.warn(
+                    f"Updater {func_name} for '{acc_name}' failed: {e}",
+                    RuntimeWarning, stacklevel=2,
+                )
+
+
 @register_event("hexsim_survival")
 @dataclass
 class HexSimSurvivalEvent(Event):

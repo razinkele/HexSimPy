@@ -1,6 +1,7 @@
 """1D branching stream network for aquatic species."""
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 import numpy as np
 
@@ -43,9 +44,9 @@ class StreamNetwork:
     def all_upstream(self, seg_id: int) -> list[int]:
         """All segments upstream of seg_id (BFS)."""
         visited = set()
-        queue = list(self.upstream(seg_id))
+        queue = deque(self.upstream(seg_id))
         while queue:
-            s = queue.pop(0)
+            s = queue.popleft()
             if s not in visited:
                 visited.add(s)
                 queue.extend(self.upstream(s))
@@ -53,9 +54,9 @@ class StreamNetwork:
 
     def all_downstream(self, seg_id: int) -> list[int]:
         visited = set()
-        queue = list(self.downstream(seg_id))
+        queue = deque(self.downstream(seg_id))
         while queue:
-            s = queue.pop(0)
+            s = queue.popleft()
             if s not in visited:
                 visited.add(s)
                 queue.extend(self.downstream(s))

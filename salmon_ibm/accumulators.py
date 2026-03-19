@@ -200,7 +200,12 @@ def updater_stochastic_trigger(manager, acc_name, mask, *, probability, rng):
 def updater_quantify_location(manager, acc_name, mask, *, hex_map, cell_indices):
     """Sample hex-map values at each agent's current cell position."""
     idx = manager._resolve_idx(acc_name)
-    manager.data[mask, idx] = hex_map[cell_indices[mask]]
+    cells = cell_indices[mask]
+    # Bounds-check: clip cell indices to valid range
+    valid = (cells >= 0) & (cells < len(hex_map))
+    result = np.zeros(int(mask.sum()), dtype=np.float64)
+    result[valid] = hex_map[cells[valid]]
+    manager.data[mask, idx] = result
 
 
 # --- Remaining 17 updater functions (complete HexSim set) ---

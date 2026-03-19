@@ -12,6 +12,9 @@ import re
 import numpy as np
 
 
+_translate_cache: dict[str, str] = {}
+
+
 def translate_hexsim_expr(expr: str) -> str:
     """Translate HexSim expression DSL to Python-evaluable string.
 
@@ -24,6 +27,10 @@ def translate_hexsim_expr(expr: str) -> str:
     double-substitution (e.g., single-quote output containing double-quotes
     being re-matched by the double-quote pattern).
     """
+    cached = _translate_cache.get(expr)
+    if cached is not None:
+        return cached
+
     def _replace_quotes(m: re.Match) -> str:
         if m.group(1) is not None:
             # Single-quoted global: 'name'
@@ -33,10 +40,11 @@ def translate_hexsim_expr(expr: str) -> str:
             return f'_a["{m.group(2)}"]'
 
     # Match either 'single-quoted' or "double-quoted" in one pass
-    expr = re.sub(r"'([^']+)'|\"([^\"]+)\"", _replace_quotes, expr)
+    result = re.sub(r"'([^']+)'|\"([^\"]+)\"", _replace_quotes, expr)
     # Rename Cond to _cond (sign-of-difference semantics: test > 0 = true)
-    expr = re.sub(r'\bCond\b', '_cond', expr)
-    return expr
+    result = re.sub(r'\bCond\b', '_cond', result)
+    _translate_cache[expr] = result
+    return result
 
 
 def build_hexsim_namespace(globals_dict, acc_dict, rng, n_masked):

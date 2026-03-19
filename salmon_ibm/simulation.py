@@ -7,7 +7,10 @@ from salmon_ibm.agents import AgentPool, Behavior
 from salmon_ibm.behavior import BehaviorParams, pick_behaviors, apply_overrides
 from salmon_ibm.population import Population
 from salmon_ibm.bioenergetics import BioParams, update_energy
-from salmon_ibm.config import load_config, bio_params_from_config, behavior_params_from_config
+from salmon_ibm.config import (
+    load_config, bio_params_from_config, behavior_params_from_config,
+    genome_from_config, network_from_config,
+)
 from salmon_ibm.environment import Environment
 from salmon_ibm.estuary import salinity_cost, do_override, seiche_pause, DO_ESCAPE, DO_LETHAL
 from salmon_ibm.events import EventSequencer
@@ -52,7 +55,8 @@ class Simulation:
         self.pool = AgentPool(n=n_agents, start_tri=start_tris, rng_seed=rng_seed)
         self.population = Population(name="salmon", pool=self.pool)
 
-        # Load barriers if configured
+        # --- Optional Phase 2-3 components ---
+        # Barriers
         barrier_cfg = self.config.get("barriers")
         self._barrier_arrays = None
         if barrier_cfg and grid_type == "hexsim":
@@ -62,6 +66,19 @@ class Simulation:
                 bmap = BarrierMap.from_hbf(hbf_path, self.mesh)
                 if bmap.has_barriers():
                     self._barrier_arrays = bmap.to_arrays(self.mesh)
+
+        # Genome
+        self._genome = genome_from_config(config, n_agents)
+        if self._genome is not None:
+            self.population.genome = self._genome
+
+        # Network
+        self._network = network_from_config(config)
+
+        # Multi-population manager
+        from salmon_ibm.interactions import MultiPopulationManager
+        self._multi_pop_mgr = MultiPopulationManager()
+        self._multi_pop_mgr.register(self.population)
 
         self.beh_params = behavior_params_from_config(config)
         self.bio_params = bio_params_from_config(config)
@@ -167,7 +184,8 @@ class Simulation:
             population.mass_g[alive] = new_mass
             dead_indices = np.where(alive)[0][dead]
             population.alive[dead_indices] = False
-        thermal_kill = alive & (temps_at_agents >= self.bio_params.T_MAX)
+        # Recompute alive mask after starvation kills to avoid double-counting
+        thermal_kill = (population.alive & ~population.arrived) & (temps_at_agents >= self.bio_params.T_MAX)
         population.alive[thermal_kill] = False
 
     def _event_logging(self, population, landscape, t, mask):
@@ -199,6 +217,9 @@ class Simulation:
             "activity_lut": self._activity_lut,
             "est_cfg": self.est_cfg,
             "barrier_arrays": self._barrier_arrays,
+            "genome": self._genome,
+            "multi_pop_mgr": self._multi_pop_mgr,
+            "network": self._network,
         }
         self._sequencer.step(self.population, landscape, t)
         self.current_t += 1
