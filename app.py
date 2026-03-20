@@ -32,6 +32,7 @@ from ui.sidebar import sidebar_panel
 from ui.run_controls import run_controls_panel
 from ui.science_tab import science_panel
 from ui.viewer_tab import viewer_panel
+from ui.charts_panel import charts_panel
 
 # --- Plotly theme constants (Lagoon palette) ---
 PLOT_BG = "rgba(11, 31, 44, 0.0)"
@@ -493,6 +494,7 @@ app_ui = ui.page_sidebar(
                     ui.output_ui("map_legend"),
                     style="position: relative;",
                 ),
+                charts_panel(),
                 class_="chart-card",
             ),
             value="map",
