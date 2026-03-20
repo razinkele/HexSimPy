@@ -46,16 +46,46 @@ Existing .hxn files produced by HexSim 4.0.20 Java application are treated as gr
   ```
 - Replace the neighbor offset tables with pointy-top odd-row convention (matching the display and centroid code). The current function uses flat-top odd-q column-offset (`col % 2`) but must use odd-row (`row % 2`):
   ```python
-  # Pointy-top, odd-row offset (ref: redblobgames.com/grids/hexagons)
-  if row % 2 == 0:  # even row
-      offsets = [(-1, 0), (-1, 1), (0, -1), (0, 1), (1, 0), (1, 1)]
-  else:             # odd row
+  # Pointy-top, odd-row offset (ref: redblobgames.com/grids/hexagons/#coordinates-offset)
+  # Odd rows are shifted RIGHT: cx = sqrt(3) * edge * (col + 0.5 * (row % 2))
+  # Even rows (NOT shifted) → diagonal neighbors at lower col indices
+  # Odd rows (shifted right) → diagonal neighbors at higher col indices
+  if row % 2 == 0:  # even row (not shifted)
       offsets = [(-1, -1), (-1, 0), (0, -1), (0, 1), (1, -1), (1, 0)]
+  else:             # odd row (shifted right)
+      offsets = [(-1, 0), (-1, 1), (0, -1), (0, 1), (1, 0), (1, 1)]
   ```
+  **Verification:** for cell (2,1) on even row at x=√3·edge, upper-left neighbor is (1,0)
+  at x=0.5·√3·edge → offset (-1,-1). For cell (1,1) on odd row at x=1.5·√3·edge,
+  upper-left neighbor is (0,1) at x=√3·edge → offset (-1,0). Both match the table above.
 - Update all callers in `HexMesh.from_hexsim()` to pass the flag
-- Also fix `HexMap.to_geodataframe()` and `HexMap.to_geotiff()` in `heximpy/hxnparser.py` which use the same incorrect `flat = row * width + col` formula for narrow grids
+- Also fix `HexMap.neighbors()` and `HexMap.hex_to_xy()` in `heximpy/hxnparser.py` which currently use flat-top odd-q convention (`col % 2`) — must be updated to pointy-top odd-row (`row % 2`) for consistency
+- Fix `HexMap.to_geodataframe()` in `heximpy/hxnparser.py` which uses incorrect `flat = row * width + col` for narrow grids. Add a `_flat_to_rowcol()` helper (inverse of `_rowcol_to_flat_narrow`):
+  ```python
+  def _build_flat_to_rowcol(height, width, flag):
+      """Build flat-index → (row, col) lookup arrays."""
+      if flag == 0:
+          rows = np.repeat(np.arange(height), width)
+          cols = np.tile(np.arange(width), height)
+      else:
+          row_list, col_list = [], []
+          for r in range(height):
+              rw = width if r % 2 == 0 else width - 1
+              row_list.append(np.full(rw, r, dtype=np.int32))
+              col_list.append(np.arange(rw, dtype=np.int32))
+          rows = np.concatenate(row_list)
+          cols = np.concatenate(col_list)
+      return rows, cols
+  ```
+- Fix `HexMap.to_geotiff()`: for narrow grids, `values.reshape((height, width))` will crash because `len(values) != height * width`. Add a guard that raises `ValueError("to_geotiff() is not supported for narrow grids (flag=1) — use to_geodataframe() instead")` or pad odd rows with nodata to fill the rectangle
+
+**Data layout verification (must be done first):**
+The .hxn binary data is row-major. The centroid code (verified against HexSim 4.0.20) uses pointy-top odd-row. Before changing the neighbor offsets, verify by loading a known workspace, computing neighbors with the proposed offsets, and confirming that neighbor centroids are geometrically adjacent (distance ≈ √3 × edge). This confirms the data layout matches the pointy-top convention. If it doesn't, the neighbor function must stay flat-top for data indexing and only the display uses pointy-top.
+
+**Note:** `hxnparser.py` has its own `neighbors()` method (line 118) and `hex_to_xy()` (line 130) using flat-top odd-q convention. These must also be updated if the verification confirms pointy-top data layout, or documented as using a different convention if not.
 
 **Acceptance criteria:**
+- Data layout verification passes (neighbor centroids are geometrically adjacent)
 - Neighbor symmetry holds for all cells in narrow-grid workspaces
 - Neighbor count is 6 for interior cells, <6 for edge cells
 - No cell references an out-of-bounds flat index
@@ -255,7 +285,12 @@ Refactor `_build_single_event()` to:
 3. Call `cls.from_descriptor(descriptor)` — each event class implements this classmethod
 4. The loader has no event-type-specific parameter mapping; it's just a dispatcher
 
-**Breaking change:** Existing event classes currently use `__init__` with `**params` keyword unpacking (called from `scenario_loader.py`). Adding `from_descriptor()` is a new classmethod on each event class. The migration strategy: add `from_descriptor()` to each registered event class while keeping `__init__` unchanged, then update `_build_single_event()` to call `from_descriptor()` instead of `cls(**params)`. Event classes that need modification: all 16 registered types in `events_builtin.py`, `events_hexsim.py`, `events_phase3.py`, and `interactions.py`.
+**Breaking change:** Existing event classes currently use `__init__` with `**params` keyword unpacking (called from `scenario_loader.py`). Adding `from_descriptor()` is a new classmethod on each event class. The migration strategy:
+1. Add `from_descriptor()` to each registered event class while keeping `__init__` unchanged
+2. Update `_build_single_event()` to try `cls.from_descriptor(descriptor)` first, falling back to the old `cls(**params)` path if `from_descriptor` is not implemented — this allows incremental migration and rollback
+3. Once all 16 event classes have `from_descriptor()` and tests pass, remove the fallback
+
+Event classes that need modification: all 16 registered types in `events_builtin.py`, `events_hexsim.py`, `events_phase3.py`, and `interactions.py`.
 
 This means adding a new event type requires:
 1. Add `_parse_<type>_params()` in xml_parser.py
@@ -272,10 +307,18 @@ Add a section at the top:
 ```
 IMPLEMENTATION NOTES (HexSimPy)
 ================================
-The Python codebase uses POINTY-TOP hex orientation with ODD-ROW offset
-for display, matching HexSim 4.0.20's viewer. The format descriptions
-below use flat-top/odd-q column-offset convention for the data layout,
-which is how cells are stored in .hxn files.
+FILE FORMAT vs RUNTIME CONVENTION:
+  The .hxn file format stores cells in row-major order. The format
+  descriptions below reference flat-top/odd-q column-offset convention
+  for historical context.
+
+  The Python runtime uses POINTY-TOP hex orientation with ODD-ROW offset,
+  matching HexSim 4.0.20's viewer. Neighbor computation and centroid
+  placement both use row-based parity (row % 2).
+
+  The data layout verification (Phase 1a) confirmed which convention
+  the binary data actually follows. See tests/test_hexsim_io.py for
+  the verification evidence.
 
 GridMeta ↔ HexMap dimension mapping:
   GridMeta.ncols = HexMap.height (number of data rows)
@@ -317,5 +360,9 @@ All tests use existing HexSim 4.0.20 workspace files as ground-truth fixtures.
 | `salmon_ibm/scenario_loader.py` | 2c, 3c | Warning on no-op fallback, registry-driven dispatch |
 | `tests/test_io_validation.py` | 2 | New: validation error tests |
 | `salmon_ibm/event_descriptors.py` | 3a | New: typed event descriptor dataclasses |
+| `salmon_ibm/events_builtin.py` | 3c | Add `from_descriptor()` classmethod |
+| `salmon_ibm/events_hexsim.py` | 3c | Add `from_descriptor()` classmethod |
+| `salmon_ibm/events_phase3.py` | 3c | Add `from_descriptor()` classmethod |
+| `salmon_ibm/interactions.py` | 3c | Add `from_descriptor()` classmethod |
 | `tests/test_event_parsing.py` | 3 | New: event parsing tests |
-| `HexSimFormat.txt` | 3d | Add implementation notes section |
+| `HexSimFormat.txt` | 3d | Add implementation notes (clarify that file format is flat-top data layout, runtime converts to pointy-top display) |
