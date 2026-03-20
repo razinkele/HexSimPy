@@ -88,3 +88,29 @@ class TestHxnWriteValidation:
                 hm.to_file(tmp)
         finally:
             tmp.unlink(missing_ok=True)
+
+
+class TestGridMetaValidation:
+    """GridMeta.from_file() should reject implausible values."""
+
+    def test_zero_extent_raises(self):
+        with tempfile.NamedTemporaryFile(suffix=".grid", delete=False) as f:
+            tmp = Path(f.name)
+        try:
+            with open(tmp, "wb") as f:
+                f.write(b"PATCH_GRID")
+                f.write(struct.pack("<I", 1))    # version
+                f.write(struct.pack("<I", 100))  # n_hexes
+                f.write(struct.pack("<I", 10))   # ncols
+                f.write(struct.pack("<I", 10))   # nrows
+                f.write(struct.pack("<?", False))  # flag
+                f.write(struct.pack("<d", 0.0))  # x_extent = 0 (invalid)
+                f.write(struct.pack("<d", 0.0))
+                f.write(struct.pack("<d", 1000.0))
+                f.write(struct.pack("<d", 0.0))
+                f.write(struct.pack("<d", 24.0)) # row_spacing
+
+            with pytest.raises(ValueError, match="extent|plausib"):
+                GridMeta.from_file(tmp)
+        finally:
+            tmp.unlink(missing_ok=True)

@@ -412,13 +412,22 @@ class GridMeta:
             version, n_hexes, ncols, nrows = struct.unpack("<IIII", f.read(16))
             (flag,) = struct.unpack("<B", f.read(1))
             georef = struct.unpack("<5d", f.read(40))
+        x_extent = georef[0]
+        y_extent = georef[3]
+        row_spacing = georef[4]
+        if x_extent <= 0 or y_extent <= 0:
+            raise ValueError(f"Grid extent must be positive: x_extent={x_extent}, y_extent={y_extent}")
+        if row_spacing <= 0:
+            raise ValueError(f"Grid row_spacing must be positive: {row_spacing}")
+        if ncols <= 0 or nrows <= 0:
+            raise ValueError(f"Grid dimensions must be positive: ncols={ncols}, nrows={nrows}")
         return cls(
             ncols=ncols,
             nrows=nrows,
-            x_extent=georef[0],
-            y_extent=georef[3],
-            row_spacing=georef[4],
-            edge=georef[4] / math.sqrt(3),
+            x_extent=x_extent,
+            y_extent=y_extent,
+            row_spacing=row_spacing,
+            edge=row_spacing / math.sqrt(3),
             version=version,
             n_hexes=n_hexes,
             flag=flag,
