@@ -10,7 +10,7 @@ The current UI rebuilds 3 Plotly charts from scratch on each simulation step:
 1. `go.Figure()` → `pio.to_html()` → write to disk → serve in iframe
 2. **400-700ms UI latency per cycle** — user sees spinners instead of smooth updates
 3. Charts live in a separate "Charts" tab — must switch away from the map to see them
-4. `history.copy()` on every step triggers 9 downstream `@render` functions unnecessarily
+4. `history.copy()` on every step triggers 8 downstream `@render` functions unnecessarily
 
 ## Solution
 
@@ -91,9 +91,57 @@ await session.send_custom_message("chart_update", {
         "random": int(n_random),
         "cwr": int(n_cwr),
     },
-    "migration_bins": list(bin_counts),  # ~50 ints
+    "migration_bins": list(bin_counts),  # ~50 ints, see extraction logic below
 })
 ```
+
+**Extraction logic for `_push_chart_data()`:**
+```python
+async def _push_chart_data(session, sim):
+    """Push chart data to JS — called after each sim.step()."""
+    try:
+        pool = sim.pool
+        alive_mask = pool.alive.astype(bool)
+        n_alive = int(alive_mask.sum())
+        n_total = len(pool.alive)
+
+        # Population counts
+        n_dead = n_total - n_alive
+        n_arrived = int(getattr(pool, 'arrived', np.zeros(1)).sum())
+
+        # Behavior counts — pool.behavior uses int indices:
+        #   0=Hold, 1=Random/Downstream, 2=CWR, 3=Upstream, 4=Downstream
+        # Map to named keys for JS
+        beh = pool.behavior[alive_mask] if n_alive > 0 else np.array([])
+        BEH_MAP = {3: "upstream", 4: "downstream", 0: "hold", 1: "random", 2: "cwr"}
+        beh_counts = {name: 0 for name in BEH_MAP.values()}
+        for idx, name in BEH_MAP.items():
+            beh_counts[name] = int((beh == idx).sum())
+
+        # Migration histogram — upstream distance for alive agents
+        # Uses the "Gradient [ upstream ]" layer if available, else mesh centroid Y
+        if hasattr(sim, '_upstream_distances'):
+            dists = sim._upstream_distances[alive_mask]
+        else:
+            # Fallback: use centroid y-coordinate as proxy for upstream distance
+            water_idx = sim.mesh._water_full_idx
+            compact_idx = np.where(alive_mask)[0]
+            dists = sim.mesh.centroids[compact_idx, 0]  # y = upstream proxy
+        bin_counts, _ = np.histogram(dists, bins=sim._migration_bins)
+
+        await session.send_custom_message("chart_update", {
+            "t": sim.current_t,
+            "alive": n_alive,
+            "dead": n_dead,
+            "arrived": n_arrived,
+            "behaviors": beh_counts,
+            "migration_bins": bin_counts.tolist(),
+        })
+    except Exception:
+        pass  # Don't crash the simulation loop on chart push failure
+```
+
+**Note on energy chart:** The current app has a 3rd chart showing mean energy density (kJ/g). This spec intentionally replaces it with Migration Progress (upstream distance histogram), which better demonstrates the spatial model behavior. The energy chart remains available in the existing Charts tab during the migration period. If energy data is needed in the streaming panel later, add `"mean_ed": float(pool.energy[alive_mask].mean())` to the push message and a 4th chart column.
 
 On reset:
 ```python
@@ -102,7 +150,24 @@ await session.send_custom_message("chart_reset", {
     "n_agents": initial_population,
     "river_length_km": max_upstream_distance,
     "n_bins": 50,
+    "bin_edges": list(bin_edges),  # ~51 floats, computed once from upstream gradient range
 })
+```
+
+**Migration bins initialization** (in `_push_chart_reset()` or `_init_sim()`):
+```python
+# Compute fixed bin edges from the upstream gradient layer range
+if 'Gradient [ upstream ]' in sim.mesh._workspace.hexmaps:
+    up_hm = sim.mesh._workspace.hexmaps['Gradient [ upstream ]']
+    up_vals = up_hm.values[up_hm.values > 0]
+    max_dist = float(up_vals.max()) if len(up_vals) > 0 else 1.0
+else:
+    max_dist = float(sim.mesh.centroids[:, 0].max())
+sim._migration_bins = np.linspace(0, max_dist, 51)  # 50 bins
+sim._upstream_distances = up_hm.values[sim.mesh._water_full_idx] if up_hm else sim.mesh.centroids[:, 0]
+```
+
+**Backpressure:** During fast Run loops (speed > 5), throttle chart pushes to every Nth step (e.g., `if sim.current_t % max(1, speed // 2) == 0`). This prevents WebSocket message queue buildup while still providing smooth visual updates.
 ```
 
 ---
@@ -134,7 +199,8 @@ await session.send_custom_message("chart_reset", {
 ### Shared Properties
 - `Plotly.newPlot(el, traces, layout, {displayModeBar: false, responsive: true})`
 - Layout: `{paper_bgcolor:'rgba(0,0,0,0)', plot_bgcolor:'rgba(0,0,0,0)', font:{color:'#aaa', size:10}, margin:{l:35,r:10,t:5,b:25}}`
-- Auto-scroll: when `x.length > 200`, remove oldest point: `Plotly.extendTraces(el, ..., null, 200)`
+- Auto-scroll: `Plotly.extendTraces(el, update, traceIndices, maxPoints)` — the 4th argument `maxPoints` (integer) caps each trace to N points, removing oldest automatically. Example: `Plotly.extendTraces(el, {x:[[t]], y:[[v]]}, [0], 200)` keeps at most 200 points per trace.
+- On panel resize/collapse: call `Plotly.Plots.resize(el)` for each chart div to refit the layout
 
 ---
 
@@ -144,8 +210,34 @@ await session.send_custom_message("chart_reset", {
 
 | File | Lines | Responsibility |
 |------|-------|---------------|
-| `www/streaming_charts.js` | ~120 | Chart init, message handlers, extendTraces/react, panel collapse/resize |
-| `ui/charts_panel.py` | ~40 | Shiny UI function returning HTML container + script tag |
+| `www/streaming_charts.js` | ~150 | Chart init, Shiny message handlers, extendTraces/react, panel collapse/resize |
+| `ui/charts_panel.py` | ~40 | Shiny UI function returning HTML container + Plotly CDN script + streaming_charts.js script tag |
+
+### Plotly.js Loading
+
+The main page must load Plotly.js (currently only loaded inside iframes). Add to the `charts_panel()` UI output:
+```python
+ui.tags.script(src="https://cdn.plot.ly/plotly-2.27.0.min.js"),
+ui.tags.script(src="streaming_charts.js"),
+```
+
+### JS Message Handler Registration
+
+In `www/streaming_charts.js`, register handlers on document ready:
+```javascript
+// Register Shiny custom message handlers
+Shiny.addCustomMessageHandler("chart_update", function(msg) {
+    updatePopulationChart(msg);
+    updateMigrationChart(msg);
+    updateBehaviorChart(msg);
+});
+
+Shiny.addCustomMessageHandler("chart_reset", function(msg) {
+    initPopulationChart(msg);
+    initMigrationChart(msg);
+    initBehaviorChart(msg);
+});
+```
 
 ### Modified Files
 
