@@ -927,15 +927,18 @@ def server(input, output, session):
         mesh = sim.mesh
         is_hexsim = hasattr(mesh, '_edge')
         if is_hexsim:
-            # MapboxOverlay requires lon/lat view state even for CARTESIAN layers.
-            # Treat scaled grid coords as pseudo-geographic coordinates.
             cx = mesh.centroids[:, 1] * _cached_scale
             cy = -mesh.centroids[:, 0] * _cached_scale
             lon = float(cx.mean())
             lat = float(cy.mean())
-            extent = max(float(cx.max() - cx.min()), float(cy.max() - cy.min()))
-            zoom = np.log2(800 / max(extent, 1))
-            return {"longitude": lon, "latitude": lat, "zoom": float(zoom)}
+            # Zoom so hexagons are visible (~4px per edge)
+            edge_s = mesh._edge * _cached_scale
+            min_hex_px = 4
+            zoom_for_hex = float(np.log2(min_hex_px * 360 / (256 * max(edge_s, 1e-6))))
+            extent = max(float(cx.max() - cx.min()), float(cy.max() - cy.min()), 0.01)
+            zoom_for_extent = float(np.log2(360 / extent))
+            zoom = max(zoom_for_hex, zoom_for_extent)
+            return {"longitude": lon, "latitude": lat, "zoom": zoom}
         return {"longitude": 21.07, "latitude": 55.31, "zoom": 10}
 
     def _agent_layer(sim, landscape=None):
@@ -1390,8 +1393,16 @@ def server(input, output, session):
 
         center_x = float(np.mean(sx))
         center_y = float(np.mean(sy))
+        # Compute zoom so hexagons are visible (~4 pixels per edge)
+        # At zoom Z, 1 degree ≈ 256 * 2^Z / 360 pixels
+        # For edge_s degrees to be 4px: zoom = log2(4 * 360 / (256 * edge_s))
+        min_hex_pixels = 4
+        zoom_for_hex = float(np.log2(min_hex_pixels * 360 / (256 * max(edge_s, 1e-6))))
+        # Also compute zoom to fit extent
         extent = max(float(sx.max() - sx.min()), float(sy.max() - sy.min()), 0.01)
-        zoom = float(np.log2(360 / extent))  # fit extent into ~360 degrees of view
+        zoom_for_extent = float(np.log2(360 / extent))
+        # Use the LARGER zoom (closer in) — show hex detail, user can zoom out
+        zoom = max(zoom_for_hex, zoom_for_extent)
 
         water_layer = layer(
             "SolidPolygonLayer", "viewer_water",
