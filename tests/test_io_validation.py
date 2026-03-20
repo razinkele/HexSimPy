@@ -124,3 +124,45 @@ class TestTemperatureCSVValidation:
         data = np.zeros((3, 10), dtype=np.float32)
         with pytest.raises(ValueError, match="Temperature CSV shape"):
             _validate_temp_table(data, n_zones=5)
+
+
+import warnings
+
+
+class TestXmlParserValidation:
+    """XML parser should check for required elements."""
+
+    def test_missing_simulation_params_raises(self):
+        from salmon_ibm.xml_parser import load_scenario_xml
+        xml_str = "<scenario><hexagonGrid/></scenario>"
+        with tempfile.NamedTemporaryFile(suffix=".xml", mode="w", delete=False) as f:
+            f.write(xml_str)
+            tmp = Path(f.name)
+        try:
+            with pytest.raises(ValueError, match="simulationParameters"):
+                load_scenario_xml(tmp)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+
+class TestEventLoadingWarning:
+    """Unregistered event types should emit a warning."""
+
+    def test_unregistered_event_warns(self):
+        from salmon_ibm.scenario_loader import ScenarioLoader
+
+        loader = ScenarioLoader.__new__(ScenarioLoader)
+        edef = {
+            "type": "reanimation",
+            "name": "Test Reanimation",
+            "timestep": 1,
+            "population": "pop1",
+            "enabled": True,
+            "params": {},
+        }
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            evt = loader._build_single_event(edef)
+            matching = [x for x in w if "not in EVENT_REGISTRY" in str(x.message)]
+            assert len(matching) == 1, f"Expected 1 warning, got {len(matching)}"
+            assert "reanimation" in str(matching[0].message)

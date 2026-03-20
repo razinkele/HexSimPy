@@ -195,7 +195,7 @@ class ScenarioLoader:
                 events.append(evt)
         return events
 
-    def _build_single_event(self, edef: dict, global_variables: dict) -> Event | None:
+    def _build_single_event(self, edef: dict, global_variables: dict | None = None) -> Event | None:
         """Recursively build an Event from a parsed dict."""
         etype = edef.get("type", "")
         name = edef.get("name", etype)
@@ -229,7 +229,12 @@ class ScenarioLoader:
         from salmon_ibm.events import EVENT_REGISTRY
         cls = EVENT_REGISTRY.get(etype)
         if cls is None:
-            # Unknown event type — create a no-op wrapper
+            import warnings
+            warnings.warn(
+                f"Event type '{etype}' not in EVENT_REGISTRY — "
+                f"replaced with no-op. Event: {name}",
+                stacklevel=2,
+            )
             from salmon_ibm.events_hexsim import DataProbeEvent
             return DataProbeEvent(
                 name=f"[unimplemented:{etype}] {name}",

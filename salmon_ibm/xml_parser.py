@@ -22,6 +22,11 @@ def load_scenario_xml(path: str | Path) -> dict:
     tree = ET.parse(path)
     root = tree.getroot()
 
+    _REQUIRED_ELEMENTS = ["simulationParameters", "hexagonGrid"]
+    for elem_name in _REQUIRED_ELEMENTS:
+        if root.find(f".//{elem_name}") is None:
+            raise ValueError(f"Missing required XML element: <{elem_name}>")
+
     config: dict[str, Any] = {
         "simulation": _parse_simulation_params(root),
         "grid": _parse_grid_metadata(root),
