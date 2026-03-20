@@ -635,5 +635,15 @@ class HexSimMoveEvent(Event):
 class DataProbeEvent(Event):
     """No-op data probe event — output logging only, no behavioral effect."""
 
+    @classmethod
+    def from_descriptor(cls, descriptor):
+        """Construct from a typed EventDescriptor."""
+        return cls(
+            name=descriptor.name,
+            trigger=None,
+            population_name=descriptor.population_name,
+            enabled=descriptor.enabled,
+        )
+
     def execute(self, population, landscape, t, mask):
         pass  # Output logging not implemented; prevents parse failure

@@ -75,3 +75,20 @@ class TestEventParameterExtraction:
         assert desc.event_type == "move"
         assert desc.timestep == 5
         assert desc.population_name == "chinook"
+
+
+from salmon_ibm.event_descriptors import DataProbeEventDescriptor
+from salmon_ibm.events_hexsim import DataProbeEvent
+
+
+class TestRegistryDrivenLoading:
+    """Events can be constructed from descriptors."""
+
+    def test_data_probe_from_descriptor(self):
+        desc = DataProbeEventDescriptor(
+            name="test_probe", event_type="data_probe",
+            timestep=1, population_name="pop1",
+        )
+        evt = DataProbeEvent.from_descriptor(desc)
+        assert evt.name == "test_probe"
+        assert evt.population_name == "pop1"

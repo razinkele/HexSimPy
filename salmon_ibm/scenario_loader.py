@@ -243,6 +243,22 @@ class ScenarioLoader:
                 enabled=enabled,
             )
 
+        # Try from_descriptor if available (Phase 3 incremental migration)
+        if hasattr(cls, "from_descriptor"):
+            from salmon_ibm.event_descriptors import DESCRIPTOR_REGISTRY
+            desc_cls = DESCRIPTOR_REGISTRY.get(etype)
+            if desc_cls is not None:
+                descriptor = desc_cls(
+                    name=name,
+                    event_type=etype,
+                    timestep=edef.get("timestep", 0),
+                    population_name=population_name,
+                    enabled=enabled,
+                )
+                evt = cls.from_descriptor(descriptor)
+                evt.trigger = trigger
+                return evt
+
         # Build event with available params
         try:
             evt = cls(
