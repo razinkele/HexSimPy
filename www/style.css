@@ -790,6 +790,62 @@ button[aria-label="Toggle sidebar"] {
     margin-bottom: 6px;
 }
 
+/* ── Streaming Charts Panel ──────────────────────────────────────────── */
+.charts-panel {
+  width: 100%;
+  background: var(--card-bg, #141e2b);
+  border-top: 1px solid var(--border-color, #2a3a4a);
+}
+
+.charts-panel-handle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 24px;
+  background: var(--card-bg, #1a2633);
+  cursor: pointer;
+  user-select: none;
+  border-bottom: 1px solid var(--border-color, #2a3a4a);
+}
+.charts-panel-handle span {
+  color: var(--accent, #4ecdc4);
+  font-size: 11px;
+  letter-spacing: 1px;
+  font-weight: 600;
+}
+.charts-panel-handle:hover {
+  background: var(--hover-bg, #1f2f3f);
+}
+
+.charts-panel-body {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  height: 150px;
+}
+
+.chart-cell {
+  flex: 1;
+  background: var(--card-bg, #141e2b);
+  border-radius: 4px;
+  padding: 4px 6px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.chart-cell-title {
+  font-size: 10px;
+  color: var(--accent, #4ecdc4);
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  margin-bottom: 2px;
+  flex-shrink: 0;
+}
+.chart-cell-plot {
+  flex: 1;
+  min-height: 0;
+}
+
 /* --- Map legend overlay --- */
 .map-legend {
     position: absolute;
