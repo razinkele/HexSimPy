@@ -24,3 +24,4 @@ winds_stub.nc
 
 # Output
 output/
+tests/hex_test_output/*_habitat_deckgl.html
