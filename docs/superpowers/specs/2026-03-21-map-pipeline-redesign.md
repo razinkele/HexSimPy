@@ -10,7 +10,7 @@
 
 2. **BLANK_STYLE URL bug:** `BLANK_STYLE = json.dumps({...})` is a JSON string. MapLibre's `setStyle()` treats strings as URLs and tries to fetch them, causing 500 errors. The initial widget creation works but runtime `set_style()` calls fail.
 
-3. **No agent animation:** `_should_transition()` has inverted logic AND is only conditionally applied. Agents jump between positions instead of smoothly interpolating.
+3. **No agent animation:** `_should_transition()` uses agent count change as a heuristic for enabling transitions — this is the wrong trigger (movement should always animate, regardless of population count changes). Agents jump between positions instead of smoothly interpolating.
 
 ## Solution
 
@@ -93,39 +93,57 @@ Triggered only on field dropdown change. Rebuilds hex polygon colors without cal
 
 ```python
 async def _hex_color_update(sim, landscape=None):
-    """Rebuild hex grid colors only — no set_style, no agent layer."""
+    """Rebuild hex grid with new field colors — no set_style, no view state change.
+
+    For HexSim: SolidPolygonLayer requires the full vertex+color data
+    (can't update colors independently), so this resends the complete hex
+    polygon layer. The difference from _full_update() is: no set_style()
+    call, no view state change. Also sends current agents to avoid stale
+    agent positions after field switch.
+    """
     is_hexsim = hasattr(sim.mesh, '_edge')
+    z, cscale = _resolve_field(sim)
+    idx = _water_idx(sim)
+
     if is_hexsim:
-        # Rebuild hex polygon layer with new colors
-        z, cscale = _resolve_field(sim)
-        idx = _water_idx(sim)
-        # Build full hex layer (same as _full_update but skip set_style)
-        # ... vertex + color construction ...
+        # SolidPolygonLayer needs full vertex+color rebuild (same geometry
+        # construction as _full_update, but skip set_style and view_state)
+        scale = _cached_scale
+        cx = sim.mesh.centroids[idx, 1] * scale
+        cy = -sim.mesh.centroids[idx, 0] * scale
+        edge_s = sim.mesh._edge * scale
+        verts, start_idx = _build_hex_polygons(cx, cy, edge_s)
+        rgb = _colorscale_rgb(z[idx] if len(z) > len(idx) else z, cscale)
+        hex_layer = solid_polygon_layer("water", verts, start_idx, rgb, len(idx))
         layers = [hex_layer]
-        await map_widget.partial_update(session, layers)
     else:
-        # TriMesh: can do incremental color update
-        z, cscale = _resolve_field(sim)
-        idx = _water_idx(sim)
+        # TriMesh: incremental color update (geometry cached in JS)
         col_bin = _build_color_binary(sim.mesh, z, cscale, idx)
         layers = [{"id": "water", "getFillColor": col_bin, "data": {"length": _cached_water_n}}]
-        await map_widget.partial_update(session, layers)
+
+    # Also send current agents to avoid stale positions after field switch
+    layers.append(
+        _agent_layer_binary(sim, scale=_cached_scale, use_transitions=True)
+    )
+    await map_widget.partial_update(session, layers)
 ```
 
-The critical difference from `_full_update()`: no `set_style()` call, no view state change, no agent layer rebuild. Just hex colors via `partial_update()`.
+The critical difference from `_full_update()`: no `set_style()` call, no view state change. Sends hex grid + agents via `partial_update()`, preserving the current map state.
 
 ---
 
 ## Files Modified
 
-| File | Lines | Changes |
-|------|-------|---------|
-| `app.py:377-380` | BLANK_STYLE definition | Convert to data URL |
-| `app.py:961-968` | `_should_transition()` | Delete entirely |
-| `app.py:970-991` | `_agent_layer_binary()` | Remove `use_transitions` param, always enable transitions |
-| `app.py:1132-1138` | `_color_and_agent_update()` | Replace with `_hex_color_update()` — no `_full_update()` fallback |
-| `app.py:1164-1181` | `_agent_only_update()` | Rename to `_agent_trail_update()` |
-| `app.py:1183-1230` | `_update_map()` | Rewrite with 3-branch logic: landscape → field → agent-only |
+| File | What to Find | Changes |
+|------|-------------|---------|
+| `app.py` | `BLANK_STYLE = _json.dumps(` | Convert to data URL |
+| `app.py` | `def _should_transition(sim):` | Delete entirely |
+| `app.py` | `def _agent_layer_binary(sim, ...)` | Remove `use_transitions` param, always enable transitions |
+| `app.py` | `def _color_and_agent_update(sim, ...)` | Replace with `_hex_color_update()` — full hex polygon + color rebuild without `set_style()`, plus current agents |
+| `app.py` | `def _agent_only_update(sim, ...)` | Rename to `_agent_trail_update()` |
+| `app.py` | `async def _update_map():` | Rewrite with 3-branch logic: landscape → field → agent-only |
+
+**Note:** Line numbers shift as edits are applied. Use function name search (`def _should_transition`, etc.) rather than line numbers when implementing.
 
 ## Unchanged
 - `_full_update()` — still used on landscape change
