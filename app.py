@@ -373,11 +373,9 @@ class TrailBuffer:
 
 
 # Blank map style for non-geographic (orthographic) rendering
-import json as _json
-BLANK_STYLE = _json.dumps({"version": 8, "sources": {}, "layers": [
-    {"id": "background", "type": "background",
-     "paint": {"background-color": "#0b1f2c"}}
-]})
+import base64 as _b64
+_blank_json = '{"version":8,"sources":{},"layers":[{"id":"background","type":"background","paint":{"background-color":"#0b1f2c"}}]}'
+BLANK_STYLE = "data:application/json;base64," + _b64.b64encode(_blank_json.encode()).decode()
 
 # Static assets directory
 WWW_DIR = Path(__file__).parent / "www"
