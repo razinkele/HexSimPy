@@ -625,7 +625,34 @@ def server(input, output, session):
         sim._activity_lut = sim._build_activity_lut()
         sim.pool.ed_kJ_g[:] = ed_init
         sim_state.set(sim)
+
+        # ── Initialize streaming chart bins ──
+        ws = sim.mesh._workspace
+        if ws and 'Gradient [ upstream ]' in ws.hexmaps:
+            up_hm = ws.hexmaps['Gradient [ upstream ]']
+            up_vals = up_hm.values[up_hm.values > 0]
+            max_dist = float(up_vals.max()) if len(up_vals) > 0 else 1.0
+            sim._upstream_distances = up_hm.values[sim.mesh._water_full_idx].astype(np.float64)
+        else:
+            max_dist = float(abs(sim.mesh.centroids[:, 0]).max())
+            sim._upstream_distances = sim.mesh.centroids[:, 0].copy()
+        sim._migration_bins = np.linspace(0, max_dist, 51)
+
         history.set([])
+
+        # Push chart reset to JS
+        try:
+            n_agents = int(cfg["grid"].get("n_agents", input.n_agents()))
+            await session.send_custom_message("chart_reset", {
+                "max_time": int(input.n_steps()),
+                "n_agents": n_agents,
+                "river_length_km": float(max_dist),
+                "n_bins": 50,
+                "bin_edges": sim._migration_bins.tolist(),
+            })
+        except Exception:
+            pass  # Session not ready yet on first load
+
         running.set(False)
         trail_buffer.clear()
 
