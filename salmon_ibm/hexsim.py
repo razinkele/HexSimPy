@@ -203,9 +203,12 @@ class HexMesh:
         data_rows = all_rows[water_flat]
         data_cols = all_cols[water_flat]
 
-        # Hex center coordinates (matches hxnparser.HexMap.hex_to_xy)
-        cx = 1.5 * edge * data_cols.astype(np.float64)
-        cy = np.sqrt(3.0) * edge * (data_rows.astype(np.float64) + 0.5 * (data_cols % 2))
+        # Pointy-top hex center coordinates (verified against HexSim 4.0.20)
+        # col_spacing = sqrt(3)*edge, row_spacing = 1.5*edge, odd-ROW offset
+        cols_f = data_cols.astype(np.float64)
+        rows_f = data_rows.astype(np.float64)
+        cx = np.sqrt(3.0) * edge * (cols_f + 0.5 * (data_rows % 2))
+        cy = 1.5 * edge * rows_f
         centroids = np.column_stack([cy, cx])  # (N_water, 2) as [y, x] in meters
 
         # 4. Read depth (try specific, then generic names)

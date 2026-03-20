@@ -136,9 +136,9 @@ BEH_COLORS_ARRAY = np.array(
     [list(_hex_to_rgb(c)) + [240] for c in BEH_COLORS], dtype=np.uint8
 )
 
-# Hex vertex offsets — flat-top odd-q convention (matches HexMesh centroid spacing)
-# Vertices at 0°,60°,...,300° — edge at top/bottom, vertex at left/right
-_HEX_ANGLES = np.arange(6) * (np.pi / 3)
+# Hex vertex offsets — pointy-top (vertex at top/bottom, matching HexSim display)
+# Vertices at 30°,90°,...,330°
+_HEX_ANGLES = np.arange(6) * (np.pi / 3) + (np.pi / 6)
 _HEX_DX = np.cos(_HEX_ANGLES).astype(np.float64)
 _HEX_DY = np.sin(_HEX_ANGLES).astype(np.float64)
 
@@ -1361,8 +1361,9 @@ def server(input, output, session):
         water_values = values[water_flat]
 
         # Hex center coordinates (matches hxnparser.HexMap.hex_to_xy)
-        cx = 1.5 * edge * data_cols.astype(np.float64)
-        cy = np.sqrt(3.0) * edge * (data_rows.astype(np.float64) + 0.5 * (data_cols % 2))
+        # Pointy-top spacing (verified against HexSim 4.0.20)
+        cx = np.sqrt(3.0) * edge * (data_cols.astype(np.float64) + 0.5 * (data_rows % 2))
+        cy = 1.5 * edge * data_rows.astype(np.float64)
 
         # Subsample for deck.gl — stride-based to preserve spatial tiling
         max_pts = 500_000
