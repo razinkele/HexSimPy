@@ -96,6 +96,11 @@ class HexMap:
             raise ValueError(f"Unknown format: {fmt!r}")
 
     def _write_patch_hexmap(self, path: str | Path) -> None:
+        if len(self.values) != self.n_hexagons:
+            raise ValueError(
+                f"Cannot write HexMap: data length {len(self.values)} "
+                f"!= expected {self.n_hexagons}"
+            )
         with open(path, "wb") as f:
             f.write(_HXN_MAGIC)
             f.write(struct.pack("<I", self.version))
@@ -108,6 +113,11 @@ class HexMap:
             f.write(self.values.astype("<f4").tobytes())
 
     def _write_plain(self, path: str | Path) -> None:
+        if len(self.values) != self.n_hexagons:
+            raise ValueError(
+                f"Cannot write HexMap: data length {len(self.values)} "
+                f"!= expected {self.n_hexagons}"
+            )
         with open(path, "wb") as f:
             f.write(struct.pack("<i", self.version))
             f.write(struct.pack("<i", self.width))
@@ -297,6 +307,18 @@ class HexMap:
         hist_idx = rest.find(_HISTORY_MARKER)
         data_bytes = rest[:hist_idx] if hist_idx >= 0 else rest
         values = np.frombuffer(data_bytes, dtype=np.float32).copy()
+        # Validate data length
+        if flag == 0:
+            expected = ncols * nrows
+        else:
+            n_even = (nrows + 1) // 2
+            n_odd = nrows // 2
+            expected = n_even * ncols + n_odd * (ncols - 1)
+        if len(values) != expected:
+            raise ValueError(
+                f"HXN data length mismatch: got {len(values)} values, "
+                f"expected {expected} (width={ncols}, height={nrows}, flag={flag})"
+            )
         return cls(
             format="patch_hexmap",
             version=version,
@@ -316,15 +338,23 @@ class HexMap:
         (cell_size,) = struct.unpack("<d", f.read(8))
         origin_x, origin_y = struct.unpack("<dd", f.read(16))
         dtype_code, nodata = struct.unpack("<ii", f.read(8))
+        if dtype_code not in (1, 2):
+            raise ValueError(
+                f"Invalid dtype_code {dtype_code} — expected 1 (float32) or 2 (int32)"
+            )
         n = ncols * nrows
         if dtype_code == 1:
             values = np.frombuffer(f.read(n * 4), dtype=np.float32).copy()
-        elif dtype_code == 2:
+        else:
             values = np.frombuffer(f.read(n * 4), dtype=np.int32).astype(
                 np.float32
             )
-        else:
-            raise ValueError(f"Unknown dtype_code: {dtype_code}")
+        # Validate data length (plain format is always flag=0)
+        if len(values) != n:
+            raise ValueError(
+                f"HXN data length mismatch: got {len(values)} values, "
+                f"expected {n} (width={ncols}, height={nrows})"
+            )
         return cls(
             format="plain",
             version=version,
