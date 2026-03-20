@@ -1164,8 +1164,8 @@ def server(input, output, session):
             layers.insert(0, {"id": "trails", "visible": False})
         await map_widget.partial_update(session, layers)
 
-    async def _agent_only_update(sim, landscape=None):
-        """Send only agents, water layer untouched in JS cache (~5 KB)."""
+    async def _agent_trail_update(sim, landscape=None):
+        """Send agents and trails only — hex grid untouched in JS cache (~5 KB)."""
         layers = [_agent_layer_binary(sim, scale=_cached_scale)]
         if input.show_trails():
             trail_data = trail_buffer.build_paths()
@@ -1230,7 +1230,7 @@ def server(input, output, session):
             if field_name in DYNAMIC_FIELDS:
                 await _color_and_agent_update(sim, landscape=landscape)
             else:
-                await _agent_only_update(sim, landscape=landscape)
+                await _agent_trail_update(sim, landscape=landscape)
 
     # --- Chart helper: Plotly → HTML file + iframe (no widget/comm layer) ---
     def _plotly_iframe(fig, name, height="280px"):
