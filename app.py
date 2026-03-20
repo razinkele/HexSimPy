@@ -1117,35 +1117,50 @@ def server(input, output, session):
             views=[map_view(controller=True)],
         )
 
-    async def _color_and_agent_update(sim, landscape=None):
-        """Send new colors + agents."""
+    async def _hex_color_update(sim, landscape=None):
+        """Rebuild hex grid with new field colors — no set_style, no view state change."""
         is_hexsim = hasattr(sim.mesh, '_edge')
-        if is_hexsim:
-            # SolidPolygonLayer can't do partial color update; do full rebuild
-            await _full_update(sim, landscape=landscape)
-            return
         z, cscale = _resolve_field(sim)
         idx = _water_idx(sim)
-        col_bin = _build_color_binary(sim.mesh, z, cscale, idx)
-        layers = [
-            {"id": "water", "getFillColor": col_bin,
-             "data": {"length": _cached_water_n}},
-            _agent_layer_binary(sim, scale=_cached_scale),
-        ]
+        n = len(idx)
+
+        if is_hexsim:
+            mesh = sim.mesh
+            scale = _cached_scale
+            cx = mesh.centroids[idx, 1] * scale
+            cy = -mesh.centroids[idx, 0] * scale
+            edge_s = mesh._edge * scale
+            verts, start_idx = _build_hex_polygons(cx, cy, edge_s)
+            rgb = _colorscale_rgb(z, cscale)
+            colors = np.column_stack([
+                rgb[idx, 0], rgb[idx, 1], rgb[idx, 2],
+                np.full(n, 220, dtype=np.uint8),
+            ]).astype(np.uint8)
+            water = layer(
+                "SolidPolygonLayer", "water",
+                data={"length": n, "startIndices": start_idx},
+                getPolygon=encode_binary_attribute(verts),
+                getFillColor=encode_binary_attribute(colors),
+                filled=True, extruded=False, pickable=False,
+            )
+            layers = [water]
+        else:
+            col_bin = _build_color_binary(sim.mesh, z, cscale, idx)
+            layers = [{"id": "water", "getFillColor": col_bin,
+                       "data": {"length": _cached_water_n}}]
+
+        # Also send agents + trails to avoid stale state
+        layers.append(_agent_layer_binary(sim, scale=_cached_scale))
         if input.show_trails():
             trail_data = trail_buffer.build_paths()
             if trail_data:
                 layers.insert(0, layer("PathLayer", "trails",
                     data=trail_data,
-                    getPath="@@d.path",
-                    getColor="@@d.color",
-                    widthMinPixels=1,
-                    widthMaxPixels=3,
-                    jointRounded=True,
-                    capRounded=True,
+                    getPath="@@d.path", getColor="@@d.color",
+                    widthMinPixels=1, widthMaxPixels=3,
+                    jointRounded=True, capRounded=True,
                 ))
         else:
-            # Explicitly hide trail layer (shallow merge keeps stale layers visible)
             layers.insert(0, {"id": "trails", "visible": False})
         await map_widget.partial_update(session, layers)
 
