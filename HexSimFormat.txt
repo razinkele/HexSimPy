@@ -1,0 +1,402 @@
+IMPLEMENTATION NOTES (HexSimPy)
+================================
+FILE FORMAT vs RUNTIME CONVENTION:
+  The .hxn file format stores cells in row-major order. The format
+  descriptions below reference flat-top/odd-q column-offset convention
+  for historical context.
+
+  The Python runtime uses POINTY-TOP hex orientation with ODD-ROW offset,
+  matching HexSim 4.0.20's viewer. Neighbor computation and centroid
+  placement both use row-based parity (row % 2).
+
+  The data layout verification (Phase 1a) confirmed which convention
+  the binary data actually follows. See tests/test_hexsim_io.py for
+  the verification evidence.
+
+GridMeta <-> HexMap dimension mapping:
+  GridMeta.ncols = HexMap.height (number of data rows)
+  GridMeta.nrows = HexMap.width  (cells per row / stride)
+  Use GridMeta.data_height / data_width for clarity.
+
+=====================================
+
+The .hxn file used by HexSim stores hexagonal raster data in a compact binary structure. Although the exact specification is not officially documented in detail, the structure is fairly straightforward and follows the pattern used by many GIS raster formats: header → grid metadata → cell value array.
+
+Below is a practical explanation of the typical internal layout and how to parse it in Python.
+
+1. Typical .hxn binary structure
+
+A .hxn file usually contains three logical parts:
+
+[HEADER]
+[GRID METADATA]
+[CELL VALUE ARRAY]
+1. Header
+
+The header identifies the file and basic parameters.
+
+Typical fields (little-endian binary):
+
+Offset	Type	Meaning
+0	int32	file version
+4	int32	grid width (columns)
+8	int32	grid height (rows)
+12	float64	hex cell size
+20	float64	X origin
+28	float64	Y origin
+36	int32	data type (1=float32, 2=int32)
+40	int32	no-data value
+
+Example:
+
+version = 3
+width = 2000
+height = 1500
+cell_size = 100.0
+origin = (500000, 4100000)
+datatype = float32
+nodata = -9999
+2. Grid metadata
+
+Some .hxn files include additional spatial parameters:
+
+Field	Purpose
+hex orientation	flat-top or point-top
+coordinate system ID	projection reference
+time step index	for dynamic maps
+
+Not all files include this block.
+
+3. Cell value array
+
+After the header comes the main data block.
+
+The values are stored as a flat array:
+
+value[0], value[1], value[2] ...
+
+Total elements:
+
+num_cells = width × height
+
+If datatype = float32:
+
+num_bytes = num_cells × 4
+
+Cells are typically stored in row-major order:
+
+row0: c0 c1 c2 c3
+row1: c4 c5 c6 c7
+
+But for hex grids, the rows are offset spatially when visualized.
+
+4. Memory layout example
+
+Example grid:
+
+width = 4
+height = 3
+
+Binary array:
+
+[header]
+1.0 2.0 3.0 4.0
+5.0 6.0 7.0 8.0
+9.0 10.0 11.0 12.0
+
+Interpreted hex grid:
+
+ 1   2   3   4
+   5   6   7   8
+ 9  10  11  12
+5. Parsing .hxn in Python
+Basic reader using struct
+import struct
+import numpy as np
+
+def read_hxn(path):
+
+    with open(path, "rb") as f:
+
+        version = struct.unpack("<i", f.read(4))[0]
+        width = struct.unpack("<i", f.read(4))[0]
+        height = struct.unpack("<i", f.read(4))[0]
+
+        cell_size = struct.unpack("<d", f.read(8))[0]
+        origin_x = struct.unpack("<d", f.read(8))[0]
+        origin_y = struct.unpack("<d", f.read(8))[0]
+
+        dtype_code = struct.unpack("<i", f.read(4))[0]
+        nodata = struct.unpack("<i", f.read(4))[0]
+
+        if dtype_code == 1:
+            dtype = np.float32
+        else:
+            dtype = np.int32
+
+        data = np.fromfile(f, dtype=dtype, count=width * height)
+
+        grid = data.reshape((height, width))
+
+    return {
+        "version": version,
+        "width": width,
+        "height": height,
+        "cell_size": cell_size,
+        "origin": (origin_x, origin_y),
+        "nodata": nodata,
+        "grid": grid
+    }
+
+Usage:
+
+hxn = read_hxn("Habitat.1.hxn")
+
+print(hxn["grid"])
+6. Faster parsing with NumPy
+
+You can skip struct and read directly:
+
+import numpy as np
+
+with open("map.hxn", "rb") as f:
+
+    header = np.fromfile(f, dtype=np.int32, count=3)
+    width = header[1]
+    height = header[2]
+
+    meta = np.fromfile(f, dtype=np.float64, count=3)
+
+    dtype_code = np.fromfile(f, dtype=np.int32, count=1)[0]
+    nodata = np.fromfile(f, dtype=np.int32, count=1)[0]
+
+    data = np.fromfile(f, dtype=np.float32, count=width*height)
+
+grid = data.reshape(height, width)
+7. Visualizing the grid
+
+Example with matplotlib:
+
+import matplotlib.pyplot as plt
+
+plt.imshow(grid)
+plt.colorbar()
+plt.show()
+
+For true hex display you would convert the grid to hexagonal coordinates.
+
+8. Converting to GeoTIFF
+
+If you want GIS compatibility:
+
+import rasterio
+
+with rasterio.open(
+    "map.tif",
+    "w",
+    driver="GTiff",
+    height=height,
+    width=width,
+    count=1,
+    dtype="float32"
+) as dst:
+    dst.write(grid, 1)
+
+✅ If you'd like, I can also show:
+
+The exact hex coordinate math used in HexSim
+
+How to convert .hxn → shapefile hex polygons
+
+A full Python library for reading HexSim landscapes
+
+How to reconstruct the hex geometry (pointy vs flat hex grids).
+
+The exact hex coordinate math used in HexSim
+
+The hex coordinate math used in HexSim follows the standard offset-hex grid system used in many spatial simulations. The stored grid in .hxn is typically row-column indexed, but geometrically it behaves like a true hexagonal lattice.
+
+Below is the math used to convert between grid indices, hex neighbors, and real coordinates.
+
+1. Hex grid coordinate systems
+
+Three coordinate systems are commonly used in hex grids.
+
+1️⃣ Offset coordinates (used in storage)
+
+This is how most .hxn data is stored.
+
+(row, column)
+
+Example layout:
+
+  (0,0) (0,1) (0,2)
+    (1,0) (1,1) (1,2)
+  (2,0) (2,1) (2,2)
+
+Every second row is shifted horizontally.
+
+Two variants exist:
+
+odd-row offset
+
+even-row offset
+
+HexSim usually uses odd-row offset.
+
+2. Neighbor calculation
+
+Each hex cell has 6 neighbors.
+
+For odd-row offset grids, the neighbor offsets depend on row parity.
+
+Even rows
+(-1,0) (-1,1)
+(0,-1)  (0,1)
+(1,0)  (1,1)
+Odd rows
+(-1,-1) (-1,0)
+(0,-1)   (0,1)
+(1,-1)  (1,0)
+
+Python example:
+
+def hex_neighbors(r, c):
+
+    if r % 2 == 0:  # even row
+        dirs = [(-1,0), (-1,1), (0,-1), (0,1), (1,0), (1,1)]
+    else:           # odd row
+        dirs = [(-1,-1), (-1,0), (0,-1), (0,1), (1,-1), (1,0)]
+
+    return [(r+dr, c+dc) for dr,dc in dirs]
+3. Converting grid index → real coordinates
+
+Each hex has size S (distance from center to side).
+
+For flat-top hexagons (used in many ecological models):
+
+width = 2S
+height = √3 S
+horizontal_spacing = 3/2 S
+vertical_spacing = √3 S
+Coordinate formula
+
+For hex cell (row, col):
+
+x = S * 3/2 * col
+y = S * √3 * (row + 0.5*(col mod 2))
+
+Python version:
+
+import math
+
+def hex_to_xy(row, col, size):
+
+    x = size * 1.5 * col
+    y = size * math.sqrt(3) * (row + 0.5 * (col % 2))
+
+    return x, y
+4. Converting real coordinates → hex index
+
+Reverse conversion:
+
+col = x / (1.5S)
+
+row = (y / (√3 S)) - 0.5*(col mod 2)
+
+Then round to nearest hex.
+
+Example Python:
+
+def xy_to_hex(x, y, size):
+
+    col = int(round(x / (1.5 * size)))
+    row = int(round((y / (math.sqrt(3) * size)) - 0.5*(col % 2)))
+
+    return row, col
+5. Hex distance formula
+
+Movement distance between two hexes uses cube coordinates internally.
+
+First convert (row, col) → cube (x,y,z).
+
+Cube constraint:
+
+x + y + z = 0
+
+Distance formula:
+
+distance = (|x1-x2| + |y1-y2| + |z1-z2|) / 2
+
+Example Python:
+
+def hex_distance(a, b):
+    return (abs(a[0]-b[0]) +
+            abs(a[1]-b[1]) +
+            abs(a[2]-b[2])) // 2
+
+This gives the minimum number of hex steps.
+
+6. Hex movement vectors
+
+Animals moving in HexSim can move along the 6 axial directions.
+
+Movement vectors:
+
+(+1, 0)
+(+1, -1)
+(0, -1)
+(-1, 0)
+(-1, +1)
+(0, +1)
+
+This produces isotropic movement, meaning no directional bias.
+
+7. Real-world coordinate placement
+
+If the model includes a GIS projection:
+
+Xreal = origin_x + x
+Yreal = origin_y + y
+
+Where:
+
+origin_x, origin_y come from the .hxn header.
+
+8. Hex polygon geometry
+
+To draw a hex:
+
+Vertices:
+
+angle = 60° * i
+x_i = cx + S cos(angle)
+y_i = cy + S sin(angle)
+
+Python:
+
+import math
+
+def hex_polygon(cx, cy, size):
+
+    pts = []
+    for i in range(6):
+        angle = math.radians(60*i)
+        x = cx + size * math.cos(angle)
+        y = cy + size * math.sin(angle)
+        pts.append((x,y))
+
+    return pts
+9. Why HexSim uses hex math
+
+Hex grids provide:
+
+equal neighbor distance
+
+smooth dispersal modeling
+
+fewer directional artifacts than square grids
+
+efficient spatial indexing
+
+This is critical for agent-based wildlife simulations.
