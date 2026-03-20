@@ -444,7 +444,7 @@ class Barrier:
     class_name: str
 
 
-def read_barriers(path: str | Path) -> list[Barrier]:
+def read_barriers(path: str | Path, *, n_hexagons: int | None = None) -> list[Barrier]:
     """Parse an .hbf barrier file.
 
     The file contains C (classification) and E (edge) lines:
@@ -453,6 +453,12 @@ def read_barriers(path: str | Path) -> list[Barrier]:
 
     Returns a list of Barrier with class_name populated from classifications.
     Falls back to empty string if a classification is not defined.
+
+    Parameters
+    ----------
+    n_hexagons : int, optional
+        If provided, validate that all barrier hex_ids are in range [0, n_hexagons)
+        and edge indices are in range [0, 5].
     """
     path = Path(path)
     classifications: dict[int, str] = {}
@@ -482,6 +488,14 @@ def read_barriers(path: str | Path) -> list[Barrier]:
                         class_name=class_name,
                     )
                 )
+
+    if n_hexagons is not None:
+        for b in barriers:
+            if b.hex_id < 0 or b.hex_id >= n_hexagons:
+                raise ValueError(f"Barrier hex_id {b.hex_id} out of bounds (n_hexagons={n_hexagons})")
+            if b.edge < 0 or b.edge > 5:
+                raise ValueError(f"Barrier edge {b.edge} out of range (must be 0-5)")
+
     return barriers
 
 
@@ -508,7 +522,14 @@ class WorldFile:
         lines = Path(path).read_text().strip().splitlines()
         if len(lines) < 6:
             raise ValueError(f"World file needs 6 lines, got {len(lines)}: {path}")
-        vals = [float(line.strip()) for line in lines[:6]]
+        vals = []
+        for i, line in enumerate(lines[:6], start=1):
+            try:
+                vals.append(float(line.strip()))
+            except ValueError:
+                raise ValueError(
+                    f"World file line {i} is not a valid number: {line.strip()!r}"
+                )
         return cls(A=vals[0], D=vals[1], B=vals[2], E=vals[3], C=vals[4], F=vals[5])
 
     def pixel_to_map(self, px, py):

@@ -166,3 +166,48 @@ class TestEventLoadingWarning:
             matching = [x for x in w if "not in EVENT_REGISTRY" in str(x.message)]
             assert len(matching) == 1, f"Expected 1 warning, got {len(matching)}"
             assert "reanimation" in str(matching[0].message)
+
+
+from heximpy.hxnparser import WorldFile
+
+
+class TestWorldFileValidation:
+    """WorldFile.from_file() should validate format."""
+
+    def test_non_numeric_line_raises(self):
+        with tempfile.NamedTemporaryFile(suffix=".bpw", mode="w", delete=False) as f:
+            f.write("1.0\n0.0\n0.0\n-1.0\nNOT_A_NUMBER\n0.0\n")
+            tmp = Path(f.name)
+        try:
+            with pytest.raises(ValueError, match="line"):
+                WorldFile.from_file(tmp)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+
+class TestBarrierFileValidation:
+    """read_barriers() should validate hex_id and edge bounds."""
+
+    def test_out_of_bounds_hex_id_raises(self):
+        from heximpy.hxnparser import read_barriers
+        with tempfile.NamedTemporaryFile(suffix=".hbf", mode="w", delete=False) as f:
+            f.write('C 1 0.0 1.0 "wall"\n')
+            f.write('E 999999 3 1\n')
+            tmp = Path(f.name)
+        try:
+            with pytest.raises(ValueError, match="hex_id.*out of bounds"):
+                read_barriers(tmp, n_hexagons=100)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    def test_invalid_edge_index_raises(self):
+        from heximpy.hxnparser import read_barriers
+        with tempfile.NamedTemporaryFile(suffix=".hbf", mode="w", delete=False) as f:
+            f.write('C 1 0.0 1.0 "wall"\n')
+            f.write('E 5 7 1\n')
+            tmp = Path(f.name)
+        try:
+            with pytest.raises(ValueError, match="edge.*out of range"):
+                read_barriers(tmp, n_hexagons=100)
+        finally:
+            tmp.unlink(missing_ok=True)
