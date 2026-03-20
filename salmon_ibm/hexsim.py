@@ -3,7 +3,7 @@
 Reads EPA HexSim workspaces via ``heximpy.hxnparser`` and constructs a
 water-only hexagonal mesh that duck-types TriMesh for the simulation loop.
 
-HexSim uses **flat-top hexagons** in an odd-q column-offset grid.
+HexSim uses **pointy-top hexagons** in an odd-row offset grid.
 Hex edge length ≈ 13.876 m (hex area ≈ 500 m²).
 
 Note: PATCH_HEXMAP files store dimensions transposed relative to
@@ -22,26 +22,45 @@ from heximpy.hxnparser import GridMeta, HexMap, Workspace, read_barriers
 
 # ── Hex grid geometry ────────────────────────────────────────────────────────
 
+def _rowcol_to_flat_narrow(row: int, col: int, width: int) -> int:
+    """Convert (row, col) to flat index for narrow grid (flag=1).
+
+    Even rows have ``width`` cells, odd rows have ``width - 1`` cells.
+    """
+    full_pairs = row // 2
+    flat = full_pairs * (2 * width - 1)
+    if row % 2 == 1:
+        flat += width
+    flat += col
+    return flat
+
+
 def _hex_neighbors_offset(row: int, col: int, ncols: int, nrows: int,
-                          n_data: int) -> list[int]:
+                          n_data: int, flag: int = 0) -> list[int]:
     """Compute flat-index neighbors for (row, col) in an offset hex grid.
 
-    Uses flat-top odd-q column-offset convention (HexSim standard):
-        Even cols: neighbors at (r-1,c),(r+1,c), (r,c-1),(r,c+1), (r-1,c-1),(r-1,c+1)
-        Odd cols:  neighbors at (r-1,c),(r+1,c), (r,c-1),(r,c+1), (r+1,c-1),(r+1,c+1)
+    Uses pointy-top odd-row offset convention:
+        Even rows (NOT shifted): diagonal neighbors at lower col indices
+        Odd rows (shifted RIGHT): diagonal neighbors at higher col indices
 
     Reference: https://www.redblobgames.com/grids/hexagons/#coordinates-offset
     """
-    if col % 2 == 0:  # even column
-        offsets = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1)]
-    else:             # odd column
-        offsets = [(-1, 0), (1, 0), (0, -1), (0, 1), (1, -1), (1, 1)]
+    if row % 2 == 0:  # even row (not shifted)
+        offsets = [(-1, -1), (-1, 0), (0, -1), (0, 1), (1, -1), (1, 0)]
+    else:             # odd row (shifted right)
+        offsets = [(-1, 0), (-1, 1), (0, -1), (0, 1), (1, 0), (1, 1)]
 
     result = []
     for dr, dc in offsets:
         nr, nc = row + dr, col + dc
         if 0 <= nr < nrows and 0 <= nc < ncols:
-            flat = nr * ncols + nc
+            # For narrow grids, odd rows have width-1 cells
+            if flag == 1 and nr % 2 == 1 and nc >= ncols - 1:
+                continue
+            if flag == 0:
+                flat = nr * ncols + nc
+            else:
+                flat = _rowcol_to_flat_narrow(nr, nc, ncols)
             if flat < n_data:
                 result.append(flat)
     return result
@@ -233,7 +252,7 @@ class HexMesh:
             fi = int(water_flat[ci])
             r = int(data_rows[ci])
             c = int(data_cols[ci])
-            full_nbrs = _hex_neighbors_offset(r, c, data_stride, data_nrows, n_data)
+            full_nbrs = _hex_neighbors_offset(r, c, data_stride, data_nrows, n_data, extent_hm.flag)
             ni = 0
             for fn in full_nbrs:
                 if fn in full_to_compact:

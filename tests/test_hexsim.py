@@ -94,28 +94,29 @@ def test_workspace_from_dir():
     assert len(ws.barriers) > 0
 
 
-# ── Flat-top neighbor convention tests ────────────────────────────────────────
+# ── Pointy-top odd-row neighbor convention tests ──────────────────────────────
 
-def test_flat_top_odd_q_neighbors():
-    """Odd-q flat-top: even column neighbors differ from odd column."""
+def test_pointy_top_odd_row_neighbors():
+    """Odd-row pointy-top: even row neighbors differ from odd row neighbors."""
     ncols, nrows, n_data = 10, 10, 100
-    # Even column (col=4): neighbors should shift up for diagonal
-    nbrs_even = _hex_neighbors_offset(5, 4, ncols, nrows, n_data)
-    # Odd column (col=5): neighbors should shift down for diagonal
-    nbrs_odd = _hex_neighbors_offset(5, 5, ncols, nrows, n_data)
+    # Row 5 is ODD (shifted right): diagonals go to col+1 direction
+    nbrs_r5c4 = _hex_neighbors_offset(5, 4, ncols, nrows, n_data)
+    nbrs_r5c5 = _hex_neighbors_offset(5, 5, ncols, nrows, n_data)
     # Both should have 6 neighbors (interior cell)
-    assert len(nbrs_even) == 6
-    assert len(nbrs_odd) == 6
-    # Even col: diagonals go to row-1 (up)
-    # Expected: (4,4),(6,4),(5,3),(5,5),(4,3),(4,5) → flat: 44,64,53,55,43,45
-    assert 44 in nbrs_even  # (row-1, same col)
-    assert 64 in nbrs_even  # (row+1, same col)
-    assert 43 in nbrs_even  # (row-1, col-1) — even col shifts up
-    # Odd col: diagonals go to row+1 (down)
-    # Expected: (4,5),(6,5),(5,4),(5,6),(6,4),(6,6) → flat: 45,65,54,56,64,66
-    assert 45 in nbrs_odd   # (row-1, same col)
-    assert 65 in nbrs_odd   # (row+1, same col)
-    assert 64 in nbrs_odd   # (row+1, col-1) — odd col shifts down
+    assert len(nbrs_r5c4) == 6
+    assert len(nbrs_r5c5) == 6
+    # Odd row (row=5), col=4: diagonals go to (row±1, col) and (row±1, col+1)
+    # Expected: (4,4),(4,5),(5,3),(5,5),(6,4),(6,5) → flat: 44,45,53,55,64,65
+    assert 44 in nbrs_r5c4  # (row-1, col)
+    assert 45 in nbrs_r5c4  # (row-1, col+1) — odd row shifts right
+    assert 64 in nbrs_r5c4  # (row+1, col)
+    assert 65 in nbrs_r5c4  # (row+1, col+1) — odd row shifts right
+    # Odd row (row=5), col=5: same pattern
+    # Expected: (4,5),(4,6),(5,4),(5,6),(6,5),(6,6) → flat: 45,46,54,56,65,66
+    assert 45 in nbrs_r5c5  # (row-1, col)
+    assert 46 in nbrs_r5c5  # (row-1, col+1) — odd row shifts right
+    assert 65 in nbrs_r5c5  # (row+1, col)
+    assert 66 in nbrs_r5c5  # (row+1, col+1) — odd row shifts right
 
 
 # ── HexMesh tests ────────────────────────────────────────────────────────────

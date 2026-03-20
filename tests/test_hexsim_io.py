@@ -90,3 +90,58 @@ class TestDataLayoutVerification:
                     bad.append((r, c, nr, nc, dist, expected_dist))
 
         assert not bad, f"Non-adjacent neighbors found: {bad[:5]}"
+
+
+from salmon_ibm.hexsim import _hex_neighbors_offset
+
+
+class TestNarrowGridNeighbors:
+    """Test neighbor computation for narrow grids (flag=1)."""
+
+    def test_rowcol_to_flat_narrow_basic(self):
+        """Verify flat index computation for narrow grid, width=5."""
+        from salmon_ibm.hexsim import _rowcol_to_flat_narrow
+        assert _rowcol_to_flat_narrow(0, 0, 5) == 0
+        assert _rowcol_to_flat_narrow(0, 4, 5) == 4
+        assert _rowcol_to_flat_narrow(1, 0, 5) == 5
+        assert _rowcol_to_flat_narrow(1, 3, 5) == 8
+        assert _rowcol_to_flat_narrow(2, 0, 5) == 9
+        assert _rowcol_to_flat_narrow(2, 4, 5) == 13
+
+    def test_neighbor_symmetry_narrow_grid(self):
+        """If A is neighbor of B, then B must be neighbor of A."""
+        hm = HexMap.from_file(NARROW_HXN)
+        h, w, flag = hm.height, hm.width, hm.flag
+        n_data = len(hm.values)
+
+        row_list, col_list = [], []
+        for r in range(h):
+            rw = w if r % 2 == 0 else w - 1
+            row_list.append(np.full(rw, r, dtype=np.int32))
+            col_list.append(np.arange(rw, dtype=np.int32))
+        all_rows = np.concatenate(row_list)
+        all_cols = np.concatenate(col_list)
+
+        rng = np.random.default_rng(42)
+        sample = rng.choice(len(all_rows), size=min(500, len(all_rows)), replace=False)
+
+        asymmetric = []
+        for idx in sample:
+            r, c = int(all_rows[idx]), int(all_cols[idx])
+            nbrs = _hex_neighbors_offset(r, c, w, h, n_data, flag)
+            for nbr_flat in nbrs:
+                nr, nc = int(all_rows[nbr_flat]), int(all_cols[nbr_flat])
+                reverse_nbrs = _hex_neighbors_offset(nr, nc, w, h, n_data, flag)
+                if idx not in reverse_nbrs:
+                    asymmetric.append((idx, r, c, nbr_flat, nr, nc))
+
+        assert not asymmetric, f"Asymmetric neighbors: {asymmetric[:5]}"
+
+    def test_interior_cells_have_six_neighbors(self):
+        """Interior cells in narrow grid should have exactly 6 neighbors."""
+        hm = HexMap.from_file(NARROW_HXN)
+        h, w, flag = hm.height, hm.width, hm.flag
+        n_data = len(hm.values)
+
+        nbrs = _hex_neighbors_offset(4, 2, w, h, n_data, flag)
+        assert len(nbrs) == 6, f"Expected 6 neighbors, got {len(nbrs)}"
