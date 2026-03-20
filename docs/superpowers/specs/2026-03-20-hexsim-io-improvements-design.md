@@ -8,10 +8,10 @@
 
 Review of the HexSim I/O codebase identified six improvement areas:
 
-1. **Narrow-grid neighbor bug** — `_hex_neighbors_offset()` uses `flat = nr * ncols + nc` which is wrong for flag=1 grids (5 of 8 workspaces, ~70 scenarios)
+1. **Narrow-grid neighbor bug** — `_hex_neighbors_offset()` uses `flat = nr * ncols + nc` which is wrong for flag=1 grids (majority of workspaces). Same bug exists in `HexMap.to_geodataframe()` and `to_geotiff()` in `hxnparser.py`.
 2. **GridMeta/HexMap dimension swap** — `GridMeta.ncols = HexMap.height` is only documented in comments, not enforced
 3. **No I/O validation** — corrupt files, dimension mismatches, and missing elements produce silent failures
-4. **XML parser stubs** — `build_events_from_xml()` is a stub; 1 event type (`reanimation`) silently becomes a no-op
+4. **XML event loading gaps** — Two separate issues: (a) `build_events_from_xml()` in `xml_parser.py` is a dead-code stub not yet wired into the runtime path; (b) `scenario_loader.py:_build_single_event()` silently replaces unregistered event types (e.g., `reanimation`) with no-op DataProbeEvent wrappers (the name prefix `[unimplemented:{etype}]` is set but no warning is emitted)
 5. **Temperature CSV fragility** — no header, no dimension validation
 6. **Documentation drift** — `HexSimFormat.txt` describes flat-top/odd-q but code uses pointy-top/odd-row
 
@@ -44,8 +44,16 @@ Existing .hxn files produced by HexSim 4.0.20 Java application are treated as gr
       flat += col
       return flat
   ```
-- Also validate that the neighbor offsets match the pointy-top odd-row convention used by the display and centroid code (not the flat-top odd-q convention documented in the function's docstring)
+- Replace the neighbor offset tables with pointy-top odd-row convention (matching the display and centroid code). The current function uses flat-top odd-q column-offset (`col % 2`) but must use odd-row (`row % 2`):
+  ```python
+  # Pointy-top, odd-row offset (ref: redblobgames.com/grids/hexagons)
+  if row % 2 == 0:  # even row
+      offsets = [(-1, 0), (-1, 1), (0, -1), (0, 1), (1, 0), (1, 1)]
+  else:             # odd row
+      offsets = [(-1, -1), (-1, 0), (0, -1), (0, 1), (1, -1), (1, 0)]
+  ```
 - Update all callers in `HexMesh.from_hexsim()` to pass the flag
+- Also fix `HexMap.to_geodataframe()` and `HexMap.to_geotiff()` in `heximpy/hxnparser.py` which use the same incorrect `flat = row * width + col` formula for narrow grids
 
 **Acceptance criteria:**
 - Neighbor symmetry holds for all cells in narrow-grid workspaces
@@ -71,10 +79,18 @@ Existing .hxn files produced by HexSim 4.0.20 Java application are treated as gr
       """Cells per row / stride (= HexMap.width = GridMeta.nrows)."""
       return self.nrows
   ```
-- Add an assertion in `HexMesh.from_hexsim()` where GridMeta and HexMap are joined:
+- Add a validation check in `HexMesh.from_hexsim()` where GridMeta and HexMap are joined (use `raise ValueError`, not `assert`, since assertions can be disabled with `python -O`):
   ```python
-  assert grid.data_height == extent_hm.height, f"GridMeta/HexMap height mismatch"
-  assert grid.data_width == extent_hm.width, f"GridMeta/HexMap width mismatch"
+  if grid.data_height != extent_hm.height:
+      raise ValueError(
+          f"GridMeta/HexMap height mismatch: grid.data_height={grid.data_height} "
+          f"!= hexmap.height={extent_hm.height}"
+      )
+  if grid.data_width != extent_hm.width:
+      raise ValueError(
+          f"GridMeta/HexMap width mismatch: grid.data_width={grid.data_width} "
+          f"!= hexmap.width={extent_hm.width}"
+      )
   ```
 
 **Acceptance criteria:**
@@ -87,7 +103,7 @@ Existing .hxn files produced by HexSim 4.0.20 Java application are treated as gr
 
 **Test fixtures** (selected from existing workspaces):
 - Wide grid PATCH_HEXMAP: `HexSim Examples/Spatial Data/Hexagons/Habitat/Habitat.1.hxn`
-- Narrow grid PATCH_HEXMAP: `Columbia River Migration Model/Spatial Data/Hexagons/...`
+- Narrow grid PATCH_HEXMAP: `Columbia River Migration Model/Spatial Data/Hexagons/Extent/Extent.1.hxn` (or first available layer)
 - Plain HXN: from TestWorkspace if available, otherwise create one via `HexMap.to_file()`
 - GridMeta: `.grid` files from both wide and narrow workspaces
 
@@ -113,16 +129,17 @@ Existing .hxn files produced by HexSim 4.0.20 Java application are treated as gr
   if flag == 0:
       expected = width * height
   else:
-      expected = (height // 2) * width + ((height + 1) // 2) * (width - 1)  # even rows: width, odd: width-1
+      # Narrow grid: even rows (0-indexed) have `width` cells, odd rows have `width-1`
+      n_even = (height + 1) // 2   # ceil(height / 2)
+      n_odd = height // 2          # floor(height / 2)
+      expected = n_even * width + n_odd * (width - 1)
   ```
-  Wait — narrow grids: even rows have `width` cells, odd rows have `width-1`.
-  For `height` rows: `ceil(height/2) * width + floor(height/2) * (width-1)`
 - Verify `len(values) == expected`, raise `ValueError` with details on mismatch
 - Verify dtype_code is 1 or 2 (already done, confirm)
 
 **`HexMap.to_file()` — write validation:**
-- Assert `len(self.values) == self.n_hexagons` before writing
-- Raise `ValueError("Cannot write HexMap: data length {len} != expected {n_hexagons}")` on mismatch
+- Verify `len(self.values) == self.n_hexagons` before writing
+- Raise `ValueError(f"Cannot write HexMap: data length {len(self.values)} != expected {self.n_hexagons}")` on mismatch
 
 **`GridMeta.from_file()` — physical plausibility:**
 - `x_extent > 0`, `y_extent > 0`, `row_spacing > 0`, `edge > 0`
@@ -153,7 +170,7 @@ Existing .hxn files produced by HexSim 4.0.20 Java application are treated as gr
 - Raise `ValueError("Missing required XML element: <{name}>")` if absent
 
 **Event loading transparency** (scenario_loader.py):
-- When an event type falls through to the DataProbeEvent no-op wrapper, emit `warnings.warn()`:
+- The existing code already prefixes unregistered events with `[unimplemented:{etype}]` in the event name. Augment this with `warnings.warn()` so the message is visible outside of debug inspection:
   ```
   "Event type '{etype}' not in EVENT_REGISTRY — replaced with no-op. Event: {name}"
   ```
@@ -238,6 +255,8 @@ Refactor `_build_single_event()` to:
 3. Call `cls.from_descriptor(descriptor)` — each event class implements this classmethod
 4. The loader has no event-type-specific parameter mapping; it's just a dispatcher
 
+**Breaking change:** Existing event classes currently use `__init__` with `**params` keyword unpacking (called from `scenario_loader.py`). Adding `from_descriptor()` is a new classmethod on each event class. The migration strategy: add `from_descriptor()` to each registered event class while keeping `__init__` unchanged, then update `_build_single_event()` to call `from_descriptor()` instead of `cls(**params)`. Event classes that need modification: all 16 registered types in `events_builtin.py`, `events_hexsim.py`, `events_phase3.py`, and `interactions.py`.
+
 This means adding a new event type requires:
 1. Add `_parse_<type>_params()` in xml_parser.py
 2. Add `<Type>EventDescriptor` in event_descriptors.py
@@ -270,6 +289,8 @@ GridMeta ↔ HexMap dimension mapping:
 
 All tests use existing HexSim 4.0.20 workspace files as ground-truth fixtures.
 
+**Test command:** `conda run -n shiny python -m pytest tests/ -v`
+
 | Phase | Test Type | Files |
 |-------|-----------|-------|
 | 1 | Round-trip fidelity, neighbor symmetry, dimension consistency | `tests/test_hexsim_io.py` |
@@ -288,8 +309,8 @@ All tests use existing HexSim 4.0.20 workspace files as ground-truth fixtures.
 
 | File | Phase | Changes |
 |------|-------|---------|
-| `salmon_ibm/hexsim.py` | 1a, 1b | Fix neighbor function, add assertions |
-| `heximpy/hxnparser.py` | 1b, 2a, 2d | Add data_height/data_width, read/write validation |
+| `salmon_ibm/hexsim.py` | 1a, 1b | Fix neighbor function, add dimension validation |
+| `heximpy/hxnparser.py` | 1a, 1b, 2a, 2d | Fix narrow-grid in to_geodataframe/to_geotiff, add data_height/data_width, read/write validation |
 | `tests/test_hexsim_io.py` | 1c | New: ground-truth fixture tests |
 | `salmon_ibm/hexsim_env.py` | 2b | Temperature CSV validation |
 | `salmon_ibm/xml_parser.py` | 2c, 3b | Required element checks, per-type extractors |
