@@ -1036,7 +1036,7 @@ def server(input, output, session):
         n = int(sim.pool.alive.sum())
         changed = n != _prev_agent_count
         _prev_agent_count = n
-        return not changed
+        return changed
 
     def _agent_layer_binary(sim, scale=1.0, use_transitions=False):
         pos_bin, col_bin, n = _build_agent_binary(sim, sim.mesh, scale=scale)
