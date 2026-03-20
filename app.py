@@ -1223,14 +1223,11 @@ def server(input, output, session):
         elif field_changed:
             _cached_field = field_name
             _cached_scale = scale
-            await _color_and_agent_update(sim, landscape=landscape)
+            await _hex_color_update(sim, landscape=landscape)
         else:
-            # Step only — choose path based on field dynamism
+            # Step only — agents + trails, hex grid untouched
             _cached_scale = scale
-            if field_name in DYNAMIC_FIELDS:
-                await _color_and_agent_update(sim, landscape=landscape)
-            else:
-                await _agent_trail_update(sim, landscape=landscape)
+            await _agent_trail_update(sim, landscape=landscape)
 
     # --- Chart helper: Plotly → HTML file + iframe (no widget/comm layer) ---
     def _plotly_iframe(fig, name, height="280px"):
