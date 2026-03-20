@@ -1,10 +1,11 @@
 """Ground-truth HexSim I/O tests using HexSim 4.0.20 workspace fixtures."""
+import tempfile
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from heximpy.hxnparser import GridMeta, HexMap, Workspace
+from heximpy.hxnparser import GridMeta, HexMap, Workspace, read_barriers
 
 # ── Fixture paths ────────────────────────────────────────────────────────────
 
@@ -193,3 +194,64 @@ class TestDimensionSwapSafety:
         hm = HexMap.from_file(WIDE_HXN)
         assert grid.data_height == hm.height
         assert grid.data_width == hm.width
+
+
+class TestRoundTripFidelity:
+    """Write → read round-trip must preserve values exactly."""
+
+    def test_wide_grid_roundtrip(self):
+        hm = HexMap.from_file(WIDE_HXN)
+        with tempfile.NamedTemporaryFile(suffix=".hxn", delete=False) as f:
+            tmp = Path(f.name)
+        try:
+            hm.to_file(tmp)
+            hm2 = HexMap.from_file(tmp)
+            np.testing.assert_array_equal(hm.values, hm2.values)
+            assert hm.width == hm2.width
+            assert hm.height == hm2.height
+            assert hm.flag == hm2.flag
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    def test_narrow_grid_roundtrip(self):
+        hm = HexMap.from_file(NARROW_HXN)
+        with tempfile.NamedTemporaryFile(suffix=".hxn", delete=False) as f:
+            tmp = Path(f.name)
+        try:
+            hm.to_file(tmp)
+            hm2 = HexMap.from_file(tmp)
+            np.testing.assert_array_equal(hm.values, hm2.values)
+            assert hm.width == hm2.width
+            assert hm.height == hm2.height
+            assert hm.flag == hm2.flag
+        finally:
+            tmp.unlink(missing_ok=True)
+
+
+class TestNarrowGridCellCount:
+    """Verify n_hexagons matches actual data array length."""
+
+    def test_narrow_grid_cell_count(self):
+        hm = HexMap.from_file(NARROW_HXN)
+        assert hm.n_hexagons == len(hm.values), (
+            f"n_hexagons={hm.n_hexagons} != len(values)={len(hm.values)}"
+        )
+
+    def test_wide_grid_cell_count(self):
+        hm = HexMap.from_file(WIDE_HXN)
+        assert hm.n_hexagons == len(hm.values)
+        assert hm.n_hexagons == hm.width * hm.height
+
+
+class TestBarrierFileParsing:
+    """Verify barrier file entries are within grid bounds."""
+
+    @pytest.mark.skipif(not BARRIER_FILE.exists(), reason="Barrier file not available")
+    def test_barrier_hex_ids_in_bounds(self):
+        barriers = read_barriers(BARRIER_FILE)
+        grid = GridMeta.from_file(NARROW_GRID)
+        hm = HexMap.from_file(NARROW_HXN)
+        n_hex = hm.n_hexagons
+        for b in barriers:
+            assert 0 <= b.hex_id < n_hex, f"Barrier hex_id {b.hex_id} out of bounds"
+            assert 0 <= b.edge <= 5, f"Barrier edge {b.edge} out of range"
