@@ -193,6 +193,18 @@ class HexMesh:
         data_stride = extent_hm.width   # columns per data-row
         data_nrows = extent_hm.height   # number of data-rows
 
+        # Validate GridMeta ↔ HexMap dimension mapping
+        if ws.grid.data_height != extent_hm.height:
+            raise ValueError(
+                f"GridMeta/HexMap height mismatch: grid.data_height={ws.grid.data_height} "
+                f"!= hexmap.height={extent_hm.height}"
+            )
+        if ws.grid.data_width != extent_hm.width:
+            raise ValueError(
+                f"GridMeta/HexMap width mismatch: grid.data_width={ws.grid.data_width} "
+                f"!= hexmap.width={extent_hm.width}"
+            )
+
         # Water mask: any nonzero value = water
         water_flat = np.where(extent != 0.0)[0]
         n_water = len(water_flat)

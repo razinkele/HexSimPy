@@ -175,3 +175,21 @@ class TestHxnparserNarrowGrid:
             pytest.skip("Not a narrow grid")
         with pytest.raises(ValueError, match="narrow"):
             hm.to_geotiff("/tmp/test.tif")
+
+
+class TestDimensionSwapSafety:
+    """Test GridMeta ↔ HexMap dimension mapping."""
+
+    def test_data_height_width_properties(self):
+        """GridMeta.data_height/data_width match HexMap.height/width."""
+        grid = GridMeta.from_file(NARROW_GRID)
+        hm = HexMap.from_file(NARROW_HXN)
+        assert grid.data_height == hm.height
+        assert grid.data_width == hm.width
+
+    def test_wide_grid_dimensions(self):
+        """Same check for wide grid."""
+        grid = GridMeta.from_file(WIDE_GRID)
+        hm = HexMap.from_file(WIDE_HXN)
+        assert grid.data_height == hm.height
+        assert grid.data_width == hm.width

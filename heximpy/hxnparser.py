@@ -356,6 +356,16 @@ class GridMeta:
     n_hexes: int = 0
     flag: int = 0
 
+    @property
+    def data_height(self) -> int:
+        """Number of data rows (= HexMap.height = GridMeta.ncols)."""
+        return self.ncols
+
+    @property
+    def data_width(self) -> int:
+        """Cells per row / stride (= HexMap.width = GridMeta.nrows)."""
+        return self.nrows
+
     @classmethod
     def from_file(cls, path: str | Path) -> GridMeta:
         """Read a PATCH_GRID (.grid) file (67-byte header).
