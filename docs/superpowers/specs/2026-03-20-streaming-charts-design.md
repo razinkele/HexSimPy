@@ -110,7 +110,7 @@ async def _push_chart_data(session, sim):
         n_arrived = int(getattr(pool, 'arrived', np.zeros(1)).sum())
 
         # Behavior counts — pool.behavior uses int indices:
-        #   0=Hold, 1=Random/Downstream, 2=CWR, 3=Upstream, 4=Downstream
+        #   0=Hold, 1=Random, 2=CWR, 3=Upstream, 4=Downstream
         # Map to named keys for JS
         beh = pool.behavior[alive_mask] if n_alive > 0 else np.array([])
         BEH_MAP = {3: "upstream", 4: "downstream", 0: "hold", 1: "random", 2: "cwr"}
@@ -137,8 +137,9 @@ async def _push_chart_data(session, sim):
             "behaviors": beh_counts,
             "migration_bins": bin_counts.tolist(),
         })
-    except Exception:
-        pass  # Don't crash the simulation loop on chart push failure
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).debug("chart push failed: %s", exc)
 ```
 
 **Note on energy chart:** The current app has a 3rd chart showing mean energy density (kJ/g). This spec intentionally replaces it with Migration Progress (upstream distance histogram), which better demonstrates the spatial model behavior. The energy chart remains available in the existing Charts tab during the migration period. If energy data is needed in the streaming panel later, add `"mean_ed": float(pool.energy[alive_mask].mean())` to the push message and a 4th chart column.
@@ -167,8 +168,7 @@ sim._migration_bins = np.linspace(0, max_dist, 51)  # 50 bins
 sim._upstream_distances = up_hm.values[sim.mesh._water_full_idx] if up_hm else sim.mesh.centroids[:, 0]
 ```
 
-**Backpressure:** During fast Run loops (speed > 5), throttle chart pushes to every Nth step (e.g., `if sim.current_t % max(1, speed // 2) == 0`). This prevents WebSocket message queue buildup while still providing smooth visual updates.
-```
+**Backpressure:** During fast Run loops (speed > 5), throttle chart pushes to every Nth step (e.g., `if sim.current_t % max(1, speed // 2) == 0`). This prevents WebSocket message queue buildup while still providing smooth visual updates. **Always push on the final step** (simulation complete or all agents arrived/dead) regardless of throttle, so the charts show the end state.
 
 ---
 
