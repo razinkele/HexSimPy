@@ -14,6 +14,17 @@ from heximpy.hxnparser import HexMap
 from salmon_ibm.hexsim import HexMesh
 
 
+def _validate_temp_table(data: np.ndarray, n_zones: int) -> None:
+    """Validate temperature lookup table dimensions."""
+    if data.ndim != 2:
+        raise ValueError(f"Temperature CSV must be 2D, got shape {data.shape}")
+    if data.shape[0] != n_zones:
+        raise ValueError(
+            f"Temperature CSV shape {data.shape} doesn't match "
+            f"expected {n_zones} zones (rows). Got {data.shape[0]} rows."
+        )
+
+
 class HexSimEnvironment:
     """Environmental forcing from HexSim zone-based data.
 
@@ -47,6 +58,8 @@ class HexSimEnvironment:
                 # CSV has no header row; each row = a zone, each column = a timestep
                 self._temp_table = np.loadtxt(csv_path, delimiter=",",
                                               dtype=np.float32)
+                n_zones_found = int(self._zone_ids.max()) + 1
+                _validate_temp_table(self._temp_table, n_zones_found)
                 # Shape: (n_zones, n_timesteps)
                 self.n_timesteps = self._temp_table.shape[1]
                 self._has_temperature = True

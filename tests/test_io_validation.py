@@ -114,3 +114,13 @@ class TestGridMetaValidation:
                 GridMeta.from_file(tmp)
         finally:
             tmp.unlink(missing_ok=True)
+
+
+class TestTemperatureCSVValidation:
+    """HexSimEnvironment should validate temperature CSV shape."""
+
+    def test_wrong_shape_raises(self):
+        from salmon_ibm.hexsim_env import _validate_temp_table
+        data = np.zeros((3, 10), dtype=np.float32)
+        with pytest.raises(ValueError, match="Temperature CSV shape"):
+            _validate_temp_table(data, n_zones=5)
