@@ -48,3 +48,30 @@ class TestEventDescriptors:
             accumulator_refs=["age", "energy"],
         )
         assert d.accumulator_refs == ["age", "energy"]
+
+
+import xml.etree.ElementTree as ET
+
+from salmon_ibm.xml_parser import _parse_event_to_descriptor
+
+
+class TestEventParameterExtraction:
+    """Per-type XML parameter extraction produces correct descriptors."""
+
+    def test_parse_move_event(self):
+        xml_str = """
+        <event timestep="5">
+            <moveEvent>
+                <eventName>Fish Migration</eventName>
+                <population>chinook</population>
+                <enabled>true</enabled>
+            </moveEvent>
+        </event>
+        """
+        elem = ET.fromstring(xml_str)
+        desc = _parse_event_to_descriptor(elem)
+        assert isinstance(desc, MoveEventDescriptor)
+        assert desc.name == "Fish Migration"
+        assert desc.event_type == "move"
+        assert desc.timestep == 5
+        assert desc.population_name == "chinook"

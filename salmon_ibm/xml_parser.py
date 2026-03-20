@@ -5,6 +5,8 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
+from salmon_ibm.event_descriptors import DESCRIPTOR_REGISTRY, EventDescriptor
+
 
 def load_scenario_xml(path: str | Path) -> dict:
     """Parse a HexSim scenario XML file into a structured config dict.
@@ -313,6 +315,40 @@ _EVENT_TAG_MAP = {
     "dataProbeEvent": "data_probe",
     "reanimationEvent": "reanimation",
 }
+
+
+def _parse_event_to_descriptor(event_elem) -> EventDescriptor:
+    """Parse an <event> XML element into a typed EventDescriptor."""
+    timestep = int(event_elem.get("timestep", "0"))
+
+    for child in event_elem:
+        tag = child.tag
+        if tag in _EVENT_TAG_MAP:
+            etype = _EVENT_TAG_MAP[tag]
+            name = ""
+            pop_name = ""
+            enabled = True
+            for sub in child:
+                if sub.tag == "eventName":
+                    name = sub.text or ""
+                elif sub.tag == "population":
+                    pop_name = sub.text or ""
+                elif sub.tag == "enabled":
+                    enabled = (sub.text or "").lower() == "true"
+
+            desc_cls = DESCRIPTOR_REGISTRY.get(etype, EventDescriptor)
+            return desc_cls(
+                name=name,
+                event_type=etype,
+                timestep=timestep,
+                population_name=pop_name,
+                enabled=enabled,
+            )
+
+    return EventDescriptor(
+        name="unknown", event_type="unknown",
+        timestep=timestep, population_name="",
+    )
 
 
 def _parse_root_events(root) -> list[dict]:
