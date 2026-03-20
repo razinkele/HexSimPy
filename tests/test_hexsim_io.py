@@ -145,3 +145,33 @@ class TestNarrowGridNeighbors:
 
         nbrs = _hex_neighbors_offset(4, 2, w, h, n_data, flag)
         assert len(nbrs) == 6, f"Expected 6 neighbors, got {len(nbrs)}"
+
+
+class TestHxnparserNarrowGrid:
+    """Test hxnparser methods handle narrow grids correctly."""
+
+    def test_neighbors_pointy_top(self):
+        """HexMap.neighbors() uses pointy-top odd-row convention."""
+        hm = HexMap.from_file(NARROW_HXN)
+        # Even row: diagonal neighbors at lower col indices
+        nbrs_even = hm.neighbors(2, 2)
+        assert (1, 1) in nbrs_even, "Even row upper-left should be (-1,-1)"
+        # Odd row: diagonal neighbors at higher col indices
+        nbrs_odd = hm.neighbors(3, 2)
+        assert (2, 3) in nbrs_odd, "Odd row upper-right should be (-1,+1)"
+
+    def test_to_geodataframe_narrow_grid(self):
+        """to_geodataframe should not crash on narrow grids."""
+        hm = HexMap.from_file(NARROW_HXN)
+        if hm.flag != 1:
+            pytest.skip("Not a narrow grid")
+        gdf = hm.to_geodataframe(edge=1.0, include_empty=False)
+        assert len(gdf) > 0
+
+    def test_to_geotiff_narrow_grid_raises(self):
+        """to_geotiff should raise ValueError for narrow grids."""
+        hm = HexMap.from_file(NARROW_HXN)
+        if hm.flag != 1:
+            pytest.skip("Not a narrow grid")
+        with pytest.raises(ValueError, match="narrow"):
+            hm.to_geotiff("/tmp/test.tif")

@@ -4,10 +4,11 @@ Reads/writes HexSim .hxn (hexmap), .grid (workspace geometry),
 and .hbf (barrier) files. Provides hex grid geometry utilities
 and export to GeoDataFrame, shapefile, GeoTIFF, and CSV.
 
-Uses odd-q column-offset convention (flat-top hexagons), matching
-the HexSim standard: odd columns are shifted down by half a row.
-Note: the older grid.py and HexSim.py.txt use odd-r row-offset
-convention — do not mix neighbor results.
+Neighbor and coordinate methods use pointy-top odd-row offset convention,
+matching HexSim 4.0.20 and verified against the original viewer: odd rows
+are shifted right by half a column width.  The binary file format
+historically stores data in row-major order with even rows of width W
+and odd rows of width W-1 (when flag=1, narrow grid).
 """
 from __future__ import annotations
 
@@ -25,6 +26,22 @@ _HXN_MAGIC = b"PATCH_HEXMAP"       # 12 bytes
 _HXN_HEADER_SIZE = 37              # bytes before float32 data starts
 _GRID_MAGIC = b"PATCH_GRID"        # 10 bytes
 _HISTORY_MARKER = b"HISTORY"
+
+
+def _build_flat_to_rowcol(height: int, width: int, flag: int):
+    """Build flat-index → (row, col) lookup arrays."""
+    if flag == 0:
+        rows = np.repeat(np.arange(height), width)
+        cols = np.tile(np.arange(width), height)
+    else:
+        row_list, col_list = [], []
+        for r in range(height):
+            rw = width if r % 2 == 0 else width - 1
+            row_list.append(np.full(rw, r, dtype=np.int32))
+            col_list.append(np.arange(rw, dtype=np.int32))
+        rows = np.concatenate(row_list)
+        cols = np.concatenate(col_list)
+    return rows, cols
 
 
 @dataclass
@@ -116,22 +133,25 @@ class HexMap:
         return 1.0
 
     def neighbors(self, row: int, col: int) -> list[tuple[int, int]]:
-        """Odd-q column-offset neighbors (flat-top hex)."""
-        if col % 2 == 0:
-            offsets = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1)]
-        else:
-            offsets = [(-1, 0), (1, 0), (0, -1), (0, 1), (1, -1), (1, 1)]
-        return [
-            (row + dr, col + dc)
-            for dr, dc in offsets
-            if 0 <= row + dr < self.height and 0 <= col + dc < self.width
-        ]
+        """Pointy-top odd-row offset neighbors."""
+        if row % 2 == 0:  # even row (not shifted)
+            offsets = [(-1, -1), (-1, 0), (0, -1), (0, 1), (1, -1), (1, 0)]
+        else:             # odd row (shifted right)
+            offsets = [(-1, 0), (-1, 1), (0, -1), (0, 1), (1, 0), (1, 1)]
+        result = []
+        for dr, dc in offsets:
+            nr, nc = row + dr, col + dc
+            if 0 <= nr < self.height and 0 <= nc < self.width:
+                if self.flag == 1 and nr % 2 == 1 and nc >= self.width - 1:
+                    continue
+                result.append((nr, nc))
+        return result
 
     def hex_to_xy(self, row: int, col: int) -> tuple[float, float]:
-        """Convert hex grid (row, col) to Cartesian (x, y)."""
+        """Convert hex grid (row, col) to Cartesian (x, y) — pointy-top odd-row."""
         edge = self._effective_edge()
-        x = 1.5 * edge * col
-        y = math.sqrt(3.0) * edge * (row + 0.5 * (col % 2))
+        x = math.sqrt(3.0) * edge * (col + 0.5 * (row % 2))
+        y = 1.5 * edge * row
         return (x, y)
 
     def xy_to_hex(self, x: float, y: float) -> tuple[int, int]:
@@ -195,12 +215,13 @@ class HexMap:
                 "Pass edge= parameter or load via Workspace for correct geometry."
             )
         try:
+            all_rows, all_cols = _build_flat_to_rowcol(self.height, self.width, self.flag)
             rows_list = []
             for i, val in enumerate(self.values):
                 if not include_empty and val == 0.0:
                     continue
-                r = i // self.width
-                c = i % self.width
+                r = int(all_rows[i])
+                c = int(all_cols[i])
                 poly = Polygon(self.hex_polygon(r, c))
                 rows_list.append(
                     {"hex_id": i + 1, "row": r, "col": c, "value": float(val), "geometry": poly}
@@ -221,6 +242,12 @@ class HexMap:
     def to_geotiff(self, path, *, crs=None):
         """Export as GeoTIFF (rectangular raster approximation)."""
         import rasterio
+
+        if self.flag == 1:
+            raise ValueError(
+                "to_geotiff() is not supported for narrow grids (flag=1) "
+                "— use to_geodataframe() instead"
+            )
 
         grid = self.values.reshape((self.height, self.width))
         edge = self._effective_edge()
