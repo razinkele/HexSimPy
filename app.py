@@ -568,6 +568,7 @@ def server(input, output, session):
     sim_state = reactive.Value(None)
     running = reactive.Value(False)
     history = reactive.Value([])
+    step_stats = reactive.Value({"t": 0, "alive": 0, "dead": 0, "arrived": 0, "behaviors": {}})
     trail_buffer = TrailBuffer()
 
     @reactive.effect
@@ -740,6 +741,17 @@ def server(input, output, session):
                     all_xy = np.column_stack([mesh.centroids[all_tris, 1],
                                               mesh.centroids[all_tris, 0]]).astype(np.float32)
                 trail_buffer.update(sim.pool.alive, all_xy)
+            pool = sim.pool
+            alive_mask = pool.alive.astype(bool)
+            n_alive = int(alive_mask.sum())
+            beh = pool.behavior[alive_mask] if n_alive > 0 else np.array([], dtype=int)
+            step_stats.set({
+                "t": sim.current_t,
+                "alive": n_alive,
+                "dead": len(pool.alive) - n_alive,
+                "arrived": int(getattr(pool, 'n_arrived', 0)),
+                "behaviors": {i: int((beh == i).sum()) for i in range(5)},
+            })
             history.set(sim.history.copy())
             await _push_chart_data(sim)
         except Exception as e:
@@ -778,6 +790,17 @@ def server(input, output, session):
                         all_xy = np.column_stack([mesh.centroids[all_tris, 1],
                                                   mesh.centroids[all_tris, 0]]).astype(np.float32)
                     trail_buffer.update(sim.pool.alive, all_xy)
+                pool = sim.pool
+                alive_mask = pool.alive.astype(bool)
+                n_alive = int(alive_mask.sum())
+                beh = pool.behavior[alive_mask] if n_alive > 0 else np.array([], dtype=int)
+                step_stats.set({
+                    "t": sim.current_t,
+                    "alive": n_alive,
+                    "dead": len(pool.alive) - n_alive,
+                    "arrived": int(getattr(pool, 'n_arrived', 0)),
+                    "behaviors": {i: int((beh == i).sum()) for i in range(5)},
+                })
                 history.set(sim.history.copy())
                 speed_val = speed
                 is_final = sim.current_t >= steps or not sim.pool.alive.any()
@@ -826,26 +849,23 @@ def server(input, output, session):
 
     @render.text
     def status_text():
-        _ = history.get()  # re-render on each step
+        s = step_stats.get()
         sim = sim_state.get()
         if sim is None:
-            return "Awaiting initialization"
-        alive = int(sim.pool.alive.sum())
-        total = sim.pool.n
-        arrived = int(sim.pool.arrived.sum())
-        return f"{alive}/{total} alive \u00b7 {arrived} arrived"
+            return ""
+        total = len(sim.pool.alive)
+        return f"{s['alive']}/{total} alive \u00b7 {s['arrived']} arrived"
 
     @output
     @render.ui
     def live_stats():
-        h = history.get()
-        if not h:
+        s = step_stats.get()
+        if s["t"] == 0 and s["alive"] == 0:
             return ui.div(class_="live-stats-bar")
-        last = h[-1]
-        t = last.get("time", 0)
-        n_alive = last.get("n_alive", 0)
-        n_arrived = last.get("n_arrived", 0)
-        beh = last.get("behavior_counts", {})
+        t = s["t"]
+        n_alive = s["alive"]
+        n_arrived = s["arrived"]
+        beh = s["behaviors"]
         return ui.div(
             ui.span(f"t = {t} h", class_="stat-val"),
             ui.span("|", class_="stat-sep"),
@@ -862,11 +882,8 @@ def server(input, output, session):
 
     @render.text
     def progress_text():
-        _ = history.get()  # re-render on each step
-        sim = sim_state.get()
-        if sim is None:
-            return "t = 0 h"
-        return f"t = {sim.current_t} h"
+        s = step_stats.get()
+        return f"t = {s['t']} h"
 
     @render.ui
     def map_legend():
