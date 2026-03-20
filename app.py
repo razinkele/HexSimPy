@@ -680,6 +680,43 @@ def server(input, output, session):
                 "depth": "Bathymetry",
             })
 
+    async def _push_chart_data(sim):
+        """Push chart update to JS — lightweight JSON, no reactive cascade."""
+        try:
+            pool = sim.pool
+            alive_mask = pool.alive.astype(bool)
+            n_alive = int(alive_mask.sum())
+            n_total = len(pool.alive)
+
+            # Behavior counts: 0=Hold, 1=Random, 2=CWR, 3=Upstream, 4=Downstream
+            beh = pool.behavior[alive_mask] if n_alive > 0 else np.array([], dtype=int)
+            beh_counts = {
+                "upstream": int((beh == 3).sum()),
+                "downstream": int((beh == 4).sum()),
+                "hold": int((beh == 0).sum()),
+                "random": int((beh == 1).sum()),
+                "cwr": int((beh == 2).sum()),
+            }
+
+            # Migration histogram
+            if n_alive > 0 and hasattr(sim, '_upstream_distances'):
+                dists = sim._upstream_distances[pool.tri_idx[alive_mask]]
+                bin_counts, _ = np.histogram(dists, bins=sim._migration_bins)
+            else:
+                bin_counts = np.zeros(50, dtype=int)
+
+            await session.send_custom_message("chart_update", {
+                "t": sim.current_t,
+                "alive": n_alive,
+                "dead": n_total - n_alive,
+                "arrived": int(getattr(pool, 'n_arrived', 0)),
+                "behaviors": beh_counts,
+                "migration_bins": bin_counts.tolist(),
+            })
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).debug("chart push failed: %s", exc)
+
     @reactive.effect
     @reactive.event(input.btn_step)
     async def _step():
@@ -704,6 +741,7 @@ def server(input, output, session):
                                               mesh.centroids[all_tris, 0]]).astype(np.float32)
                 trail_buffer.update(sim.pool.alive, all_xy)
             history.set(sim.history.copy())
+            await _push_chart_data(sim)
         except Exception as e:
             ui.notification_show(f"Step error: {e}", type="error", duration=10)
 
@@ -741,6 +779,10 @@ def server(input, output, session):
                                                   mesh.centroids[all_tris, 0]]).astype(np.float32)
                     trail_buffer.update(sim.pool.alive, all_xy)
                 history.set(sim.history.copy())
+                speed_val = speed
+                is_final = sim.current_t >= steps or not sim.pool.alive.any()
+                if is_final or speed_val <= 5 or sim.current_t % max(1, speed_val // 2) == 0:
+                    await _push_chart_data(sim)
                 await asyncio.sleep(max(0.05, 0.25 - elapsed))
         except Exception as e:
             ui.notification_show(f"Simulation error: {e}", type="error", duration=10)
