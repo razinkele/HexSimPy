@@ -1044,16 +1044,7 @@ def server(input, output, session):
             pickable=True,
         )
 
-    _prev_agent_count = 0
-
-    def _should_transition(sim):
-        nonlocal _prev_agent_count
-        n = int(sim.pool.alive.sum())
-        changed = n != _prev_agent_count
-        _prev_agent_count = n
-        return changed
-
-    def _agent_layer_binary(sim, scale=1.0, use_transitions=False):
+    def _agent_layer_binary(sim, scale=1.0):
         pos_bin, col_bin, n = _build_agent_binary(sim, sim.mesh, scale=scale)
         is_hex = hasattr(sim.mesh, '_edge')
         if n == 0:
@@ -1072,8 +1063,7 @@ def server(input, output, session):
             lineWidthMinPixels=1,
             pickable=True,
         )
-        if use_transitions:
-            props["transitions"] = {"getPosition": {"duration": 200, "type": "spring"}}
+        props["transitions"] = {"getPosition": {"duration": 250, "type": "spring"}}
         return scatterplot_layer("agents", {"length": n}, **props)
 
     async def _full_update(sim, landscape=None):
@@ -1140,7 +1130,7 @@ def server(input, output, session):
         layers = [
             {"id": "water", "getFillColor": col_bin,
              "data": {"length": _cached_water_n}},
-            _agent_layer_binary(sim, scale=_cached_scale, use_transitions=_should_transition(sim)),
+            _agent_layer_binary(sim, scale=_cached_scale),
         ]
         if input.show_trails():
             trail_data = trail_buffer.build_paths()
@@ -1161,7 +1151,7 @@ def server(input, output, session):
 
     async def _agent_only_update(sim, landscape=None):
         """Send only agents, water layer untouched in JS cache (~5 KB)."""
-        layers = [_agent_layer_binary(sim, scale=_cached_scale, use_transitions=_should_transition(sim))]
+        layers = [_agent_layer_binary(sim, scale=_cached_scale)]
         if input.show_trails():
             trail_data = trail_buffer.build_paths()
             if trail_data:
