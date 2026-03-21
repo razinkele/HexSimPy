@@ -1,4 +1,5 @@
 """Estuarine extensions: salinity cost, DO avoidance, seiche pause."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -26,6 +27,10 @@ def do_override(
     lethal: float = 2.0,
     high: float = 4.0,
 ) -> np.ndarray:
+    if lethal > high:
+        raise ValueError(
+            f"lethal threshold ({lethal}) must be <= high threshold ({high})"
+        )
     result = np.full(len(do_mg_l), DO_OK, dtype=int)
     # NaN-safe comparisons: NaN < X is False in numpy, so NaN gets DO_OK
     # This is already the correct behavior, but make it explicit
