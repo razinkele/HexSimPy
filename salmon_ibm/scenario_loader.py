@@ -148,18 +148,20 @@ class ScenarioLoader:
         acc_defs = []
         for acc in pop_def.get("accumulators", []):
             # HexSim convention: BOTH being 0 (or absent) means unbounded.
-            # If either is non-zero, both are explicit bounds.
+            # If only one is 0, it is a real bound (e.g. min=0 prevents negatives).
             min_val_raw = acc.get("min_val")
             max_val_raw = acc.get("max_val")
-            both_zero = (min_val_raw in (0, None)) and (max_val_raw in (0, None))
+            both_absent_or_zero = (min_val_raw is None and max_val_raw is None) or (
+                min_val_raw == 0 and max_val_raw == 0
+            )
             acc_defs.append(
                 AccumulatorDef(
                     name=acc["name"],
                     min_val=None
-                    if both_zero
+                    if both_absent_or_zero
                     else (min_val_raw if min_val_raw is not None else 0),
                     max_val=None
-                    if both_zero
+                    if both_absent_or_zero
                     else (max_val_raw if max_val_raw is not None else 0),
                 )
             )
