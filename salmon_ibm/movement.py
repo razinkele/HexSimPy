@@ -1,30 +1,45 @@
 """Movement kernels on the triangular mesh."""
+
 from __future__ import annotations
 
 import numpy as np
 
 try:
     from numba import njit, prange
+
     HAS_NUMBA = True
 except ImportError:
     HAS_NUMBA = False
+
     def njit(*args, **kwargs):
         def decorator(func):
             return func
+
         if len(args) == 1 and callable(args[0]):
             return args[0]
         return decorator
+
     prange = range
 
 FORCE_NUMPY = False
 
+
 def _use_numba():
     return HAS_NUMBA and not FORCE_NUMPY
 
-from salmon_ibm.agents import AgentPool, Behavior
 
-def execute_movement(pool, mesh, fields, seed=None, n_micro_steps=3,
-                     cwr_threshold=16.0, barrier_arrays=None):
+from salmon_ibm.agents import Behavior
+
+
+def execute_movement(
+    pool,
+    mesh,
+    fields,
+    seed=None,
+    n_micro_steps=3,
+    cwr_threshold=16.0,
+    barrier_arrays=None,
+):
     """Execute movement with optional barrier enforcement.
 
     Parameters
@@ -40,39 +55,66 @@ def execute_movement(pool, mesh, fields, seed=None, n_micro_steps=3,
     # Save pre-movement positions for barrier resolution
     pre_move = pool.tri_idx.copy() if barrier_arrays is not None else None
 
-    # --- RANDOM (vectorized) ---
-    mask_random = alive & (pool.behavior == Behavior.RANDOM)
-    if mask_random.any():
-        idx = np.where(mask_random)[0]
+    # Pre-bucket agents by behavior in a single pass (avoids 4 separate
+    # mask computations + np.where calls — ~4x fewer array operations).
+    alive_idx = np.where(alive)[0]
+    if len(alive_idx) == 0:
+        _apply_current_advection_vec(pool, mesh, fields, alive, rng)
+        return
+    alive_beh = pool.behavior[alive_idx]
+    buckets = {}
+    for b in np.unique(alive_beh):
+        buckets[int(b)] = alive_idx[alive_beh == b]
+
+    # --- RANDOM ---
+    idx = buckets.get(int(Behavior.RANDOM))
+    if idx is not None and len(idx) > 0:
         tri_buf = pool.tri_idx[idx].copy()
         _step_random_vec(tri_buf, water_nbrs, water_nbr_count, rng, n_micro_steps)
         pool.tri_idx[idx] = tri_buf
 
-    # --- UPSTREAM (vectorized) ---
-    mask_up = alive & (pool.behavior == Behavior.UPSTREAM)
-    if mask_up.any():
-        idx = np.where(mask_up)[0]
+    # --- UPSTREAM ---
+    idx = buckets.get(int(Behavior.UPSTREAM))
+    if idx is not None and len(idx) > 0:
         tri_buf = pool.tri_idx[idx].copy()
-        _step_directed_vec(tri_buf, water_nbrs, water_nbr_count,
-                           fields["ssh"], rng, n_micro_steps, ascending=False)
+        _step_directed_vec(
+            tri_buf,
+            water_nbrs,
+            water_nbr_count,
+            fields["ssh"],
+            rng,
+            n_micro_steps,
+            ascending=False,
+        )
         pool.tri_idx[idx] = tri_buf
 
-    # --- DOWNSTREAM (vectorized) ---
-    mask_down = alive & (pool.behavior == Behavior.DOWNSTREAM)
-    if mask_down.any():
-        idx = np.where(mask_down)[0]
+    # --- DOWNSTREAM ---
+    idx = buckets.get(int(Behavior.DOWNSTREAM))
+    if idx is not None and len(idx) > 0:
         tri_buf = pool.tri_idx[idx].copy()
-        _step_directed_vec(tri_buf, water_nbrs, water_nbr_count,
-                           fields["ssh"], rng, n_micro_steps, ascending=True)
+        _step_directed_vec(
+            tri_buf,
+            water_nbrs,
+            water_nbr_count,
+            fields["ssh"],
+            rng,
+            n_micro_steps,
+            ascending=True,
+        )
         pool.tri_idx[idx] = tri_buf
 
-    # --- TO_CWR (vectorized) ---
-    mask_cwr = alive & (pool.behavior == Behavior.TO_CWR)
-    if mask_cwr.any():
-        idx = np.where(mask_cwr)[0]
+    # --- TO_CWR ---
+    idx = buckets.get(int(Behavior.TO_CWR))
+    if idx is not None and len(idx) > 0:
         tri_buf = pool.tri_idx[idx].copy()
-        _step_to_cwr_vec(tri_buf, water_nbrs, water_nbr_count,
-                         fields["temperature"], n_micro_steps, cwr_threshold)
+        _step_to_cwr_vec(
+            tri_buf,
+            water_nbrs,
+            water_nbr_count,
+            fields["temperature"],
+            n_micro_steps,
+            cwr_threshold,
+        )
         pool.tri_idx[idx] = tri_buf
 
     # --- Barrier enforcement (after all movement, before advection) ---
@@ -83,7 +125,8 @@ def execute_movement(pool, mesh, fields, seed=None, n_micro_steps=3,
             current = pre_move[alive_idx]
             proposed = pool.tri_idx[alive_idx]
             final, died = _resolve_barriers_vec(
-                current, proposed, mort, defl, trans, water_nbrs, rng)
+                current, proposed, mort, defl, trans, water_nbrs, rng
+            )
             pool.tri_idx[alive_idx] = final
             pool.alive[alive_idx[died]] = False
 
@@ -105,8 +148,9 @@ def _step_random_numba(tri_indices, water_nbrs, water_nbr_count, rand_vals, step
 
 
 @njit(cache=True, parallel=True)
-def _step_directed_numba(tri_indices, water_nbrs, water_nbr_count, field,
-                         rand_vals, steps, ascending):
+def _step_directed_numba(
+    tri_indices, water_nbrs, water_nbr_count, field, rand_vals, steps, ascending
+):
     n = len(tri_indices)
     for s in range(steps):
         for i in prange(n):
@@ -137,8 +181,9 @@ def _step_directed_numba(tri_indices, water_nbrs, water_nbr_count, field,
 
 
 @njit(cache=True, parallel=True)
-def _step_to_cwr_numba(tri_indices, water_nbrs, water_nbr_count, temperature,
-                       steps, cwr_threshold):
+def _step_to_cwr_numba(
+    tri_indices, water_nbrs, water_nbr_count, temperature, steps, cwr_threshold
+):
     n = len(tri_indices)
     for s in range(steps):
         for i in prange(n):
@@ -160,8 +205,17 @@ def _step_to_cwr_numba(tri_indices, water_nbrs, water_nbr_count, temperature,
 
 
 @njit(cache=True, parallel=True)
-def _advection_numba(tri_indices, water_nbrs, water_nbr_count,
-                     centroids, u, v, speeds, rand_drift, speed_threshold=0.01):
+def _advection_numba(
+    tri_indices,
+    water_nbrs,
+    water_nbr_count,
+    centroids,
+    u,
+    v,
+    speeds,
+    rand_drift,
+    speed_threshold=0.01,
+):
     n = len(tri_indices)
     for i in prange(n):
         if speeds[i] < speed_threshold:
@@ -181,7 +235,7 @@ def _advection_numba(tri_indices, water_nbrs, water_nbr_count,
             nbr = water_nbrs[c, k]
             dx = centroids[nbr, 1] - cx
             dy = centroids[nbr, 0] - cy
-            dnorm = (dx ** 2 + dy ** 2) ** 0.5 + 1e-12
+            dnorm = (dx**2 + dy**2) ** 0.5 + 1e-12
             dot = (dx / dnorm) * flow_x + (dy / dnorm) * flow_y
             if dot > best_dot:
                 best_dot = dot
@@ -210,8 +264,9 @@ def _step_random_vec(tri_indices, water_nbrs, water_nbr_count, rng, steps):
             tri_indices[has_nbrs] = chosen[has_nbrs]
 
 
-def _step_directed_vec(tri_indices, water_nbrs, water_nbr_count, field,
-                       rng, steps, ascending):
+def _step_directed_vec(
+    tri_indices, water_nbrs, water_nbr_count, field, rng, steps, ascending
+):
     """Vectorized gradient-following for a batch of agents.
 
     Even micro-steps: move to neighbor with best field value.
@@ -219,8 +274,9 @@ def _step_directed_vec(tri_indices, water_nbrs, water_nbr_count, field,
     """
     if _use_numba():
         rand_vals = rng.random((steps, len(tri_indices)))
-        _step_directed_numba(tri_indices, water_nbrs, water_nbr_count,
-                             field, rand_vals, steps, ascending)
+        _step_directed_numba(
+            tri_indices, water_nbrs, water_nbr_count, field, rand_vals, steps, ascending
+        )
     else:
         # Original NumPy implementation
         n = len(tri_indices)
@@ -253,12 +309,14 @@ def _step_directed_vec(tri_indices, water_nbrs, water_nbr_count, field,
                 tri_indices[has_nbrs] = chosen[has_nbrs]
 
 
-def _step_to_cwr_vec(tri_indices, water_nbrs, water_nbr_count, temperature,
-                     steps, cwr_threshold):
+def _step_to_cwr_vec(
+    tri_indices, water_nbrs, water_nbr_count, temperature, steps, cwr_threshold
+):
     """Vectorized cold-water refuge seeking for a batch of agents."""
     if _use_numba():
-        _step_to_cwr_numba(tri_indices, water_nbrs, water_nbr_count,
-                           temperature, steps, cwr_threshold)
+        _step_to_cwr_numba(
+            tri_indices, water_nbrs, water_nbr_count, temperature, steps, cwr_threshold
+        )
     else:
         # Original NumPy implementation
         n = len(tri_indices)
@@ -292,11 +350,18 @@ def _apply_current_advection_vec(pool, mesh, fields, alive_mask, rng):
         if len(alive_idx) == 0:
             return
         tris = pool.tri_idx[alive_idx].copy()
-        speeds = np.sqrt(u[tris]**2 + v[tris]**2)
+        speeds = np.sqrt(u[tris] ** 2 + v[tris] ** 2)
         rand_drift = rng.random(len(tris))
-        _advection_numba(tris, mesh._water_nbrs, mesh._water_nbr_count,
-                         np.ascontiguousarray(mesh.centroids),
-                         u, v, speeds, rand_drift)
+        _advection_numba(
+            tris,
+            mesh._water_nbrs,
+            mesh._water_nbr_count,
+            np.ascontiguousarray(mesh.centroids),
+            u,
+            v,
+            speeds,
+            rand_drift,
+        )
         pool.tri_idx[alive_idx] = tris
     else:
         # Original NumPy implementation
@@ -305,7 +370,7 @@ def _apply_current_advection_vec(pool, mesh, fields, alive_mask, rng):
             return
 
         tris = pool.tri_idx[alive_idx]
-        speeds = np.sqrt(u[tris]**2 + v[tris]**2)
+        speeds = np.sqrt(u[tris] ** 2 + v[tris] ** 2)
 
         moving = speeds >= 0.01
         if not moving.any():
@@ -333,10 +398,10 @@ def _apply_current_advection_vec(pool, mesh, fields, alive_mask, rng):
         nbr_matrix = water_nbrs[mov_tris]
         safe_idx = np.where(nbr_matrix >= 0, nbr_matrix, 0)
 
-        c0 = mesh.centroids[mov_tris]                            # (n, 2)
-        cn = mesh.centroids[safe_idx]                            # (n, max_nbrs, 2)
-        dy = cn[:, :, 0] - c0[:, np.newaxis, 0]                 # (n, max_nbrs)
-        dx = cn[:, :, 1] - c0[:, np.newaxis, 1]                 # (n, max_nbrs)
+        c0 = mesh.centroids[mov_tris]  # (n, 2)
+        cn = mesh.centroids[safe_idx]  # (n, max_nbrs, 2)
+        dy = cn[:, :, 0] - c0[:, np.newaxis, 0]  # (n, max_nbrs)
+        dx = cn[:, :, 1] - c0[:, np.newaxis, 1]  # (n, max_nbrs)
         dnorm = np.sqrt(dy**2 + dx**2) + 1e-12
         dy /= dnorm
         dx /= dnorm
@@ -358,8 +423,9 @@ def _apply_current_advection_vec(pool, mesh, fields, alive_mask, rng):
 
 
 @njit(cache=True, parallel=True)
-def _resolve_barriers_numba(current, proposed, barrier_mort, barrier_defl,
-                             neighbors, rand_vals):
+def _resolve_barriers_numba(
+    current, proposed, barrier_mort, barrier_defl, neighbors, rand_vals
+):
     """Numba kernel for barrier resolution."""
     n = len(current)
     final = proposed.copy()
@@ -387,8 +453,9 @@ def _resolve_barriers_numba(current, proposed, barrier_mort, barrier_defl,
     return final, died
 
 
-def _resolve_barriers_vec(current, proposed, barrier_mort, barrier_defl,
-                          barrier_trans, neighbors, rng):
+def _resolve_barriers_vec(
+    current, proposed, barrier_mort, barrier_defl, barrier_trans, neighbors, rng
+):
     """Resolve barrier outcomes for a batch of proposed moves."""
     n = len(current)
     if n == 0:
@@ -397,7 +464,8 @@ def _resolve_barriers_vec(current, proposed, barrier_mort, barrier_defl,
     if _use_numba():
         rand_vals = rng.random(n)
         return _resolve_barriers_numba(
-            current, proposed, barrier_mort, barrier_defl, neighbors, rand_vals)
+            current, proposed, barrier_mort, barrier_defl, neighbors, rand_vals
+        )
 
     # Original NumPy implementation
     final = proposed.copy()
@@ -406,7 +474,7 @@ def _resolve_barriers_vec(current, proposed, barrier_mort, barrier_defl,
     if not moving.any():
         return final, died
     nbr_matrix = neighbors[current]
-    match = (nbr_matrix == proposed[:, np.newaxis])
+    match = nbr_matrix == proposed[:, np.newaxis]
     has_match = match.any(axis=1) & moving
     if not has_match.any():
         return final, died

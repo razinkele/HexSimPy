@@ -260,8 +260,10 @@ class Simulation:
             if population.alive.any()
             else 0.0,
             "behavior_counts": {
-                int(b): int((population.behavior[population.alive] == b).sum())
-                for b in range(5)
+                int(b): int(c)
+                for b, c in enumerate(
+                    np.bincount(population.behavior[population.alive], minlength=5)
+                )
             },
         }
         self.history.append(summary)
