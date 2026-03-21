@@ -3,6 +3,28 @@
 from __future__ import annotations
 
 import numpy as np
+from typing import TypedDict
+
+
+class Landscape(TypedDict, total=False):
+    """Typed dict passed to every event. All keys are optional (total=False)."""
+
+    mesh: object  # TriMesh | HexMesh
+    fields: dict[str, np.ndarray]
+    rng: np.random.Generator
+    activity_lut: np.ndarray
+    est_cfg: dict
+    barrier_arrays: tuple | None
+    genome: object | None  # GenomeManager | None
+    multi_pop_mgr: object | None  # MultiPopulationManager | None
+    network: object | None  # StreamNetwork | None
+    step_alive_mask: np.ndarray
+    spatial_data: dict[str, np.ndarray]
+    global_variables: dict[str, float]
+    census_records: list
+    summary_reports: list
+    log_dir: str
+
 
 from salmon_ibm.agents import AgentPool, Behavior
 from salmon_ibm.behavior import pick_behaviors, apply_overrides
@@ -251,7 +273,7 @@ class Simulation:
     def step(self):
         t = self.current_t
         self.env.advance(t)
-        landscape = {
+        landscape: Landscape = {
             "mesh": self.mesh,
             "fields": self.env.fields,
             "rng": self._rng,
