@@ -1,9 +1,9 @@
 """Event engine: base classes, triggers, and sequencer."""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
 
 import numpy as np
 
@@ -11,6 +11,7 @@ import numpy as np
 # ---------------------------------------------------------------------------
 # Triggers
 # ---------------------------------------------------------------------------
+
 
 class EventTrigger(ABC):
     @abstractmethod
@@ -25,6 +26,7 @@ class EveryStep(EventTrigger):
 @dataclass
 class Once(EventTrigger):
     at: int
+
     def should_fire(self, t: int) -> bool:
         return t == self.at
 
@@ -33,6 +35,7 @@ class Once(EventTrigger):
 class Periodic(EventTrigger):
     interval: int
     offset: int = 0
+
     def should_fire(self, t: int) -> bool:
         return (t - self.offset) % self.interval == 0 and t >= self.offset
 
@@ -41,6 +44,7 @@ class Periodic(EventTrigger):
 class Window(EventTrigger):
     start: int
     end: int
+
     def should_fire(self, t: int) -> bool:
         return self.start <= t < self.end
 
@@ -51,6 +55,7 @@ class RandomTrigger(EventTrigger):
     _rng: np.random.Generator = field(
         default_factory=lambda: np.random.default_rng(), repr=False
     )
+
     def should_fire(self, t: int) -> bool:
         return self._rng.random() < self.p
 
@@ -58,6 +63,7 @@ class RandomTrigger(EventTrigger):
 # ---------------------------------------------------------------------------
 # Event base class
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class Event(ABC):
@@ -75,6 +81,7 @@ class Event(ABC):
 # Event Sequencer
 # ---------------------------------------------------------------------------
 
+
 class EventSequencer:
     """Executes a list of events in order each timestep."""
 
@@ -91,10 +98,18 @@ class EventSequencer:
     @staticmethod
     def _compute_mask(population, trait_filter: dict | None) -> np.ndarray:
         base = population.alive & ~population.arrived
-        if trait_filter is not None and hasattr(population, 'trait_mgr') and population.trait_mgr is not None:
+        if (
+            trait_filter is not None
+            and hasattr(population, "trait_mgr")
+            and population.trait_mgr is not None
+        ):
             trait_mask = population.trait_mgr.filter_by_traits(**trait_filter)
             base = base & trait_mask
-        elif trait_filter is not None and hasattr(population, 'traits') and population.traits is not None:
+        elif (
+            trait_filter is not None
+            and hasattr(population, "traits")
+            and population.traits is not None
+        ):
             trait_mask = population.traits.filter_by_traits(**trait_filter)
             base = base & trait_mask
         return base
@@ -103,6 +118,7 @@ class EventSequencer:
 # ---------------------------------------------------------------------------
 # Multi-Population Event Sequencer
 # ---------------------------------------------------------------------------
+
 
 class MultiPopEventSequencer:
     """Executes events, routing each to its target population."""
@@ -115,13 +131,14 @@ class MultiPopEventSequencer:
         landscape["multi_pop_mgr"] = self.multi_pop
         # Clear per-step caches
         from salmon_ibm.events_hexsim import clear_combo_mask_cache
+
         clear_combo_mask_cache()
         for event in self.events:
-            if not getattr(event, 'enabled', True):
+            if not getattr(event, "enabled", True):
                 continue
             if not event.trigger.should_fire(t):
                 continue
-            pop_name = getattr(event, 'population_name', None)
+            pop_name = getattr(event, "population_name", None)
             if pop_name:
                 population = self.multi_pop.get(pop_name)
                 mask = population.alive & ~population.arrived
@@ -134,6 +151,7 @@ class MultiPopEventSequencer:
 # ---------------------------------------------------------------------------
 # Event Group
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class EventGroup(Event):
@@ -150,20 +168,20 @@ class EventGroup(Event):
 
         prepared = []
         for event in self.sub_events:
-            if not getattr(event, 'enabled', True):
+            if not getattr(event, "enabled", True):
                 continue
             if not event.trigger.should_fire(t):
                 continue
             child_pop = population
-            child_pop_name = getattr(event, 'population_name', None)
+            child_pop_name = getattr(event, "population_name", None)
             if child_pop_name and multi_pop:
                 child_pop = multi_pop.get(child_pop_name)
-            tf = getattr(event, 'trait_filter', None)
+            tf = getattr(event, "trait_filter", None)
             # Pre-resolve filter type: 0=none, 1=combo, 2=simple
             tf_type = 0
             trait_mgr = None
             if tf is not None and child_pop is not None:
-                trait_mgr = getattr(child_pop, 'trait_mgr', None)
+                trait_mgr = getattr(child_pop, "trait_mgr", None)
                 if trait_mgr is not None:
                     if isinstance(tf, dict) and "traits" in tf:
                         tf_type = 1  # combo
@@ -177,9 +195,14 @@ class EventGroup(Event):
         _empty_mask = np.ones(0, dtype=bool)
 
         for _iter in range(self.iterations):
+            # Cache base alive mask per population per iteration
+            _mask_cache: dict[int, np.ndarray] = {}
             for event, child_pop, tf, tf_type, trait_mgr in prepared:
                 if child_pop is not None:
-                    child_mask = child_pop.alive & ~child_pop.arrived
+                    pop_id = id(child_pop)
+                    if pop_id not in _mask_cache:
+                        _mask_cache[pop_id] = child_pop.alive & ~child_pop.arrived
+                    child_mask = _mask_cache[pop_id]
                     if tf_type == 1:
                         child_mask = _apply_trait_combo_mask(child_mask, tf, child_pop)
                     elif tf_type == 2:
@@ -187,22 +210,24 @@ class EventGroup(Event):
                 else:
                     child_mask = _empty_mask
                 event.execute(child_pop, landscape, t, child_mask)
+            _mask_cache.clear()  # allow GC
 
 
 # ---------------------------------------------------------------------------
 # Event Registry & YAML Loading
 # ---------------------------------------------------------------------------
 
-from typing import Callable
 
 EVENT_REGISTRY: dict[str, type[Event]] = {}
 
 
 def register_event(type_name: str):
     """Decorator to register an Event subclass under a type name."""
+
     def decorator(cls):
         EVENT_REGISTRY[type_name] = cls
         return cls
+
     return decorator
 
 
@@ -223,6 +248,7 @@ def load_events_from_config(event_defs, callback_registry=None):
                     f"Available: {list(callback_registry.keys())}"
                 )
             from salmon_ibm.events_builtin import CustomEvent
+
             events.append(CustomEvent(name=name, trigger=trigger, callback=cb))
         elif event_type in EVENT_REGISTRY:
             cls = EVENT_REGISTRY[event_type]
@@ -245,7 +271,9 @@ def _parse_trigger(trigger_def):
     elif kind == "once":
         return Once(at=trigger_def["at"])
     elif kind == "periodic":
-        return Periodic(interval=trigger_def["interval"], offset=trigger_def.get("offset", 0))
+        return Periodic(
+            interval=trigger_def["interval"], offset=trigger_def.get("offset", 0)
+        )
     elif kind == "window":
         return Window(start=trigger_def["start"], end=trigger_def["end"])
     elif kind == "random":

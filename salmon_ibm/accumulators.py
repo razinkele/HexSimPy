@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from typing import Union
 import numpy as np
 
+_compiled_expr_cache: dict[str, object] = {}
+
 
 @dataclass
 class AccumulatorDef:
@@ -249,7 +251,11 @@ def updater_expression(
         if rng is None:
             rng = np.random.default_rng()
         namespace = build_hexsim_namespace(globals_dict, acc_dict, rng, n_masked)
-        result = eval(translated, {"__builtins__": {}}, namespace)
+        if translated not in _compiled_expr_cache:
+            _compiled_expr_cache[translated] = compile(
+                translated, "<hexsim-expr>", "eval"
+            )
+        result = eval(_compiled_expr_cache[translated], {"__builtins__": {}}, namespace)
     else:
         # Legacy mode: bare accumulator names in namespace
         _validate_expression(expression)
@@ -467,7 +473,11 @@ def updater_quantify_extremes(
     Simplified: uses the single cell at agent's position.
     """
     idx = manager._resolve_idx(acc_name)
-    manager.data[mask, idx] = hex_map[cell_indices[mask]]
+    cells = cell_indices[mask]
+    valid = (cells >= 0) & (cells < len(hex_map))
+    result = np.zeros(int(mask.sum()), dtype=np.float64)
+    result[valid] = hex_map[cells[valid]]
+    manager.data[mask, idx] = result
 
 
 def updater_hexagon_presence(
@@ -481,8 +491,11 @@ def updater_hexagon_presence(
 ):
     """Write 1.0 if hex-map value at agent's cell exceeds threshold, else 0.0."""
     idx = manager._resolve_idx(acc_name)
-    vals = hex_map[cell_indices[mask]]
-    manager.data[mask, idx] = (vals > threshold).astype(np.float64)
+    cells = cell_indices[mask]
+    valid = (cells >= 0) & (cells < len(hex_map))
+    result = np.zeros(int(mask.sum()), dtype=np.float64)
+    result[valid] = (hex_map[cells[valid]] > threshold).astype(np.float64)
+    manager.data[mask, idx] = result
 
 
 def updater_uptake(
