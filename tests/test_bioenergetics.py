@@ -114,6 +114,18 @@ def test_energy_conservation_single_step():
     )
 
 
+def test_hourly_respiration_handles_zero_mass():
+    """Zero mass should produce finite respiration (clamped), not inf/nan."""
+    from salmon_ibm.bioenergetics import hourly_respiration, BioParams
+
+    params = BioParams()
+    mass = np.array([0.0, -1.0, 1e-10, 3500.0])
+    temp = np.full(4, 15.0)
+    activity = np.ones(4)
+    result = hourly_respiration(mass, temp, activity, params)
+    assert np.all(np.isfinite(result)), f"Non-finite values: {result}"
+
+
 def test_energy_density_decreases_monotonically():
     """ED must decrease (or stay flat) every hour for non-feeding migrants."""
     from salmon_ibm.bioenergetics import update_energy, BioParams

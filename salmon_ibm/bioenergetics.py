@@ -36,6 +36,7 @@ def hourly_respiration(
     activity_mult: np.ndarray,
     params: BioParams,
 ) -> np.ndarray:
+    mass_g = np.maximum(mass_g, 1e-6)
     r_daily = (
         params.RA
         * np.power(mass_g, params.RB)
