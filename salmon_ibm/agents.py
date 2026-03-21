@@ -1,4 +1,5 @@
 """Fish agent state: FishAgent (OOP view) + AgentPool (vectorized arrays)."""
+
 from __future__ import annotations
 
 from enum import IntEnum
@@ -15,6 +16,21 @@ class Behavior(IntEnum):
 
 class AgentPool:
     """Vectorized storage for all fish agents (structure-of-arrays)."""
+
+    # Array fields that must be compacted/extended together
+    ARRAY_FIELDS = (
+        "tri_idx",
+        "mass_g",
+        "ed_kJ_g",
+        "target_spawn_hour",
+        "behavior",
+        "cwr_hours",
+        "hours_since_cwr",
+        "steps",
+        "alive",
+        "arrived",
+        "temp_history",
+    )
 
     def __init__(
         self,
@@ -52,7 +68,7 @@ class AgentPool:
 
         # Optional general-purpose state (Phase 1a)
         self.accumulators = None  # AccumulatorManager | None
-        self.traits = None        # TraitManager | None
+        self.traits = None  # TraitManager | None
 
     def get_agent(self, idx: int) -> "FishAgent":
         return FishAgent(self, idx)
