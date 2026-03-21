@@ -1,4 +1,5 @@
 """Unit tests for the Population class."""
+
 import numpy as np
 import pytest
 
@@ -11,6 +12,7 @@ from salmon_ibm.population import Population
 @pytest.fixture
 def basic_pool():
     return AgentPool(n=10, start_tri=0, rng_seed=42)
+
 
 @pytest.fixture
 def basic_pop(basic_pool):
@@ -38,7 +40,9 @@ class TestPopulationInit:
         assert pop.accumulator_mgr is not None
 
     def test_with_traits(self, basic_pool):
-        trait_defs = [TraitDefinition("stage", TraitType.PROBABILISTIC, ["juvenile", "adult"])]
+        trait_defs = [
+            TraitDefinition("stage", TraitType.PROBABILISTIC, ["juvenile", "adult"])
+        ]
         trait_mgr = TraitManager(10, trait_defs)
         pop = Population("test", basic_pool, trait_mgr=trait_mgr)
         assert pop.trait_mgr is not None
@@ -95,3 +99,67 @@ class TestAddAgents:
         basic_pop.compact()
         assert basic_pop.n == 12
         assert basic_pop.pool.alive.all()
+
+
+def test_compact_with_genome_traits_accumulators():
+    """Compact should preserve genome, trait, and accumulator data alignment."""
+    from salmon_ibm.agents import AgentPool
+    from salmon_ibm.population import Population
+    from salmon_ibm.accumulators import AccumulatorManager, AccumulatorDef
+    from salmon_ibm.traits import TraitManager, TraitDefinition
+
+    pool = AgentPool(n=5, start_tri=np.zeros(5, dtype=int))
+    pop = Population(name="test", pool=pool)
+
+    # Add accumulators
+    pop.accumulator_mgr = AccumulatorManager(5, [AccumulatorDef("energy")])
+    pop.accumulator_mgr.data[:, 0] = [10.0, 20.0, 30.0, 40.0, 50.0]
+
+    # Add traits
+    pop.trait_mgr = TraitManager(
+        5,
+        [
+            TraitDefinition(
+                name="stage",
+                trait_type=TraitType.PROBABILISTIC,
+                categories=["juv", "adult"],
+            )
+        ],
+    )
+    pop.trait_mgr._data["stage"][:] = [0, 1, 0, 1, 0]
+
+    # Kill agents 1 and 3
+    pool.alive[1] = False
+    pool.alive[3] = False
+
+    pop.compact()
+
+    # Should have 3 survivors (indices 0, 2, 4)
+    assert pop.n == 3
+    assert pop.accumulator_mgr.data.shape == (3, 1)
+    np.testing.assert_array_equal(pop.accumulator_mgr.data[:, 0], [10.0, 30.0, 50.0])
+    np.testing.assert_array_equal(pop.trait_mgr._data["stage"], [0, 0, 0])
+
+
+def test_add_agents_extends_genome():
+    """add_agents should extend genome array with zeros for new agents."""
+    from salmon_ibm.agents import AgentPool
+    from salmon_ibm.population import Population
+    from salmon_ibm.genetics import GenomeManager, LocusDefinition
+
+    pool = AgentPool(n=3, start_tri=np.zeros(3, dtype=int))
+    pop = Population(name="test", pool=pool)
+    loci = [
+        LocusDefinition("a", n_alleles=4, position=0.0),
+        LocusDefinition("b", n_alleles=4, position=1.0),
+    ]
+    pop.genome = GenomeManager(3, loci=loci)
+    pop.genome.genotypes[:] = 1  # set existing agents to allele 1
+
+    new_ids = pop.add_agents(2, np.array([0, 0]))
+    assert pop.genome.n_agents == 5
+    assert pop.genome.genotypes.shape == (5, 2, 2)
+    # New agents should have zero genotypes
+    np.testing.assert_array_equal(pop.genome.genotypes[3:], 0)
+    # Old agents should keep their alleles
+    np.testing.assert_array_equal(pop.genome.genotypes[:3], 1)

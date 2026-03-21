@@ -56,3 +56,22 @@ def test_agent_pool_zero_agents():
     assert pool.n == 0
     assert len(pool.alive) == 0
     assert pool.t3h_mean().shape == (0,)
+
+
+def test_push_temperature_and_t3h_mean():
+    """push_temperature should shift history and t3h_mean should average correctly."""
+    import pytest
+    from salmon_ibm.agents import AgentPool
+
+    pool = AgentPool(n=2, start_tri=np.zeros(2, dtype=int))
+    # Default temp_history is all 15.0
+    pool.push_temperature(np.array([10.0, 20.0]))
+    pool.push_temperature(np.array([12.0, 22.0]))
+    pool.push_temperature(np.array([14.0, 24.0]))
+    # History should now be [10, 12, 14] and [20, 22, 24]
+    np.testing.assert_array_almost_equal(pool.temp_history[0], [10.0, 12.0, 14.0])
+    np.testing.assert_array_almost_equal(pool.temp_history[1], [20.0, 22.0, 24.0])
+    # t3h_mean should be the mean of each row
+    means = pool.t3h_mean()
+    assert means[0] == pytest.approx(12.0)
+    assert means[1] == pytest.approx(22.0)

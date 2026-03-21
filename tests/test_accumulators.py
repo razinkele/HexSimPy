@@ -454,6 +454,27 @@ class TestRemainingUpdaters:
         np.testing.assert_array_equal(mgr.get("result"), [100.0, 300.0, 200.0])
 
 
+def test_updater_uptake_can_overdeplete():
+    """Multiple agents extracting from a low-resource cell can drive hex_map negative."""
+    from salmon_ibm.accumulators import (
+        AccumulatorManager,
+        AccumulatorDef,
+        updater_uptake,
+    )
+
+    mgr = AccumulatorManager(3, [AccumulatorDef("food")])
+    hex_map = np.array([5.0, 100.0])
+    cell_indices = np.array([0, 0, 0])  # all 3 on cell 0
+    mask = np.array([True, True, True])
+    updater_uptake(
+        mgr, "food", mask, hex_map=hex_map, cell_indices=cell_indices, rate=1.0
+    )
+    # Each agent extracts 5.0. Total depletion = 15. hex_map goes to -10.
+    assert hex_map[0] == pytest.approx(-10.0)
+    # Each agent got 5.0
+    assert np.all(mgr.data[:, 0] == pytest.approx(5.0))
+
+
 def test_updater_uptake_multi_agent_same_cell():
     """Two agents on the same cell should each deplete the resource."""
     from salmon_ibm.accumulators import (

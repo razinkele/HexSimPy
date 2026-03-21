@@ -630,6 +630,33 @@ class TestLogSnapshotEvent:
         event.execute(pop, landscape, t=0, mask=pop.alive.copy())  # should not raise
 
 
+def test_compute_mask_with_trait_filter():
+    """EventSequencer._compute_mask should narrow mask by trait filter."""
+    from salmon_ibm.agents import AgentPool
+    from salmon_ibm.population import Population
+    from salmon_ibm.traits import TraitManager, TraitDefinition, TraitType
+    from salmon_ibm.events import EventSequencer
+
+    pool = AgentPool(n=4, start_tri=np.zeros(4, dtype=int))
+    pop = Population(name="test", pool=pool)
+    pop.trait_mgr = TraitManager(
+        4,
+        [
+            TraitDefinition(
+                name="stage",
+                trait_type=TraitType.PROBABILISTIC,
+                categories=["juv", "adult"],
+            )
+        ],
+    )
+    pop.trait_mgr._data["stage"][:] = [0, 1, 0, 1]  # agents 1,3 are adults
+
+    mask = EventSequencer._compute_mask(pop, {"stage": 1})
+    # Only alive adults (agents 1 and 3) should be in mask
+    expected = np.array([False, True, False, True])
+    np.testing.assert_array_equal(mask, expected)
+
+
 def test_event_execution_with_all_dead_mask():
     """Events should handle all-False mask without error."""
     from salmon_ibm.events import EventSequencer
