@@ -43,10 +43,14 @@ class Environment:
             "ssh": phy_cfg["ssh_var"],
         }
 
-        # Pre-load all time-varying data into memory for fast advance()
-        self._preloaded: dict[str, np.ndarray] = {}
-        for field_name, var_name in self._var.items():
-            self._preloaded[field_name] = self._phy[var_name].values
+        # Pre-load and stack all fields for single-pass advance
+        self._field_names = list(self._var.keys())
+        arrays = []
+        for field_name in self._field_names:
+            var_name = self._var[field_name]
+            data = self._phy[var_name].values  # (n_times, ...)
+            arrays.append(data.reshape(self.n_timesteps, -1))  # flatten spatial dims
+        self._stacked = np.stack(arrays, axis=-1)  # (n_times, n_nodes, 5)
 
         # Close datasets no longer needed after preloading
         self._phy.close()
@@ -62,11 +66,11 @@ class Environment:
         self.current_t = t
         t_idx = t % self.n_timesteps
 
-        for field_name in self._var:
-            raw = self._preloaded[field_name][t_idx]
-            flat = raw.ravel()
-            tri_vals = flat[self.mesh.triangles].mean(axis=1)
-            self.fields[field_name] = tri_vals
+        # Single fancy-index + mean for all 5 fields at once
+        all_raw = self._stacked[t_idx]  # (n_nodes, 5)
+        tri_vals = all_raw[self.mesh.triangles].mean(axis=1)  # (n_tri, 5)
+        for i, name in enumerate(self._field_names):
+            self.fields[name] = tri_vals[:, i]
 
     def sample(self, tri_idx: int) -> dict[str, float]:
         return {name: float(arr[tri_idx]) for name, arr in self.fields.items()}
