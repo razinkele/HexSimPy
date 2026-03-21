@@ -594,11 +594,12 @@ class HexSimMoveEvent(Event):
         if not mask.any():
             return
 
-        # Cache mesh and gradient references (same across all calls within a step)
-        if self._cached_mesh is None:
-            mesh = landscape.get("mesh")
-            if mesh is None:
-                return
+        # Cache mesh and gradient references (same across all calls within a step).
+        # Invalidate cache if mesh changed (e.g., across ensemble runs).
+        mesh = landscape.get("mesh")
+        if mesh is None:
+            return
+        if self._cached_mesh is not mesh:
             self._cached_mesh = mesh
             self._cached_nbrs = mesh._water_nbrs
             self._cached_nbr_count = mesh._water_nbr_count
