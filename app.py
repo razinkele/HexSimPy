@@ -1,4 +1,5 @@
 """Baltic Salmon IBM — Shiny for Python Application (Lagoon Field Station theme)."""
+
 from __future__ import annotations
 
 import asyncio
@@ -13,14 +14,11 @@ from shiny import App, reactive, render, ui
 from shiny_deckgl import (
     CARTO_DARK,
     CARTO_POSITRON,
-    CoordinateSystem,
     MapWidget,
     encode_binary_attribute,
     head_includes,
     layer,
     map_view,
-    orthographic_view,
-    path_layer,
     scatterplot_layer,
 )
 
@@ -58,18 +56,18 @@ BEH_COLORS = ["#7a8b7a", "#4a8fa8", "#3d9b8f", "#d4826a", "#b8963e"]
 
 # Bathymetric colorscale
 BATHY_COLORSCALE = [
-    [0.0, "#0b1f2c"],
-    [0.2, "#1a3d50"],
-    [0.4, "#2a7a7a"],
-    [0.6, "#3d9b8f"],
+    [0.0, "#1a3d50"],
+    [0.2, "#2a6070"],
+    [0.4, "#3a9090"],
+    [0.6, "#50b8a8"],
     [0.8, "#7ac4a5"],
     [1.0, "#c8e6c9"],
 ]
 
 TEMP_COLORSCALE = [
-    [0.0, "#0b1f2c"],
-    [0.15, "#1a3d50"],
-    [0.3, "#2a7a7a"],
+    [0.0, "#1a3d50"],
+    [0.15, "#2a6070"],
+    [0.3, "#3a9090"],
     [0.5, "#4a8fa8"],
     [0.7, "#e8d5b7"],
     [0.85, "#d4826a"],
@@ -91,12 +89,14 @@ def _base_layout(theme="dark", **overrides):
         font=dict(family="Work Sans, sans-serif", color=_text, size=12),
         margin=dict(l=48, r=16, t=36, b=44),
         xaxis=dict(
-            gridcolor=_grid, zerolinecolor=_grid,
+            gridcolor=_grid,
+            zerolinecolor=_grid,
             tickfont=dict(size=10, color=_axis),
             title_font=dict(size=11, color=_axis),
         ),
         yaxis=dict(
-            gridcolor=_grid, zerolinecolor=_grid,
+            gridcolor=_grid,
+            zerolinecolor=_grid,
             tickfont=dict(size=10, color=_axis),
             title_font=dict(size=11, color=_axis),
         ),
@@ -176,14 +176,18 @@ def _subsample_indices(n, max_pts):
 _GEO_ANCHORS = {
     "columbia": {
         # Mouth (Astoria, low data_cols) → Bonneville Dam (upstream, high data_cols)
-        "start_lon": -123.83, "start_lat": 46.19,
-        "end_lon": -121.94, "end_lat": 45.64,
+        "start_lon": -123.83,
+        "start_lat": 46.19,
+        "end_lon": -121.94,
+        "end_lat": 45.64,
         "m_per_deg_lat": 111_000.0,
     },
     "curonian": {
         # South end (Nemunas delta, low data_cols) → North end (Klaipėda strait, high data_cols)
-        "start_lon": 21.20, "start_lat": 55.26,
-        "end_lon": 21.08, "end_lat": 55.72,
+        "start_lon": 21.20,
+        "start_lat": 55.26,
+        "end_lon": 21.08,
+        "end_lat": 55.72,
         "m_per_deg_lat": 111_000.0,
     },
 }
@@ -212,8 +216,7 @@ def _hexsim_to_lonlat(cx, cy, landscape=None):
     cx_max = cx.max() if len(cx) > 0 else 1.0
     t = cx / cx_max  # 0 = start, 1 = end
     lon = a["start_lon"] + t * (a["end_lon"] - a["start_lon"])
-    lat = (a["start_lat"] + t * (a["end_lat"] - a["start_lat"])
-           + cy / a["m_per_deg_lat"])
+    lat = a["start_lat"] + t * (a["end_lat"] - a["start_lat"]) + cy / a["m_per_deg_lat"]
     return lon, lat
 
 
@@ -224,22 +227,30 @@ def _build_water_binary(mesh, z, cscale, idx, scale=1.0, landscape=None):
     HexSim meshes use grid coordinates scaled to pixel-like range for orthographic view.
     """
     rgb = _colorscale_rgb(z, cscale)
-    is_hexsim = hasattr(mesh, '_edge')
+    is_hexsim = hasattr(mesh, "_edge")
     if is_hexsim:
         # Scale grid coordinates; negate Y to flip (row 0 = top of grid → bottom of screen)
-        positions = np.column_stack([
-            mesh.centroids[idx, 1] * scale,
-            -mesh.centroids[idx, 0] * scale,
-        ]).astype(np.float32)
+        positions = np.column_stack(
+            [
+                mesh.centroids[idx, 1] * scale,
+                -mesh.centroids[idx, 0] * scale,
+            ]
+        ).astype(np.float32)
     else:
-        positions = np.column_stack([
-            mesh.centroids[idx, 1] * scale,
-            mesh.centroids[idx, 0] * scale,
-        ]).astype(np.float32)
-    colors = np.column_stack([
-        rgb[idx, 0], rgb[idx, 1], rgb[idx, 2],
-        np.full(len(idx), 220, dtype=np.uint8),
-    ]).astype(np.uint8)
+        positions = np.column_stack(
+            [
+                mesh.centroids[idx, 1] * scale,
+                mesh.centroids[idx, 0] * scale,
+            ]
+        ).astype(np.float32)
+    colors = np.column_stack(
+        [
+            rgb[idx, 0],
+            rgb[idx, 1],
+            rgb[idx, 2],
+            np.full(len(idx), 220, dtype=np.uint8),
+        ]
+    ).astype(np.uint8)
     return (
         encode_binary_attribute(positions),
         encode_binary_attribute(colors),
@@ -250,10 +261,14 @@ def _build_water_binary(mesh, z, cscale, idx, scale=1.0, landscape=None):
 def _build_color_binary(mesh, z, cscale, idx):
     """Build only the color binary for a partial update."""
     rgb = _colorscale_rgb(z, cscale)
-    colors = np.column_stack([
-        rgb[idx, 0], rgb[idx, 1], rgb[idx, 2],
-        np.full(len(idx), 220, dtype=np.uint8),
-    ]).astype(np.uint8)
+    colors = np.column_stack(
+        [
+            rgb[idx, 0],
+            rgb[idx, 1],
+            rgb[idx, 2],
+            np.full(len(idx), 220, dtype=np.uint8),
+        ]
+    ).astype(np.uint8)
     return encode_binary_attribute(colors)
 
 
@@ -267,7 +282,7 @@ def _build_agent_data(sim, mesh, scale=1.0, landscape=None):
     behaviors = sim.pool.behavior[alive]
     energies = sim.pool.ed_kJ_g[alive]
     agent_ids = np.where(alive)[0]
-    is_hexsim = hasattr(mesh, '_edge')
+    is_hexsim = hasattr(mesh, "_edge")
 
     pts = []
     for tri, beh, ed, aid in zip(tris, behaviors, energies, agent_ids):
@@ -280,11 +295,13 @@ def _build_agent_data(sim, mesh, scale=1.0, landscape=None):
         else:
             x = float(mesh.centroids[tri, 1] * scale)
             y = float(mesh.centroids[tri, 0] * scale)
-        pts.append({
-            "position": [round(x, 2), round(y, 2)],
-            "color": [rc, gc, bc, 240],
-            "info": f"#{aid} {BEH_NAMES[beh_int]} | {ed:.1f} kJ/g",
-        })
+        pts.append(
+            {
+                "position": [round(x, 2), round(y, 2)],
+                "color": [rc, gc, bc, 240],
+                "info": f"#{aid} {BEH_NAMES[beh_int]} | {ed:.1f} kJ/g",
+            }
+        )
     return pts
 
 
@@ -295,17 +312,21 @@ def _build_agent_binary(sim, mesh, scale=1.0):
         return None, None, 0
     tris = sim.pool.tri_idx[alive]
     behaviors = sim.pool.behavior[alive]
-    is_hexsim = hasattr(mesh, '_edge')
+    is_hexsim = hasattr(mesh, "_edge")
     if is_hexsim:
-        positions = np.column_stack([
-            mesh.centroids[tris, 1] * scale,
-            -mesh.centroids[tris, 0] * scale,
-        ]).astype(np.float32)
+        positions = np.column_stack(
+            [
+                mesh.centroids[tris, 1] * scale,
+                -mesh.centroids[tris, 0] * scale,
+            ]
+        ).astype(np.float32)
     else:
-        positions = np.column_stack([
-            mesh.centroids[tris, 1] * scale,
-            mesh.centroids[tris, 0] * scale,
-        ]).astype(np.float32)
+        positions = np.column_stack(
+            [
+                mesh.centroids[tris, 1] * scale,
+                mesh.centroids[tris, 0] * scale,
+            ]
+        ).astype(np.float32)
     colors = BEH_COLORS_ARRAY[behaviors]
     n = int(alive.sum())
     return encode_binary_attribute(positions), encode_binary_attribute(colors), n
@@ -313,6 +334,7 @@ def _build_agent_binary(sim, mesh, scale=1.0):
 
 class TrailBuffer:
     """NumPy rolling buffer for agent movement trails."""
+
     MAX_AGENTS = 2000
     TRAIL_LEN = 10
 
@@ -337,7 +359,7 @@ class TrailBuffer:
                 self._tracked = alive_idx.copy()
             else:
                 step = max(1, n // self.MAX_AGENTS)
-                self._tracked = alive_idx[::step][:self.MAX_AGENTS]
+                self._tracked = alive_idx[::step][: self.MAX_AGENTS]
             self._fill = 0
             self._ptr = 0
         nt = min(len(self._tracked), self.MAX_AGENTS)
@@ -362,7 +384,9 @@ class TrailBuffer:
         if self._fill < 2 or self._tracked is None:
             return []
         nt = min(len(self._tracked), self.MAX_AGENTS)
-        order = [(self._ptr - self._fill + i) % self.TRAIL_LEN for i in range(self._fill)]
+        order = [
+            (self._ptr - self._fill + i) % self.TRAIL_LEN for i in range(self._fill)
+        ]
         paths = []
         for i in range(nt):
             trail = self._buf[i, order, :].tolist()
@@ -374,8 +398,11 @@ class TrailBuffer:
 
 # Blank map style for non-geographic (orthographic) rendering
 import base64 as _b64
-_blank_json = '{"version":8,"sources":{},"layers":[{"id":"background","type":"background","paint":{"background-color":"#0b1f2c"}}]}'
-BLANK_STYLE = "data:application/json;base64," + _b64.b64encode(_blank_json.encode()).decode()
+
+_blank_json = '{"version":8,"sources":{},"layers":[{"id":"background","type":"background","paint":{"background-color":"#020a10"}}]}'
+BLANK_STYLE = (
+    "data:application/json;base64," + _b64.b64encode(_blank_json.encode()).decode()
+)
 
 # Static assets directory
 WWW_DIR = Path(__file__).parent / "www"
@@ -401,7 +428,7 @@ map_widget = MapWidget(
     style=BLANK_STYLE,
     tooltip={"html": "{info}", "style": TOOLTIP_STYLE},
     controller=True,
-    parameters={"clearColor": [11/255, 31/255, 44/255, 1]},
+    parameters={"clearColor": [11 / 255, 31 / 255, 44 / 255, 1]},
 )
 
 viewer_map_widget = MapWidget(
@@ -410,10 +437,11 @@ viewer_map_widget = MapWidget(
     style=BLANK_STYLE,
     tooltip={"html": "{info}", "style": TOOLTIP_STYLE},
     controller=True,
-    parameters={"clearColor": [11/255, 31/255, 44/255, 1]},
+    parameters={"clearColor": [11 / 255, 31 / 255, 44 / 255, 1]},
 )
 
 # ── HexSim workspace discovery ───────────────────────────────────────────────
+
 
 def _find_workspaces() -> dict[str, str]:
     """Find HexSim workspace directories (contain .grid files)."""
@@ -442,6 +470,7 @@ def _list_hxn_layers(ws_path: str) -> dict[str, str]:
     for hxn in sorted(ws.glob("*.hxn")):
         layers[str(hxn)] = hxn.stem
     return layers
+
 
 # --- Theme toggle JS (flash prevention + toggle logic) ---
 THEME_JS = """
@@ -521,7 +550,9 @@ app_ui = ui.page_sidebar(
                 ui.column(
                     12,
                     ui.div(
-                        ui.div("Behavioral State Distribution", class_="chart-card-title"),
+                        ui.div(
+                            "Behavioral State Distribution", class_="chart-card-title"
+                        ),
                         ui.output_ui("behavior_plot"),
                         class_="chart-card",
                     ),
@@ -551,7 +582,7 @@ app_ui = ui.page_sidebar(
             class_="navbar-subtitle",
         ),
         ui.tags.button(
-            "\u263E",
+            "\u263e",
             id="theme-toggle-btn",
             onclick="toggleTheme()",
             class_="theme-toggle",
@@ -566,7 +597,9 @@ def server(input, output, session):
     sim_state = reactive.Value(None)
     running = reactive.Value(False)
     history = reactive.Value([])
-    step_stats = reactive.Value({"t": 0, "alive": 0, "dead": 0, "arrived": 0, "behaviors": {}})
+    step_stats = reactive.Value(
+        {"t": 0, "alive": 0, "dead": 0, "arrived": 0, "behaviors": {}}
+    )
     trail_buffer = TrailBuffer()
 
     @reactive.effect
@@ -581,15 +614,24 @@ def server(input, output, session):
 
         # Apply estuary overrides from UI controls
         est = cfg.setdefault("estuary", {})
-        est.setdefault("salinity_cost", {}).update({
-            "S_opt": input.s_opt(), "S_tol": input.s_tol(), "k": input.sal_k(),
-        })
-        est.setdefault("do_avoidance", {}).update({
-            "lethal": input.do_lethal(), "high": input.do_high(),
-        })
-        est.setdefault("seiche_pause", {}).update({
-            "dSSHdt_thresh_m_per_15min": input.seiche_thresh(),
-        })
+        est.setdefault("salinity_cost", {}).update(
+            {
+                "S_opt": input.s_opt(),
+                "S_tol": input.s_tol(),
+                "k": input.sal_k(),
+            }
+        )
+        est.setdefault("do_avoidance", {}).update(
+            {
+                "lethal": input.do_lethal(),
+                "high": input.do_high(),
+            }
+        )
+        est.setdefault("seiche_pause", {}).update(
+            {
+                "dSSHdt_thresh_m_per_15min": input.seiche_thresh(),
+            }
+        )
 
         # Capture reactive values before entering thread
         n_agents = input.n_agents()
@@ -615,11 +657,19 @@ def server(input, output, session):
 
         # Run blocking init in a thread to avoid freezing the event loop
         sim = await asyncio.to_thread(
-            Simulation, cfg, n_agents=n_agents, data_dir="data", rng_seed=rng_seed,
+            Simulation,
+            cfg,
+            n_agents=n_agents,
+            data_dir="data",
+            rng_seed=rng_seed,
         )
         sim.bio_params = BioParams(
-            RA=ra, RB=rb, RQ=rq, ED_MORTAL=ed_mortal,
-            T_OPT=t_opt, T_MAX=t_max,
+            RA=ra,
+            RB=rb,
+            RQ=rq,
+            ED_MORTAL=ed_mortal,
+            T_OPT=t_opt,
+            T_MAX=t_max,
         )
         sim._activity_lut = sim._build_activity_lut()
         sim.pool.ed_kJ_g[:] = ed_init
@@ -627,11 +677,13 @@ def server(input, output, session):
 
         # ── Initialize streaming chart bins ──
         ws = sim.mesh._workspace
-        if ws and 'Gradient [ upstream ]' in ws.hexmaps:
-            up_hm = ws.hexmaps['Gradient [ upstream ]']
+        if ws and "Gradient [ upstream ]" in ws.hexmaps:
+            up_hm = ws.hexmaps["Gradient [ upstream ]"]
             up_vals = up_hm.values[up_hm.values > 0]
             max_dist = float(up_vals.max()) if len(up_vals) > 0 else 1.0
-            sim._upstream_distances = up_hm.values[sim.mesh._water_full_idx].astype(np.float64)
+            sim._upstream_distances = up_hm.values[sim.mesh._water_full_idx].astype(
+                np.float64
+            )
         else:
             max_dist = float(abs(sim.mesh.centroids[:, 0]).max())
             sim._upstream_distances = sim.mesh.centroids[:, 0].copy()
@@ -642,13 +694,16 @@ def server(input, output, session):
         # Push chart reset to JS
         try:
             n_agents = int(cfg["grid"].get("n_agents", input.n_agents()))
-            await session.send_custom_message("chart_reset", {
-                "max_time": int(input.n_steps()),
-                "n_agents": n_agents,
-                "river_length_km": float(max_dist),
-                "n_bins": 50,
-                "bin_edges": sim._migration_bins.tolist(),
-            })
+            await session.send_custom_message(
+                "chart_reset",
+                {
+                    "max_time": int(input.n_steps()),
+                    "n_agents": n_agents,
+                    "river_length_km": float(max_dist),
+                    "n_bins": 50,
+                    "bin_edges": sim._migration_bins.tolist(),
+                },
+            )
         except Exception:
             pass  # Session not ready yet on first load
 
@@ -657,7 +712,7 @@ def server(input, output, session):
 
         # Update field selector: HexSim meshes have spatial data layers
         is_hexsim = hasattr(sim.mesh, "n_cells")
-        if is_hexsim and hasattr(sim, 'landscape') and 'spatial_data' in sim.landscape:
+        if is_hexsim and hasattr(sim, "landscape") and "spatial_data" in sim.landscape:
             sd = sim.landscape["spatial_data"]
             choices = {name: name for name in sorted(sd.keys())}
             if not choices:
@@ -666,18 +721,21 @@ def server(input, output, session):
         elif is_hexsim:
             # HexSim without scenario loader — use environment fields
             choices = {}
-            if hasattr(sim.env, 'fields'):
+            if hasattr(sim.env, "fields"):
                 for k in sim.env.fields:
                     choices[k] = k.replace("_", " ").title()
             choices["depth"] = "Bathymetry"
             ui.update_select("map_field", choices=choices)
         else:
-            ui.update_select("map_field", choices={
-                "temperature": "Temperature",
-                "salinity": "Salinity",
-                "ssh": "Sea Surface Height",
-                "depth": "Bathymetry",
-            })
+            ui.update_select(
+                "map_field",
+                choices={
+                    "temperature": "Temperature",
+                    "salinity": "Salinity",
+                    "ssh": "Sea Surface Height",
+                    "depth": "Bathymetry",
+                },
+            )
 
     async def _push_chart_data(sim):
         """Push chart update to JS — lightweight JSON, no reactive cascade."""
@@ -698,22 +756,26 @@ def server(input, output, session):
             }
 
             # Migration histogram
-            if n_alive > 0 and hasattr(sim, '_upstream_distances'):
+            if n_alive > 0 and hasattr(sim, "_upstream_distances"):
                 dists = sim._upstream_distances[pool.tri_idx[alive_mask]]
                 bin_counts, _ = np.histogram(dists, bins=sim._migration_bins)
             else:
                 bin_counts = np.zeros(50, dtype=int)
 
-            await session.send_custom_message("chart_update", {
-                "t": sim.current_t,
-                "alive": n_alive,
-                "dead": n_total - n_alive,
-                "arrived": int(getattr(pool, 'n_arrived', 0)),
-                "behaviors": beh_counts,
-                "migration_bins": bin_counts.tolist(),
-            })
+            await session.send_custom_message(
+                "chart_update",
+                {
+                    "t": sim.current_t,
+                    "alive": n_alive,
+                    "dead": n_total - n_alive,
+                    "arrived": int(getattr(pool, "n_arrived", 0)),
+                    "behaviors": beh_counts,
+                    "migration_bins": bin_counts.tolist(),
+                },
+            )
         except Exception as exc:
             import logging
+
             logging.getLogger(__name__).debug("chart push failed: %s", exc)
 
     @reactive.effect
@@ -729,27 +791,37 @@ def server(input, output, session):
             if sim.pool.alive.any():
                 mesh = sim.mesh
                 all_tris = sim.pool.tri_idx
-                is_hex = hasattr(mesh, '_edge')
-                scale = _cached_scale if _cached_scale not in (0, 1.0) and is_hex else (
-                        80.0 / max(abs(mesh.centroids).max(), 1) if is_hex else 1.0)
+                is_hex = hasattr(mesh, "_edge")
+                scale = (
+                    _cached_scale
+                    if _cached_scale not in (0, 1.0) and is_hex
+                    else (80.0 / max(abs(mesh.centroids).max(), 1) if is_hex else 1.0)
+                )
                 if is_hex:
-                    all_xy = np.column_stack([mesh.centroids[all_tris, 1] * scale,
-                                              -mesh.centroids[all_tris, 0] * scale]).astype(np.float32)
+                    all_xy = np.column_stack(
+                        [
+                            mesh.centroids[all_tris, 1] * scale,
+                            -mesh.centroids[all_tris, 0] * scale,
+                        ]
+                    ).astype(np.float32)
                 else:
-                    all_xy = np.column_stack([mesh.centroids[all_tris, 1],
-                                              mesh.centroids[all_tris, 0]]).astype(np.float32)
+                    all_xy = np.column_stack(
+                        [mesh.centroids[all_tris, 1], mesh.centroids[all_tris, 0]]
+                    ).astype(np.float32)
                 trail_buffer.update(sim.pool.alive, all_xy)
             pool = sim.pool
             alive_mask = pool.alive.astype(bool)
             n_alive = int(alive_mask.sum())
             beh = pool.behavior[alive_mask] if n_alive > 0 else np.array([], dtype=int)
-            step_stats.set({
-                "t": sim.current_t,
-                "alive": n_alive,
-                "dead": len(pool.alive) - n_alive,
-                "arrived": int(getattr(pool, 'n_arrived', 0)),
-                "behaviors": {i: int((beh == i).sum()) for i in range(5)},
-            })
+            step_stats.set(
+                {
+                    "t": sim.current_t,
+                    "alive": n_alive,
+                    "dead": len(pool.alive) - n_alive,
+                    "arrived": int(getattr(pool, "n_arrived", 0)),
+                    "behaviors": {i: int((beh == i).sum()) for i in range(5)},
+                }
+            )
             history.set(sim.history.copy())
             await _push_chart_data(sim)
         except Exception as e:
@@ -767,42 +839,64 @@ def server(input, output, session):
             steps = input.n_steps()
             while running.get() and sim.current_t < steps:
                 speed = input.speed()
+
                 def _batch():
                     for _ in range(speed):
                         if sim.current_t >= steps:
                             break
                         sim.step()
+
                 t_batch = time.perf_counter()
                 await asyncio.to_thread(_batch)
                 elapsed = time.perf_counter() - t_batch
                 if sim.pool.alive.any():
                     mesh = sim.mesh
                     all_tris = sim.pool.tri_idx
-                    is_hex = hasattr(mesh, '_edge')
-                    scale = _cached_scale if _cached_scale not in (0, 1.0) and is_hex else (
-                        80.0 / max(abs(mesh.centroids).max(), 1) if is_hex else 1.0)
+                    is_hex = hasattr(mesh, "_edge")
+                    scale = (
+                        _cached_scale
+                        if _cached_scale not in (0, 1.0) and is_hex
+                        else (
+                            80.0 / max(abs(mesh.centroids).max(), 1) if is_hex else 1.0
+                        )
+                    )
                     if is_hex:
-                        all_xy = np.column_stack([mesh.centroids[all_tris, 1] * scale,
-                                                  -mesh.centroids[all_tris, 0] * scale]).astype(np.float32)
+                        all_xy = np.column_stack(
+                            [
+                                mesh.centroids[all_tris, 1] * scale,
+                                -mesh.centroids[all_tris, 0] * scale,
+                            ]
+                        ).astype(np.float32)
                     else:
-                        all_xy = np.column_stack([mesh.centroids[all_tris, 1],
-                                                  mesh.centroids[all_tris, 0]]).astype(np.float32)
+                        all_xy = np.column_stack(
+                            [mesh.centroids[all_tris, 1], mesh.centroids[all_tris, 0]]
+                        ).astype(np.float32)
                     trail_buffer.update(sim.pool.alive, all_xy)
                 pool = sim.pool
                 alive_mask = pool.alive.astype(bool)
                 n_alive = int(alive_mask.sum())
-                beh = pool.behavior[alive_mask] if n_alive > 0 else np.array([], dtype=int)
-                step_stats.set({
-                    "t": sim.current_t,
-                    "alive": n_alive,
-                    "dead": len(pool.alive) - n_alive,
-                    "arrived": int(getattr(pool, 'n_arrived', 0)),
-                    "behaviors": {i: int((beh == i).sum()) for i in range(5)},
-                })
+                beh = (
+                    pool.behavior[alive_mask]
+                    if n_alive > 0
+                    else np.array([], dtype=int)
+                )
+                step_stats.set(
+                    {
+                        "t": sim.current_t,
+                        "alive": n_alive,
+                        "dead": len(pool.alive) - n_alive,
+                        "arrived": int(getattr(pool, "n_arrived", 0)),
+                        "behaviors": {i: int((beh == i).sum()) for i in range(5)},
+                    }
+                )
                 history.set(sim.history.copy())
                 speed_val = speed
                 is_final = sim.current_t >= steps or not sim.pool.alive.any()
-                if is_final or speed_val <= 5 or sim.current_t % max(1, speed_val // 2) == 0:
+                if (
+                    is_final
+                    or speed_val <= 5
+                    or sim.current_t % max(1, speed_val // 2) == 0
+                ):
                     await _push_chart_data(sim)
                 await asyncio.sleep(max(0.05, 0.25 - elapsed))
         except Exception as e:
@@ -830,7 +924,7 @@ def server(input, output, session):
 
         # HexSim grids use blank style; only non-HexSim (TriMesh) uses basemap
         sim = sim_state.get()
-        is_hexsim = sim is not None and hasattr(sim.mesh, '_edge')
+        is_hexsim = sim is not None and hasattr(sim.mesh, "_edge")
         if is_hexsim:
             # Blank style bg color adapts via CSS, no basemap change needed
             pass
@@ -872,7 +966,7 @@ def server(input, output, session):
             ui.span(f"{n_arrived:,} arrived", class_="stat-val"),
             ui.span("|", class_="stat-sep"),
             ui.span(
-                f"\u2191{beh.get(3,0)} \u2193{beh.get(1,0)} \u2192{beh.get(0,0)} \u25cb{beh.get(4,0)}",
+                f"\u2191{beh.get(3, 0)} \u2193{beh.get(1, 0)} \u2192{beh.get(0, 0)} \u25cb{beh.get(4, 0)}",
                 class_="stat-val stat-behaviors",
             ),
             class_="live-stats-bar",
@@ -911,11 +1005,15 @@ def server(input, output, session):
 
         z_min = f"{float(np.nanmin(z)):.1f}"
         z_max = f"{float(np.nanmax(z)):.1f}"
-        gradient = ", ".join(f"{s[1]} {int(s[0]*100)}%" for s in cscale)
+        gradient = ", ".join(f"{s[1]} {int(s[0] * 100)}%" for s in cscale)
 
         # Grid type label
         is_hexsim = hasattr(sim.mesh, "n_cells")
-        grid_label = f"Hexagonal Grid ({sim.mesh.n_cells:,} cells)" if is_hexsim else "Triangular Mesh"
+        grid_label = (
+            f"Hexagonal Grid ({sim.mesh.n_cells:,} cells)"
+            if is_hexsim
+            else "Triangular Mesh"
+        )
 
         # Behavior chips + agent count (only if agents alive)
         beh_html = ""
@@ -930,7 +1028,7 @@ def server(input, output, session):
                 chips.append(
                     f'<span class="map-legend-beh-item">'
                     f'<span class="map-legend-beh-dot" style="background:{color}"></span>'
-                    f'{name} ({count})</span>'
+                    f"{name} ({count})</span>"
                 )
             beh_html = (
                 f'<div class="map-legend-section">Agents ({n_alive:,})</div>'
@@ -943,17 +1041,20 @@ def server(input, output, session):
             f'<div class="map-legend-title">{cbar_title}</div>'
             f'<div class="map-legend-bar" style="background:linear-gradient(to right,{gradient})"></div>'
             f'<div class="map-legend-range"><span>{z_min}</span><span>{z_max}</span></div>'
-            f'{beh_html}'
-            f'</div>'
+            f"{beh_html}"
+            f"</div>"
         )
 
     # --- Map update: three-tier strategy ---
     # Cache state for change detection
     _cached_landscape = ""
     _cached_field = ""
-    _cached_subsample_idx = None  # Columbia subsample / Curonian water indices (computed once)
+    _cached_subsample_idx = (
+        None  # Columbia subsample / Curonian water indices (computed once)
+    )
     _cached_scale = 1.0
     _cached_water_n = 0
+    _cached_water_layer = None  # Preserved across steps to prevent grid disappearance
 
     # Dynamic fields whose colors change on env.advance()
     DYNAMIC_FIELDS = {"temperature", "salinity", "ssh"}
@@ -964,27 +1065,29 @@ def server(input, output, session):
         is_hexsim = hasattr(sim.mesh, "n_cells")
 
         # HexSim: check spatial_data dict first
-        if is_hexsim and hasattr(sim, 'landscape') and 'spatial_data' in sim.landscape:
+        if is_hexsim and hasattr(sim, "landscape") and "spatial_data" in sim.landscape:
             sd = sim.landscape.get("spatial_data", {})
             if field_name in sd:
                 return sd[field_name], TEMP_COLORSCALE
 
         # Standard fields
         if field_name == "depth":
-            if hasattr(sim.mesh, 'depth'):
+            if hasattr(sim.mesh, "depth"):
                 return sim.mesh.depth, BATHY_COLORSCALE
             # HexSim meshes don't have depth — return zeros
-            return np.zeros(sim.mesh.n_cells if is_hexsim else sim.mesh.n_triangles), BATHY_COLORSCALE
+            return np.zeros(
+                sim.mesh.n_cells if is_hexsim else sim.mesh.n_triangles
+            ), BATHY_COLORSCALE
         elif field_name in sim.env.fields:
             return sim.env.fields[field_name], TEMP_COLORSCALE
 
         # Fallback: first available spatial data layer or temperature
-        if is_hexsim and hasattr(sim, 'landscape'):
+        if is_hexsim and hasattr(sim, "landscape"):
             sd = sim.landscape.get("spatial_data", {})
             if sd:
                 first_key = next(iter(sd))
                 return sd[first_key], TEMP_COLORSCALE
-        if hasattr(sim.mesh, 'depth'):
+        if hasattr(sim.mesh, "depth"):
             return sim.mesh.depth, BATHY_COLORSCALE
         return np.zeros(sim.mesh.n_cells if is_hexsim else 100), BATHY_COLORSCALE
 
@@ -1011,7 +1114,7 @@ def server(input, output, session):
     def _view_state(sim, landscape=None):
         """Return the appropriate view_state for the current landscape."""
         mesh = sim.mesh
-        is_hexsim = hasattr(mesh, '_edge')
+        is_hexsim = hasattr(mesh, "_edge")
         if is_hexsim:
             cx = mesh.centroids[:, 1] * _cached_scale
             cy = -mesh.centroids[:, 0] * _cached_scale
@@ -1029,10 +1132,12 @@ def server(input, output, session):
 
     def _agent_layer(sim, landscape=None):
         """Build the complete agent ScatterplotLayer dict."""
-        agent_data = _build_agent_data(sim, sim.mesh, scale=_cached_scale,
-                                        landscape=landscape)
+        agent_data = _build_agent_data(
+            sim, sim.mesh, scale=_cached_scale, landscape=landscape
+        )
         return scatterplot_layer(
-            "agents", agent_data,
+            "agents",
+            agent_data,
             getPosition="@@d.position",
             getFillColor="@@d.color",
             getRadius=150,
@@ -1046,9 +1151,11 @@ def server(input, output, session):
 
     def _agent_layer_binary(sim, scale=1.0):
         pos_bin, col_bin, n = _build_agent_binary(sim, sim.mesh, scale=scale)
-        is_hex = hasattr(sim.mesh, '_edge')
+        is_hex = hasattr(sim.mesh, "_edge")
         if n == 0:
-            return scatterplot_layer("agents", {"length": 0},
+            return scatterplot_layer(
+                "agents",
+                {"length": 0},
                 getPosition=encode_binary_attribute(np.zeros((0, 2), dtype=np.float32)),
                 getFillColor=encode_binary_attribute(np.zeros((0, 4), dtype=np.uint8)),
             )
@@ -1068,11 +1175,15 @@ def server(input, output, session):
 
     async def _full_update(sim, landscape=None):
         """Send everything: positions + colors + agents (~3 MB)."""
-        nonlocal _cached_water_n
+        nonlocal _cached_water_n, _cached_water_layer
         z, cscale = _resolve_field(sim)
         idx = _water_idx(sim)
         pos_bin, col_bin, n = _build_water_binary(
-            sim.mesh, z, cscale, idx, scale=_cached_scale,
+            sim.mesh,
+            z,
+            cscale,
+            idx,
+            scale=_cached_scale,
             landscape=landscape,
         )
         _cached_water_n = n
@@ -1086,12 +1197,17 @@ def server(input, output, session):
             edge_s = mesh._edge * _cached_scale
             verts, start_idx = _build_hex_polygons(cx, cy, edge_s)
             rgb = _colorscale_rgb(z, cscale)
-            colors = np.column_stack([
-                rgb[idx, 0], rgb[idx, 1], rgb[idx, 2],
-                np.full(n, 220, dtype=np.uint8),
-            ]).astype(np.uint8)
+            colors = np.column_stack(
+                [
+                    rgb[idx, 0],
+                    rgb[idx, 1],
+                    rgb[idx, 2],
+                    np.full(n, 220, dtype=np.uint8),
+                ]
+            ).astype(np.uint8)
             water = layer(
-                "SolidPolygonLayer", "water",
+                "SolidPolygonLayer",
+                "water",
                 data={"length": n, "startIndices": start_idx},
                 getPolygon=encode_binary_attribute(verts),
                 getFillColor=encode_binary_attribute(colors),
@@ -1101,7 +1217,8 @@ def server(input, output, session):
             )
         else:
             water = layer(
-                "ScatterplotLayer", "water",
+                "ScatterplotLayer",
+                "water",
                 data={"length": n},
                 getPosition=pos_bin,
                 getFillColor=col_bin,
@@ -1110,6 +1227,7 @@ def server(input, output, session):
                 radiusMaxPixels=6,
                 pickable=False,
             )
+        _cached_water_layer = water
         await map_widget.update(
             session,
             layers=[water, _agent_layer_binary(sim, scale=_cached_scale)],
@@ -1119,7 +1237,8 @@ def server(input, output, session):
 
     async def _hex_color_update(sim, landscape=None):
         """Rebuild hex grid with new field colors — no set_style, no view state change."""
-        is_hexsim = hasattr(sim.mesh, '_edge')
+        nonlocal _cached_water_layer
+        is_hexsim = hasattr(sim.mesh, "_edge")
         z, cscale = _resolve_field(sim)
         idx = _water_idx(sim)
         n = len(idx)
@@ -1132,55 +1251,83 @@ def server(input, output, session):
             edge_s = mesh._edge * scale
             verts, start_idx = _build_hex_polygons(cx, cy, edge_s)
             rgb = _colorscale_rgb(z, cscale)
-            colors = np.column_stack([
-                rgb[idx, 0], rgb[idx, 1], rgb[idx, 2],
-                np.full(n, 220, dtype=np.uint8),
-            ]).astype(np.uint8)
+            colors = np.column_stack(
+                [
+                    rgb[idx, 0],
+                    rgb[idx, 1],
+                    rgb[idx, 2],
+                    np.full(n, 220, dtype=np.uint8),
+                ]
+            ).astype(np.uint8)
             water = layer(
-                "SolidPolygonLayer", "water",
+                "SolidPolygonLayer",
+                "water",
                 data={"length": n, "startIndices": start_idx},
                 getPolygon=encode_binary_attribute(verts),
                 getFillColor=encode_binary_attribute(colors),
-                filled=True, extruded=False, pickable=False,
+                filled=True,
+                extruded=False,
+                pickable=False,
             )
+            _cached_water_layer = water
             layers = [water]
         else:
             col_bin = _build_color_binary(sim.mesh, z, cscale, idx)
-            layers = [{"id": "water", "getFillColor": col_bin,
-                       "data": {"length": _cached_water_n}}]
+            water = {
+                "id": "water",
+                "getFillColor": col_bin,
+                "data": {"length": _cached_water_n},
+            }
+            _cached_water_layer = water
+            layers = [water]
 
         # Also send agents + trails to avoid stale state
         layers.append(_agent_layer_binary(sim, scale=_cached_scale))
         if input.show_trails():
             trail_data = trail_buffer.build_paths()
             if trail_data:
-                layers.insert(0, layer("PathLayer", "trails",
-                    data=trail_data,
-                    getPath="@@d.path", getColor="@@d.color",
-                    widthMinPixels=1, widthMaxPixels=3,
-                    jointRounded=True, capRounded=True,
-                ))
-        else:
-            layers.insert(0, {"id": "trails", "visible": False})
+                layers.insert(
+                    0,
+                    layer(
+                        "PathLayer",
+                        "trails",
+                        data=trail_data,
+                        getPath="@@d.path",
+                        getColor="@@d.color",
+                        widthMinPixels=1,
+                        widthMaxPixels=3,
+                        jointRounded=True,
+                        capRounded=True,
+                    ),
+                )
+        # Don't send untyped trail hide dict — omit to preserve JS state
         await map_widget.partial_update(session, layers)
 
     async def _agent_trail_update(sim, landscape=None):
-        """Send agents and trails only — hex grid untouched in JS cache (~5 KB)."""
+        """Patch agents + trails only — water layer preserved in JS cache.
+
+        Uses partial_update() which merges patches into the cached layer stack.
+        The water layer (sent by _full_update) is preserved without re-sending.
+        Fixed in shiny_deckgl v1.9.0: cloneLayersData now deep-clones @@binary
+        markers so they survive multiple buildDeckLayers calls.
+        """
         layers = [_agent_layer_binary(sim, scale=_cached_scale)]
         if input.show_trails():
             trail_data = trail_buffer.build_paths()
             if trail_data:
-                layers.insert(0, layer("PathLayer", "trails",
-                    data=trail_data,
-                    getPath="@@d.path",
-                    getColor="@@d.color",
-                    widthMinPixels=1,
-                    widthMaxPixels=3,
-                    jointRounded=True,
-                    capRounded=True,
-                ))
-        else:
-            layers.insert(0, {"id": "trails", "visible": False})
+                layers.append(
+                    layer(
+                        "PathLayer",
+                        "trails",
+                        data=trail_data,
+                        getPath="@@d.path",
+                        getColor="@@d.color",
+                        widthMinPixels=1,
+                        widthMaxPixels=3,
+                        jointRounded=True,
+                        capRounded=True,
+                    ),
+                )
         await map_widget.partial_update(session, layers)
 
     @reactive.effect
@@ -1198,8 +1345,9 @@ def server(input, output, session):
         is_hexsim = hasattr(sim.mesh, "n_cells")
         if is_hexsim:
             # Compute scale to keep pseudo-lat/lon within ±80 degrees
-            max_coord = max(abs(sim.mesh.centroids[:, 0]).max(),
-                            abs(sim.mesh.centroids[:, 1]).max())
+            max_coord = max(
+                abs(sim.mesh.centroids[:, 0]).max(), abs(sim.mesh.centroids[:, 1]).max()
+            )
             scale = 80.0 / max(max_coord, 1)
         else:
             scale = 1.0
@@ -1238,7 +1386,9 @@ def server(input, output, session):
         and serve it via iframe — same pattern as the deck.gl map.
         """
         html_str = pio.to_html(
-            fig, include_plotlyjs="cdn", full_html=True,
+            fig,
+            include_plotlyjs="cdn",
+            full_html=True,
             config={"displayModeBar": False, "responsive": True},
         )
         chart_path = WWW_DIR / f"{name}.html"
@@ -1258,28 +1408,38 @@ def server(input, output, session):
         theme = input.theme_mode() or "dark"
         # Throttle during Run: skip chart regeneration every 5th step
         if running.get() and h and len(h) > 5 and len(h) % 5 != 0:
-            return ui.tags.iframe(src="survival.html", width="100%",
-                height="280px", style="border:none;border-radius:8px;background:transparent;")
+            return ui.tags.iframe(
+                src="survival.html",
+                width="100%",
+                height="280px",
+                style="border:none;border-radius:8px;background:transparent;",
+            )
         fig = go.Figure()
         if not h:
             fig.update_layout(**_base_layout(theme=theme, height=280))
             return _plotly_iframe(fig, "survival")
         times = [r["time"] for r in h]
         alive = [r["n_alive"] for r in h]
-        fig.add_trace(go.Scatter(
-            x=times, y=alive, mode="lines",
-            line=dict(color=TEAL, width=2.5),
-            fill="tozeroy",
-            fillcolor="rgba(61, 155, 143, 0.15)",
-            name="Alive",
-        ))
-        fig.update_layout(**_base_layout(
-            theme=theme,
-            height=280,
-            xaxis_title="Hour",
-            yaxis_title="N alive",
-            showlegend=False,
-        ))
+        fig.add_trace(
+            go.Scatter(
+                x=times,
+                y=alive,
+                mode="lines",
+                line=dict(color=TEAL, width=2.5),
+                fill="tozeroy",
+                fillcolor="rgba(61, 155, 143, 0.15)",
+                name="Alive",
+            )
+        )
+        fig.update_layout(
+            **_base_layout(
+                theme=theme,
+                height=280,
+                xaxis_title="Hour",
+                yaxis_title="N alive",
+                showlegend=False,
+            )
+        )
         return _plotly_iframe(fig, "survival")
 
     # --- Energy Plot ---
@@ -1288,8 +1448,12 @@ def server(input, output, session):
         h = history.get()
         theme = input.theme_mode() or "dark"
         if running.get() and h and len(h) > 5 and len(h) % 5 != 0:
-            return ui.tags.iframe(src="energy.html", width="100%",
-                height="280px", style="border:none;border-radius:8px;background:transparent;")
+            return ui.tags.iframe(
+                src="energy.html",
+                width="100%",
+                height="280px",
+                style="border:none;border-radius:8px;background:transparent;",
+            )
         fig = go.Figure()
         if not h:
             fig.update_layout(**_base_layout(theme=theme, height=280))
@@ -1297,26 +1461,35 @@ def server(input, output, session):
         times = [r["time"] for r in h]
         ed = [r.get("mean_ed", 0) for r in h]
         accent = ACCENT_COLOR_LIGHT if theme == "light" else ACCENT_COLOR
-        fig.add_trace(go.Scatter(
-            x=times, y=ed, mode="lines",
-            line=dict(color=accent, width=2.5),
-            fill="tozeroy",
-            fillcolor="rgba(232, 213, 183, 0.1)",
-            name="Mean ED",
-        ))
+        fig.add_trace(
+            go.Scatter(
+                x=times,
+                y=ed,
+                mode="lines",
+                line=dict(color=accent, width=2.5),
+                fill="tozeroy",
+                fillcolor="rgba(232, 213, 183, 0.1)",
+                name="Mean ED",
+            )
+        )
         fig.add_hline(
-            y=4.0, line_dash="dot", line_color=SALMON_COLOR, line_width=1.5,
+            y=4.0,
+            line_dash="dot",
+            line_color=SALMON_COLOR,
+            line_width=1.5,
             annotation_text="Mortality",
             annotation_font=dict(size=10, color=SALMON_COLOR),
             annotation_position="top left",
         )
-        fig.update_layout(**_base_layout(
-            theme=theme,
-            height=280,
-            xaxis_title="Hour",
-            yaxis_title="kJ/g",
-            showlegend=False,
-        ))
+        fig.update_layout(
+            **_base_layout(
+                theme=theme,
+                height=280,
+                xaxis_title="Hour",
+                yaxis_title="kJ/g",
+                showlegend=False,
+            )
+        )
         return _plotly_iframe(fig, "energy")
 
     # --- Behavior Plot ---
@@ -1325,8 +1498,12 @@ def server(input, output, session):
         h = history.get()
         theme = input.theme_mode() or "dark"
         if running.get() and h and len(h) > 5 and len(h) % 5 != 0:
-            return ui.tags.iframe(src="behavior.html", width="100%",
-                height="280px", style="border:none;border-radius:8px;background:transparent;")
+            return ui.tags.iframe(
+                src="behavior.html",
+                width="100%",
+                height="280px",
+                style="border:none;border-radius:8px;background:transparent;",
+            )
         fig = go.Figure()
         if not h:
             fig.update_layout(**_base_layout(theme=theme, height=280))
@@ -1334,24 +1511,34 @@ def server(input, output, session):
         times = [r["time"] for r in h]
         for b in range(5):
             counts = [r.get("behavior_counts", {}).get(b, 0) for r in h]
-            fig.add_trace(go.Scatter(
-                x=times, y=counts, mode="lines", name=BEH_NAMES[b],
-                stackgroup="one",
-                line=dict(color=BEH_COLORS[b], width=0.5),
-                fillcolor=BEH_COLORS[b],
-            ))
-        fig.update_layout(**_base_layout(
-            theme=theme,
-            height=280,
-            xaxis_title="Hour",
-            yaxis_title="Count",
-            legend=dict(
-                orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5,
-                font=dict(size=10),
-            ),
-        ))
+            fig.add_trace(
+                go.Scatter(
+                    x=times,
+                    y=counts,
+                    mode="lines",
+                    name=BEH_NAMES[b],
+                    stackgroup="one",
+                    line=dict(color=BEH_COLORS[b], width=0.5),
+                    fillcolor=BEH_COLORS[b],
+                )
+            )
+        fig.update_layout(
+            **_base_layout(
+                theme=theme,
+                height=280,
+                xaxis_title="Hour",
+                yaxis_title="Count",
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="center",
+                    x=0.5,
+                    font=dict(size=10),
+                ),
+            )
+        )
         return _plotly_iframe(fig, "behavior")
-
 
     # ── HexSim Viewer tab ─────────────────────────────────────────────────
     _viewer_initialized = False
@@ -1450,7 +1637,9 @@ def server(input, output, session):
 
         # Hex center coordinates (matches hxnparser.HexMap.hex_to_xy)
         # Pointy-top spacing (verified against HexSim 4.0.20)
-        cx = np.sqrt(3.0) * edge * (data_cols.astype(np.float64) + 0.5 * (data_rows % 2))
+        cx = (
+            np.sqrt(3.0) * edge * (data_cols.astype(np.float64) + 0.5 * (data_rows % 2))
+        )
         cy = 1.5 * edge * data_rows.astype(np.float64)
 
         # Subsample for deck.gl — stride-based to preserve spatial tiling
@@ -1475,10 +1664,14 @@ def server(input, output, session):
         # Color by value
         z = water_values[idx]
         rgb = _colorscale_rgb(z, TEMP_COLORSCALE)
-        colors = np.column_stack([
-            rgb[:, 0], rgb[:, 1], rgb[:, 2],
-            np.full(n_pts, 220, dtype=np.uint8),
-        ]).astype(np.uint8)
+        colors = np.column_stack(
+            [
+                rgb[:, 0],
+                rgb[:, 1],
+                rgb[:, 2],
+                np.full(n_pts, 220, dtype=np.uint8),
+            ]
+        ).astype(np.uint8)
 
         center_x = float(np.mean(sx))
         center_y = float(np.mean(sy))
@@ -1494,7 +1687,8 @@ def server(input, output, session):
         zoom = max(zoom_for_hex, zoom_for_extent)
 
         water_layer = layer(
-            "SolidPolygonLayer", "viewer_water",
+            "SolidPolygonLayer",
+            "viewer_water",
             data={"length": n_pts, "startIndices": start_idx},
             getPolygon=encode_binary_attribute(verts),
             getFillColor=encode_binary_attribute(colors),
@@ -1508,37 +1702,45 @@ def server(input, output, session):
             await viewer_map_widget.update(
                 session,
                 layers=[water_layer],
-                view_state={"longitude": center_x, "latitude": center_y, "zoom": float(zoom)},
+                view_state={
+                    "longitude": center_x,
+                    "latitude": center_y,
+                    "zoom": float(zoom),
+                },
                 views=[map_view(controller=True)],
             )
             _viewer_initialized = True
             ui.notification_show(
                 f"Loaded {n_pts:,} hexagons (zoom={zoom:.1f})",
-                type="message", duration=5,
+                type="message",
+                duration=5,
             )
         except Exception as e:
             ui.notification_show(f"Map update failed: {e}", type="error", duration=10)
             import traceback
+
             traceback.print_exc()
 
         # Store metadata for display
-        _viewer_meta.set({
-            "format": hm.format,
-            "version": hm.version,
-            "ncols": hm.height,   # data rows = grid ncols (short axis)
-            "nrows": hm.width,    # data stride = grid nrows (long axis)
-            "total_cells": hm.n_hexagons,
-            "water_cells": n_water,
-            "cell_size": hm.cell_size if hm.cell_size > 0 else None,
-            "edge": edge,
-            "origin": hm.origin,
-            "nodata": hm.nodata,
-            "vmin": float(np.nanmin(water_values)),
-            "vmax": float(np.nanmax(water_values)),
-            "vmean": float(np.nanmean(water_values)),
-            "n_unique": int(len(np.unique(water_values))),
-            "layer_name": Path(hxn_path).parent.name,
-        })
+        _viewer_meta.set(
+            {
+                "format": hm.format,
+                "version": hm.version,
+                "ncols": hm.height,  # data rows = grid ncols (short axis)
+                "nrows": hm.width,  # data stride = grid nrows (long axis)
+                "total_cells": hm.n_hexagons,
+                "water_cells": n_water,
+                "cell_size": hm.cell_size if hm.cell_size > 0 else None,
+                "edge": edge,
+                "origin": hm.origin,
+                "nodata": hm.nodata,
+                "vmin": float(np.nanmin(water_values)),
+                "vmax": float(np.nanmax(water_values)),
+                "vmean": float(np.nanmean(water_values)),
+                "n_unique": int(len(np.unique(water_values))),
+                "layer_name": Path(hxn_path).parent.name,
+            }
+        )
 
     _viewer_meta = reactive.Value({})
 
@@ -1548,14 +1750,16 @@ def server(input, output, session):
         if not meta:
             return ui.HTML(
                 '<div class="param-hint">Select a workspace and layer, '
-                'then click Load Layer.</div>'
+                "then click Load Layer.</div>"
             )
 
         origin = meta.get("origin", (0, 0))
-        cell_size_str = f'{meta["cell_size"]:.3f} m' if meta["cell_size"] else "from .grid"
+        cell_size_str = (
+            f"{meta['cell_size']:.3f} m" if meta["cell_size"] else "from .grid"
+        )
         hex_area = (3.0 * np.sqrt(3.0) / 2.0) * meta["edge"] ** 2
 
-        return ui.HTML(f'''
+        return ui.HTML(f"""
             <div class="viewer-meta">
                 <strong class="viewer-meta-title">{meta["layer_name"]}</strong><br>
                 <span class="viewer-meta-label">Format:</span> {meta["format"]}<br>
@@ -1563,7 +1767,7 @@ def server(input, output, session):
                 <span class="viewer-meta-label">Grid:</span> {meta["ncols"]} &times; {meta["nrows"]}<br>
                 <span class="viewer-meta-label">Total hexagons:</span> {meta["total_cells"]:,}<br>
                 <span class="viewer-meta-label">Water cells:</span> {meta["water_cells"]:,}
-                    ({100*meta["water_cells"]/meta["total_cells"]:.1f}%)<br>
+                    ({100 * meta["water_cells"] / meta["total_cells"]:.1f}%)<br>
                 <span class="viewer-meta-label">Hex edge:</span> {meta["edge"]:.3f} m<br>
                 <span class="viewer-meta-label">Hex area:</span> {hex_area:.1f} m&sup2;<br>
                 <span class="viewer-meta-label">Cell size:</span> {cell_size_str}<br>
@@ -1573,20 +1777,20 @@ def server(input, output, session):
                 &nbsp; min={meta["vmin"]:.2f} &nbsp; max={meta["vmax"]:.2f}<br>
                 &nbsp; mean={meta["vmean"]:.2f} &nbsp; unique={meta["n_unique"]}<br>
             </div>
-        ''')
+        """)
 
     @render.ui
     def viewer_legend():
         meta = _viewer_meta.get()
         if not meta:
             return ui.HTML("")
-        gradient = ", ".join(f"{s[1]} {int(s[0]*100)}%" for s in TEMP_COLORSCALE)
+        gradient = ", ".join(f"{s[1]} {int(s[0] * 100)}%" for s in TEMP_COLORSCALE)
         return ui.HTML(
             f'<div class="map-legend">'
             f'<div class="map-legend-title">{meta["layer_name"]}</div>'
             f'<div class="map-legend-bar" style="background:linear-gradient(to right,{gradient})"></div>'
             f'<div class="map-legend-range"><span>{meta["vmin"]:.1f}</span><span>{meta["vmax"]:.1f}</span></div>'
-            f'</div>'
+            f"</div>"
         )
 
 
