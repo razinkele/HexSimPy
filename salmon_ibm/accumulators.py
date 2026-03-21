@@ -1,4 +1,5 @@
 """Accumulator system: general-purpose per-agent floating-point state."""
+
 from __future__ import annotations
 
 import ast
@@ -10,6 +11,7 @@ import numpy as np
 @dataclass
 class AccumulatorDef:
     """Definition for a single accumulator column."""
+
     name: str
     min_val: float | None = None
     max_val: float | None = None
@@ -66,6 +68,7 @@ class AccumulatorManager:
 # Updater functions (Tasks 2-4)
 # ---------------------------------------------------------------------------
 
+
 def updater_clear(manager, acc_name, mask):
     """Reset accumulator to zero (or min_val if > 0) for masked agents."""
     idx = manager._resolve_idx(acc_name)
@@ -105,26 +108,50 @@ def updater_stochastic_increment(manager, acc_name, mask, *, low, high, rng):
 # --- Expression updater helpers ---
 
 _SAFE_MATH = {
-    "sqrt": np.sqrt, "abs": np.abs, "exp": np.exp, "log": np.log,
-    "log10": np.log10, "sin": np.sin, "cos": np.cos, "tan": np.tan,
-    "minimum": np.minimum, "maximum": np.maximum,
-    "clip": np.clip, "where": np.where,
-    "pi": np.pi, "e": np.e,
+    "sqrt": np.sqrt,
+    "abs": np.abs,
+    "exp": np.exp,
+    "log": np.log,
+    "log10": np.log10,
+    "sin": np.sin,
+    "cos": np.cos,
+    "tan": np.tan,
+    "minimum": np.minimum,
+    "maximum": np.maximum,
+    "clip": np.clip,
+    "where": np.where,
+    "pi": np.pi,
+    "e": np.e,
 }
 
 _ALLOWED_NODE_TYPES = (
-    ast.Expression, ast.BinOp, ast.UnaryOp, ast.Call, ast.Constant,
-    ast.Name, ast.Load, ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow,
-    ast.Mod, ast.USub, ast.UAdd,
-    ast.Subscript, ast.Attribute,  # needed for _g["name"], _rng.random
+    ast.Expression,
+    ast.BinOp,
+    ast.UnaryOp,
+    ast.Call,
+    ast.Constant,
+    ast.Name,
+    ast.Load,
+    ast.Add,
+    ast.Sub,
+    ast.Mult,
+    ast.Div,
+    ast.Pow,
+    ast.Mod,
+    ast.USub,
+    ast.UAdd,
+    ast.Subscript,
+    ast.Attribute,  # needed for _g["name"], _rng.random
 )
 
 
 def _validate_expression(expr):
-    tree = ast.parse(expr, mode='eval')
+    tree = ast.parse(expr, mode="eval")
     for node in ast.walk(tree):
         if not isinstance(node, _ALLOWED_NODE_TYPES):
-            raise ValueError(f"Disallowed construct in expression: {type(node).__name__}")
+            raise ValueError(
+                f"Disallowed construct in expression: {type(node).__name__}"
+            )
         if isinstance(node, ast.Call):
             if isinstance(node.func, ast.Name):
                 if node.func.id not in _SAFE_MATH:
@@ -138,7 +165,8 @@ class _LazyAccDict:
     Avoids building a full {name: masked_column} dict for all 74 accumulators
     when the expression only references 1-2.
     """
-    __slots__ = ('_data', '_mask', '_idx', '_cache')
+
+    __slots__ = ("_data", "_mask", "_idx", "_cache")
 
     def __init__(self, data, mask, name_to_idx):
         self._data = data
@@ -164,7 +192,9 @@ class _LazyAccDict:
             return default
 
 
-def updater_expression(manager, acc_name, mask, *, expression, globals_dict=None, rng=None):
+def updater_expression(
+    manager, acc_name, mask, *, expression, globals_dict=None, rng=None
+):
     """Evaluate algebraic expression over accumulators with AST safety validation.
 
     If globals_dict is provided, use HexSim DSL translation mode:
@@ -180,6 +210,7 @@ def updater_expression(manager, acc_name, mask, *, expression, globals_dict=None
     if globals_dict is not None:
         # HexSim mode: translate and evaluate with full namespace
         from salmon_ibm.hexsim_expr import translate_hexsim_expr, build_hexsim_namespace
+
         translated = translate_hexsim_expr(expression)
         n_masked = int(mask.sum())
         # Lazy dict: only copies columns that the expression actually reads
@@ -200,9 +231,12 @@ def updater_expression(manager, acc_name, mask, *, expression, globals_dict=None
     result = np.asarray(result, dtype=np.float64)
     if result.ndim == 0:
         result = np.full(mask.sum(), float(result))
-    result = np.nan_to_num(result, nan=0.0,
-                           posinf=defn.max_val if defn.max_val is not None else 0.0,
-                           neginf=defn.min_val if defn.min_val is not None else 0.0)
+    result = np.nan_to_num(
+        result,
+        nan=0.0,
+        posinf=defn.max_val if defn.max_val is not None else 0.0,
+        neginf=defn.min_val if defn.min_val is not None else 0.0,
+    )
     if defn.min_val is not None:
         result = np.maximum(result, defn.min_val)
     if defn.max_val is not None:
@@ -213,7 +247,11 @@ def updater_expression(manager, acc_name, mask, *, expression, globals_dict=None
 def updater_time_step(manager, acc_name, mask, *, timestep, modulus=None):
     """Write current timestep (optionally with modulus) to accumulator."""
     idx = manager._resolve_idx(acc_name)
-    value = float(timestep % modulus) if modulus is not None and modulus > 0 else float(timestep)
+    value = (
+        float(timestep % modulus)
+        if modulus is not None and modulus > 0
+        else float(timestep)
+    )
     manager.data[mask, idx] = value
 
 
@@ -244,9 +282,14 @@ def updater_quantify_location(manager, acc_name, mask, *, hex_map, cell_indices)
 
 # --- Remaining 17 updater functions (complete HexSim set) ---
 
+
 def updater_accumulator_transfer(
-    manager, source_name: str, target_name: str, mask,
-    *, fraction: float = 1.0,
+    manager,
+    source_name: str,
+    target_name: str,
+    mask,
+    *,
+    fraction: float = 1.0,
 ):
     """Transfer a fraction of one accumulator's value to another."""
     src_idx = manager._resolve_idx(source_name)
@@ -263,28 +306,52 @@ def updater_accumulator_transfer(
 
 
 def updater_allocated_hexagons(
-    manager, acc_name: str, mask, *, range_allocator, agent_indices,
+    manager,
+    acc_name: str,
+    mask,
+    *,
+    range_allocator,
+    agent_indices,
 ):
     """Count hexagons in each agent's allocated territory."""
     idx = manager._resolve_idx(acc_name)
     for i in np.where(mask)[0]:
-        agent_range = range_allocator.get_range(i) if hasattr(range_allocator, 'get_range') else None
-        count = len(agent_range.cells) if agent_range is not None and hasattr(agent_range, 'cells') else 0
+        agent_range = (
+            range_allocator.get_range(i)
+            if hasattr(range_allocator, "get_range")
+            else None
+        )
+        count = (
+            len(agent_range.cells)
+            if agent_range is not None and hasattr(agent_range, "cells")
+            else 0
+        )
         manager.data[i, idx] = float(count)
 
 
 def updater_explored_hexagons(
-    manager, acc_name: str, mask, *, explored_sets, agent_indices,
+    manager,
+    acc_name: str,
+    mask,
+    *,
+    explored_sets,
+    agent_indices,
 ):
     """Count hexagons in each agent's explored area."""
     idx = manager._resolve_idx(acc_name)
     for i in np.where(mask)[0]:
-        explored = explored_sets.get(i, set()) if isinstance(explored_sets, dict) else set()
+        explored = (
+            explored_sets.get(i, set()) if isinstance(explored_sets, dict) else set()
+        )
         manager.data[i, idx] = float(len(explored))
 
 
 def updater_group_size(
-    manager, acc_name: str, mask, *, group_ids,
+    manager,
+    acc_name: str,
+    mask,
+    *,
+    group_ids,
 ):
     """Write the size of each agent's group to accumulator."""
     idx = manager._resolve_idx(acc_name)
@@ -298,7 +365,12 @@ def updater_group_size(
 
 
 def updater_group_sum(
-    manager, acc_name: str, source_name: str, mask, *, group_ids,
+    manager,
+    acc_name: str,
+    source_name: str,
+    mask,
+    *,
+    group_ids,
 ):
     """Sum a source accumulator across all group members, write to target."""
     src_idx = manager._resolve_idx(source_name)
@@ -313,7 +385,11 @@ def updater_group_sum(
 
 
 def updater_births(
-    manager, acc_name: str, mask, *, birth_counts,
+    manager,
+    acc_name: str,
+    mask,
+    *,
+    birth_counts,
 ):
     """Write the number of offspring produced by each agent."""
     idx = manager._resolve_idx(acc_name)
@@ -321,7 +397,12 @@ def updater_births(
 
 
 def updater_mate_verification(
-    manager, acc_name: str, mask, *, mate_ids, alive,
+    manager,
+    acc_name: str,
+    mask,
+    *,
+    mate_ids,
+    alive,
 ):
     """Clear mate accumulator if the mate has died."""
     idx = manager._resolve_idx(acc_name)
@@ -333,7 +414,13 @@ def updater_mate_verification(
 
 
 def updater_quantify_extremes(
-    manager, acc_name: str, mask, *, hex_map, cell_indices, mode="max",
+    manager,
+    acc_name: str,
+    mask,
+    *,
+    hex_map,
+    cell_indices,
+    mode="max",
 ):
     """Write min or max hex-map value in each agent's explored/allocated area.
 
@@ -344,7 +431,13 @@ def updater_quantify_extremes(
 
 
 def updater_hexagon_presence(
-    manager, acc_name: str, mask, *, hex_map, cell_indices, threshold=0.0,
+    manager,
+    acc_name: str,
+    mask,
+    *,
+    hex_map,
+    cell_indices,
+    threshold=0.0,
 ):
     """Write 1.0 if hex-map value at agent's cell exceeds threshold, else 0.0."""
     idx = manager._resolve_idx(acc_name)
@@ -353,24 +446,35 @@ def updater_hexagon_presence(
 
 
 def updater_uptake(
-    manager, acc_name: str, mask, *, hex_map, cell_indices, rate=1.0,
+    manager,
+    acc_name: str,
+    mask,
+    *,
+    hex_map,
+    cell_indices,
+    rate=1.0,
 ):
     """Transfer value from hex-map into accumulator (resource extraction)."""
     idx = manager._resolve_idx(acc_name)
     defn = manager.definitions[idx]
-    extracted = hex_map[cell_indices[mask]] * rate
+    cells = cell_indices[mask]
+    extracted = hex_map[cells] * rate
     new_vals = manager.data[mask, idx] + extracted
     if defn.min_val is not None:
         new_vals = np.maximum(new_vals, defn.min_val)
     if defn.max_val is not None:
         new_vals = np.minimum(new_vals, defn.max_val)
     manager.data[mask, idx] = new_vals
-    # Deplete hex map
-    hex_map[cell_indices[mask]] -= extracted
+    # Use unbuffered subtract to handle repeated cell indices correctly
+    np.subtract.at(hex_map, cells, extracted)
 
 
 def updater_individual_locations(
-    manager, acc_name: str, mask, *, cell_indices,
+    manager,
+    acc_name: str,
+    mask,
+    *,
+    cell_indices,
 ):
     """Write each agent's current cell index (patch ID) to accumulator."""
     idx = manager._resolve_idx(acc_name)
@@ -378,13 +482,22 @@ def updater_individual_locations(
 
 
 def updater_resources_allocated(
-    manager, acc_name: str, mask, *, resource_map, range_allocator,
+    manager,
+    acc_name: str,
+    mask,
+    *,
+    resource_map,
+    range_allocator,
 ):
     """Percentage of resource target met by allocated territory (simplified)."""
     idx = manager._resolve_idx(acc_name)
     for i in np.where(mask)[0]:
-        agent_range = range_allocator.get_range(i) if hasattr(range_allocator, 'get_range') else None
-        if agent_range is not None and hasattr(agent_range, 'cells'):
+        agent_range = (
+            range_allocator.get_range(i)
+            if hasattr(range_allocator, "get_range")
+            else None
+        )
+        if agent_range is not None and hasattr(agent_range, "cells"):
             total_resource = sum(resource_map[c] for c in agent_range.cells)
             manager.data[i, idx] = total_resource
         else:
@@ -392,18 +505,31 @@ def updater_resources_allocated(
 
 
 def updater_resources_explored(
-    manager, acc_name: str, mask, *, resource_map, explored_sets,
+    manager,
+    acc_name: str,
+    mask,
+    *,
+    resource_map,
+    explored_sets,
 ):
     """Resource total in explored area (simplified)."""
     idx = manager._resolve_idx(acc_name)
     for i in np.where(mask)[0]:
-        explored = explored_sets.get(i, set()) if isinstance(explored_sets, dict) else set()
+        explored = (
+            explored_sets.get(i, set()) if isinstance(explored_sets, dict) else set()
+        )
         total = sum(resource_map[c] for c in explored)
         manager.data[i, idx] = float(total)
 
 
 def updater_subpopulation_assign(
-    manager, acc_name: str, mask, *, n_select, value, rng,
+    manager,
+    acc_name: str,
+    mask,
+    *,
+    n_select,
+    value,
+    rng,
 ):
     """Randomly select N agents from masked set and assign a value."""
     idx = manager._resolve_idx(acc_name)
@@ -416,7 +542,13 @@ def updater_subpopulation_assign(
 
 
 def updater_subpopulation_selector(
-    manager, acc_name: str, mask, *, group_ids, n_per_group, value,
+    manager,
+    acc_name: str,
+    mask,
+    *,
+    group_ids,
+    n_per_group,
+    value,
 ):
     """Select N agents per group (non-randomly, first N) and set value."""
     idx = manager._resolve_idx(acc_name)
@@ -429,7 +561,12 @@ def updater_subpopulation_selector(
 
 
 def updater_trait_value_index(
-    manager, acc_name: str, mask, *, trait_mgr, trait_name,
+    manager,
+    acc_name: str,
+    mask,
+    *,
+    trait_mgr,
+    trait_name,
 ):
     """Write each agent's trait category index to accumulator."""
     idx = manager._resolve_idx(acc_name)
@@ -438,7 +575,12 @@ def updater_trait_value_index(
 
 
 def updater_data_lookup(
-    manager, acc_name: str, mask, *, lookup_table, key_acc_name,
+    manager,
+    acc_name: str,
+    mask,
+    *,
+    lookup_table,
+    key_acc_name,
 ):
     """Look up values in a table keyed by another accumulator's integer value."""
     idx = manager._resolve_idx(acc_name)
