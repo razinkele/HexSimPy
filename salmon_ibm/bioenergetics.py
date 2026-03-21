@@ -18,6 +18,7 @@ class BioParams:
     T_OPT: float = 16.0  # optimal temperature for respiration (Macnaughton 2019)
     T_MAX: float = 26.0  # upper lethal temperature
     ED_TISSUE: float = 5.0  # energy density of catabolized tissue (kJ/g)
+    MASS_FLOOR_FRACTION: float = 0.5  # minimum mass as fraction of current mass
     activity_by_behavior: dict[int, float] = field(
         default_factory=lambda: {
             0: 1.0,
@@ -61,8 +62,8 @@ def update_energy(
     # This keeps ED constant under pure respiration (standard Wisconsin model).
     energy_fraction = np.where(e_total_j > 0, new_e_total_j / e_total_j, 0.0)
     new_mass = mass_g * energy_fraction
-    # Floor at 50% original mass to prevent numerical collapse
-    new_mass = np.maximum(new_mass, mass_g * 0.5)
+    # Floor at MASS_FLOOR_FRACTION of original mass to prevent numerical collapse
+    new_mass = np.maximum(new_mass, mass_g * params.MASS_FLOOR_FRACTION)
     new_ed = np.where(new_mass > 0, new_e_total_j / (new_mass * 1000.0), 0.0)
     dead = new_ed < params.ED_MORTAL
     return new_ed, dead, new_mass
