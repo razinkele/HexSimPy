@@ -162,7 +162,7 @@ class Simulation:
         population.push_temperature(temps)
 
     def _event_behavior_selection(self, population, landscape, t, mask):
-        step_mask = landscape["step_alive_mask"]
+        step_mask = population.alive & ~population.arrived
         t3h = population.t3h_mean()
         population.behavior[step_mask] = pick_behaviors(
             t3h[step_mask],

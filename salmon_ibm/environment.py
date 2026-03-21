@@ -48,6 +48,15 @@ class Environment:
         for field_name, var_name in self._var.items():
             self._preloaded[field_name] = self._phy[var_name].values
 
+        # Close datasets no longer needed after preloading
+        self._phy.close()
+        self._phy = None
+        self._wind.close()
+        self._wind = None
+        if self._riv is not None:
+            self._riv.close()
+            self._riv = None
+
     def advance(self, t: int):
         self._prev_ssh = self.fields.get("ssh")
         self.current_t = t
@@ -77,7 +86,4 @@ class Environment:
         return self.fields["ssh"] - self._prev_ssh
 
     def close(self):
-        self._phy.close()
-        self._wind.close()
-        if self._riv is not None:
-            self._riv.close()
+        pass  # Datasets closed after preloading in __init__
