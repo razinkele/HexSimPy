@@ -231,6 +231,16 @@ def updater_expression(
     result = np.asarray(result, dtype=np.float64)
     if result.ndim == 0:
         result = np.full(mask.sum(), float(result))
+    n_bad = np.count_nonzero(~np.isfinite(result))
+    if n_bad > 0:
+        import warnings
+
+        warnings.warn(
+            f"Expression '{expression}' produced {n_bad} NaN/Inf values "
+            f"out of {len(result)} agents. Replacing with bounds/zero.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     result = np.nan_to_num(
         result,
         nan=0.0,

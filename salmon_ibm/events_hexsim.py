@@ -1,4 +1,5 @@
 """HexSim-specific event types for real scenario XML compatibility."""
+
 from __future__ import annotations
 from dataclasses import dataclass, field
 import numpy as np
@@ -6,12 +7,15 @@ from salmon_ibm.events import Event, register_event
 
 try:
     from numba import njit
+
     HAS_NUMBA = True
 except ImportError:
     HAS_NUMBA = False
+
     def njit(*args, **kwargs):
         def decorator(func):
             return func
+
         if len(args) == 1 and callable(args[0]):
             return args[0]
         return decorator
@@ -21,9 +25,11 @@ except ImportError:
 # Numba JIT kernels for HexSim movement (hot path)
 # ---------------------------------------------------------------------------
 
+
 @njit(cache=True)
-def _move_gradient_numba(positions, water_nbrs, water_nbr_count, gradient,
-                         n_steps, walk_up, halt_dist):
+def _move_gradient_numba(
+    positions, water_nbrs, water_nbr_count, gradient, n_steps, walk_up, halt_dist
+):
     """JIT kernel: move agents along gradient for n_steps.
 
     Returns (final_positions, distances_moved).
@@ -66,8 +72,16 @@ def _move_gradient_numba(positions, water_nbrs, water_nbr_count, gradient,
 
 
 @njit(cache=True)
-def _move_affinity_numba(positions, water_nbrs, water_nbr_count,
-                         centroids_x, centroids_y, targets, n_steps, halt_dist):
+def _move_affinity_numba(
+    positions,
+    water_nbrs,
+    water_nbr_count,
+    centroids_x,
+    centroids_y,
+    targets,
+    n_steps,
+    halt_dist,
+):
     """JIT kernel: move agents toward affinity targets for n_steps.
 
     Returns (final_positions, distances_moved).
@@ -109,8 +123,15 @@ def _move_affinity_numba(positions, water_nbrs, water_nbr_count,
 
 
 @njit(cache=True)
-def _set_affinity_numba(current_cells, water_nbrs, water_nbr_count, gradient,
-                        min_bounds, max_bounds, better_strategy):
+def _set_affinity_numba(
+    current_cells,
+    water_nbrs,
+    water_nbr_count,
+    gradient,
+    min_bounds,
+    max_bounds,
+    better_strategy,
+):
     """JIT kernel: find best neighbor within bounds for each agent."""
     n = len(current_cells)
     targets = np.full(n, -1, dtype=np.intp)
@@ -202,6 +223,7 @@ def clear_combo_mask_cache():
 @dataclass
 class HexSimAccumulateEvent(Event):
     """HexSim-style accumulate event that dispatches updater_functions dicts at runtime."""
+
     updater_functions: list = field(default_factory=list)
 
     # Lazy-initialized dispatch table (avoids repeated imports + string comparisons)
@@ -209,10 +231,14 @@ class HexSimAccumulateEvent(Event):
 
     def _init_dispatch(self):
         from salmon_ibm.accumulators import (
-            updater_expression, updater_clear, updater_increment,
-            updater_time_step, updater_quantify_location,
+            updater_expression,
+            updater_clear,
+            updater_increment,
+            updater_time_step,
+            updater_quantify_location,
             updater_trait_value_index,
         )
+
         try:
             from salmon_ibm.accumulators import updater_individual_locations
         except ImportError:
@@ -264,9 +290,14 @@ class HexSimAccumulateEvent(Event):
                 if func_name == "Expression":
                     expr_str = params[0] if params else ""
                     if expr_str:
-                        handler(acc_mgr, acc_name, uf_mask,
-                                expression=expr_str,
-                                globals_dict=global_vars, rng=rng)
+                        handler(
+                            acc_mgr,
+                            acc_name,
+                            uf_mask,
+                            expression=expr_str,
+                            globals_dict=global_vars,
+                            rng=rng,
+                        )
                 elif func_name == "Clear":
                     handler(acc_mgr, acc_name, uf_mask)
                 elif func_name == "Increment":
@@ -274,34 +305,51 @@ class HexSimAccumulateEvent(Event):
                     handler(acc_mgr, acc_name, uf_mask, amount=amount)
                 elif func_name == "TimeStep":
                     modulus = int(float(params[0])) if params else 0
-                    handler(acc_mgr, acc_name, uf_mask,
-                            timestep=t,
-                            modulus=modulus if modulus > 0 else None)
+                    handler(
+                        acc_mgr,
+                        acc_name,
+                        uf_mask,
+                        timestep=t,
+                        modulus=modulus if modulus > 0 else None,
+                    )
                 elif func_name == "TraitId":
                     if source_trait and population.trait_mgr:
                         self._dispatch["TraitId"](
-                            acc_mgr, acc_name, uf_mask,
+                            acc_mgr,
+                            acc_name,
+                            uf_mask,
                             trait_mgr=population.trait_mgr,
-                            trait_name=source_trait)
+                            trait_name=source_trait,
+                        )
                 else:
                     # Spatial data updaters (IndividualLocations, QuantifyLocation, ExploredRunningSum)
                     if spatial and spatial in spatial_data:
                         layer = spatial_data[spatial]
                         self._dispatch.get("QuantifyLocation", handler)(
-                            acc_mgr, acc_name, uf_mask,
+                            acc_mgr,
+                            acc_name,
+                            uf_mask,
                             hex_map=layer,
-                            cell_indices=population.tri_idx)
+                            cell_indices=population.tri_idx,
+                        )
                     elif func_name == "IndividualLocations":
                         from salmon_ibm.accumulators import updater_quantify_location
-                        updater_quantify_location(acc_mgr, acc_name, uf_mask,
-                                                  hex_map=np.zeros(1),
-                                                  cell_indices=population.tri_idx)
+
+                        updater_quantify_location(
+                            acc_mgr,
+                            acc_name,
+                            uf_mask,
+                            hex_map=np.zeros(1),
+                            cell_indices=population.tri_idx,
+                        )
 
             except Exception as e:
                 import warnings
+
                 warnings.warn(
                     f"Updater {func_name} for '{acc_name}' failed: {e}",
-                    RuntimeWarning, stacklevel=2,
+                    RuntimeWarning,
+                    stacklevel=2,
                 )
 
 
@@ -313,6 +361,7 @@ class HexSimSurvivalEvent(Event):
     In HexSim, survivalEvent checks the trait linked to the named accumulator.
     Category 0 = "Will Die", any other category = survive.
     """
+
     survival_accumulator: str = ""
 
     def execute(self, population, landscape, t, mask):
@@ -334,6 +383,7 @@ class HexSimSurvivalEvent(Event):
 @dataclass
 class PatchIntroductionEvent(Event):
     """Place one agent on every non-zero cell of a named spatial data layer."""
+
     patch_spatial_data: str = ""
 
     def execute(self, population, landscape, t, mask):
@@ -351,6 +401,7 @@ class PatchIntroductionEvent(Event):
 @dataclass
 class DataLookupEvent(Event):
     """Look up values from a table using accumulator values as row/column keys."""
+
     file_name: str = ""
     row_accumulator: str = ""
     column_accumulator: str = ""
@@ -370,8 +421,10 @@ class DataLookupEvent(Event):
             col_vals = acc_mgr.get(self.column_accumulator)[alive_idx].astype(int)
             # 2D lookup
             valid = (
-                (row_vals >= 0) & (row_vals < self.lookup_table.shape[0]) &
-                (col_vals >= 0) & (col_vals < self.lookup_table.shape[1])
+                (row_vals >= 0)
+                & (row_vals < self.lookup_table.shape[0])
+                & (col_vals >= 0)
+                & (col_vals < self.lookup_table.shape[1])
             )
             result = np.zeros(len(alive_idx), dtype=np.float64)
             result[valid] = self.lookup_table[row_vals[valid], col_vals[valid]]
@@ -389,6 +442,7 @@ class DataLookupEvent(Event):
 @dataclass
 class SetSpatialAffinityEvent(Event):
     """Set a spatial affinity goal — pick best cell within bounds on a gradient."""
+
     affinity_name: str = ""
     strategy: str = "better"
     spatial_series: str = ""
@@ -422,9 +476,14 @@ class SetSpatialAffinityEvent(Event):
 
         if HAS_NUMBA:
             targets = _set_affinity_numba(
-                current_cells, mesh._water_nbrs, mesh._water_nbr_count,
-                gradient, min_bounds, max_bounds,
-                self.strategy == "better")
+                current_cells,
+                mesh._water_nbrs,
+                mesh._water_nbr_count,
+                gradient,
+                min_bounds,
+                max_bounds,
+                self.strategy == "better",
+            )
         else:
             # NumPy fallback
             n = len(alive_idx)
@@ -434,15 +493,23 @@ class SetSpatialAffinityEvent(Event):
             nbr_grad = gradient[safe_nbrs]
             cur_grad = gradient[current_cells]
             dist = np.abs(nbr_grad - cur_grad[:, np.newaxis])
-            in_bounds = valid & (dist >= min_bounds[:, np.newaxis]) & (dist <= max_bounds[:, np.newaxis])
+            in_bounds = (
+                valid
+                & (dist >= min_bounds[:, np.newaxis])
+                & (dist <= max_bounds[:, np.newaxis])
+            )
             candidate_vals = np.where(in_bounds, nbr_grad, -np.inf)
             if self.strategy == "better":
-                candidate_vals = np.where(candidate_vals > cur_grad[:, np.newaxis], candidate_vals, -np.inf)
+                candidate_vals = np.where(
+                    candidate_vals > cur_grad[:, np.newaxis], candidate_vals, -np.inf
+                )
             best_local = np.argmax(candidate_vals, axis=1)
             best_vals = candidate_vals[np.arange(n), best_local]
             has_valid = best_vals > -np.inf
             targets = np.full(n, -1, dtype=np.intp)
-            targets[has_valid] = nbr_matrix[np.where(has_valid)[0], best_local[has_valid]]
+            targets[has_valid] = nbr_matrix[
+                np.where(has_valid)[0], best_local[has_valid]
+            ]
 
         # Write targets to population affinity
         population.affinity_targets[alive_idx] = targets
@@ -459,6 +526,7 @@ class SetSpatialAffinityEvent(Event):
 @dataclass
 class HexSimMoveEvent(Event):
     """HexSim movement event — gradient-following with optional affinity targeting."""
+
     move_strategy: str = "onlyDisperse"
     dispersal_spatial_data: str = ""
     walk_up_gradient: bool = False
@@ -491,6 +559,17 @@ class HexSimMoveEvent(Event):
             spatial_data = landscape.get("spatial_data", {})
             gradient = spatial_data.get(self.dispersal_spatial_data)
             if gradient is None:
+                import warnings
+
+                available = list(spatial_data.keys()) if spatial_data else []
+                warnings.warn(
+                    f"HexSimMoveEvent '{self.name}': spatial data layer "
+                    f"'{self.dispersal_spatial_data}' not found. "
+                    f"Available layers: {available}. "
+                    f"Falling back to uniform gradient (no directed movement).",
+                    UserWarning,
+                    stacklevel=2,
+                )
                 gradient = np.ones(mesh.n_cells)
             self._cached_gradient = gradient
 
@@ -503,7 +582,7 @@ class HexSimMoveEvent(Event):
         # Use affinity targets if dispersalUseAffinity is set and targets exist
         use_affinity = self.dispersal_use_affinity is not None
         affinity_targets = None
-        if use_affinity and hasattr(population, 'affinity_targets'):
+        if use_affinity and hasattr(population, "affinity_targets"):
             affinity_targets = population.affinity_targets[alive_idx]
 
         # Movement kernel dispatch
@@ -527,8 +606,15 @@ class HexSimMoveEvent(Event):
                 cx = np.ascontiguousarray(mesh.centroids[:, 0])
                 cy = np.ascontiguousarray(mesh.centroids[:, 1])
                 aff_pos, aff_dist = _move_affinity_numba(
-                    aff_pos, water_nbrs, water_nbr_count,
-                    cx, cy, affinity_targets[aff_mask], n_steps, halt_dist)
+                    aff_pos,
+                    water_nbrs,
+                    water_nbr_count,
+                    cx,
+                    cy,
+                    affinity_targets[aff_mask],
+                    n_steps,
+                    halt_dist,
+                )
                 positions[aff_mask] = aff_pos
                 distances[aff_mask] = aff_dist
             elif len(aff_mask) > 0:
@@ -542,14 +628,18 @@ class HexSimMoveEvent(Event):
                         if tgt < 0 or water_nbr_count[c] <= 0:
                             break
                         best = c
-                        best_d = (mesh.centroids[c, 0] - mesh.centroids[tgt, 0]) ** 2 + \
-                                 (mesh.centroids[c, 1] - mesh.centroids[tgt, 1]) ** 2
+                        best_d = (
+                            mesh.centroids[c, 0] - mesh.centroids[tgt, 0]
+                        ) ** 2 + (mesh.centroids[c, 1] - mesh.centroids[tgt, 1]) ** 2
                         for k in range(water_nbr_count[c]):
                             nb = water_nbrs[c, k]
                             if nb < 0:
                                 continue
-                            d = (mesh.centroids[nb, 0] - mesh.centroids[tgt, 0]) ** 2 + \
-                                (mesh.centroids[nb, 1] - mesh.centroids[tgt, 1]) ** 2
+                            d = (
+                                mesh.centroids[nb, 0] - mesh.centroids[tgt, 0]
+                            ) ** 2 + (
+                                mesh.centroids[nb, 1] - mesh.centroids[tgt, 1]
+                            ) ** 2
                             if d < best_d:
                                 best_d = d
                                 best = nb
@@ -561,8 +651,14 @@ class HexSimMoveEvent(Event):
                 grad_pos = positions[grad_mask].copy()
                 if HAS_NUMBA:
                     grad_pos, grad_dist = _move_gradient_numba(
-                        grad_pos, water_nbrs, water_nbr_count,
-                        gradient, n_steps, self.walk_up_gradient, halt_dist)
+                        grad_pos,
+                        water_nbrs,
+                        water_nbr_count,
+                        gradient,
+                        n_steps,
+                        self.walk_up_gradient,
+                        halt_dist,
+                    )
                 else:
                     grad_dist = np.zeros(len(grad_mask))
                     for i in range(len(grad_mask)):
@@ -594,8 +690,14 @@ class HexSimMoveEvent(Event):
             # All agents follow gradient — single Numba call
             if HAS_NUMBA:
                 positions, distances = _move_gradient_numba(
-                    positions, water_nbrs, water_nbr_count,
-                    gradient, n_steps, self.walk_up_gradient, halt_dist)
+                    positions,
+                    water_nbrs,
+                    water_nbr_count,
+                    gradient,
+                    n_steps,
+                    self.walk_up_gradient,
+                    halt_dist,
+                )
             else:
                 distances = np.zeros(n_agents)
                 for i in range(n_agents):

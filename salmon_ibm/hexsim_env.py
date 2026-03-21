@@ -4,6 +4,7 @@ Serves the same ``fields`` dict interface as ``Environment`` but sources
 temperature from a zone lookup table (Temperature Zones layer +
 River Temperature.csv) instead of spatially-explicit NetCDF forcings.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -36,8 +37,12 @@ class HexSimEnvironment:
         (relative to workspace Analysis/Data Lookup/).
     """
 
-    def __init__(self, workspace_dir: str | Path, mesh: HexMesh,
-                 temperature_csv: str = "River Temperature.csv"):
+    def __init__(
+        self,
+        workspace_dir: str | Path,
+        mesh: HexMesh,
+        temperature_csv: str = "River Temperature.csv",
+    ):
         self.mesh = mesh
         ws = Path(workspace_dir)
         hex_dir = ws / "Spatial Data" / "Hexagons"
@@ -56,8 +61,7 @@ class HexSimEnvironment:
             csv_path = ws / "Analysis" / "Data Lookup" / temperature_csv
             if csv_path.exists():
                 # CSV has no header row; each row = a zone, each column = a timestep
-                self._temp_table = np.loadtxt(csv_path, delimiter=",",
-                                              dtype=np.float32)
+                self._temp_table = np.loadtxt(csv_path, delimiter=",", dtype=np.float32)
                 n_zones_found = int(self._zone_ids.max()) + 1
                 _validate_temp_table(self._temp_table, n_zones_found)
                 # Shape: (n_zones, n_timesteps)
@@ -65,6 +69,16 @@ class HexSimEnvironment:
                 self._has_temperature = True
 
         if not self._has_temperature:
+            import warnings
+
+            warnings.warn(
+                "No temperature zone data found in workspace. "
+                "Using constant 15°C for all cells. "
+                "Temperature-dependent processes (respiration, behavior, thermal mortality) "
+                "will not function correctly.",
+                UserWarning,
+                stacklevel=2,
+            )
             self._zone_ids = np.zeros(mesh.n_cells, dtype=int)
             self._temp_table = np.full((1, 1), 15.0, dtype=np.float32)
             self.n_timesteps = 1
