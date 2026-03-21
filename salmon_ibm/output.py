@@ -1,4 +1,5 @@
 """Track logging and diagnostics output."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -11,26 +12,56 @@ class OutputLogger:
     def __init__(self, path: str, centroids: np.ndarray):
         self.path = path
         self.centroids = centroids
-        self._records: list[dict] = []
+        self._times: list[np.ndarray] = []
+        self._agent_ids: list[np.ndarray] = []
+        self._tri_idxs: list[np.ndarray] = []
+        self._lats: list[np.ndarray] = []
+        self._lons: list[np.ndarray] = []
+        self._eds: list[np.ndarray] = []
+        self._behaviors: list[np.ndarray] = []
+        self._alive: list[np.ndarray] = []
+        self._arrived: list[np.ndarray] = []
 
     def log_step(self, t: int, pool: AgentPool):
-        lats = self.centroids[pool.tri_idx, 0]
-        lons = self.centroids[pool.tri_idx, 1]
-        for i in range(pool.n):
-            self._records.append({
-                "time": t,
-                "agent_id": i,
-                "tri_idx": int(pool.tri_idx[i]),
-                "lat": float(lats[i]),
-                "lon": float(lons[i]),
-                "ed_kJ_g": float(pool.ed_kJ_g[i]),
-                "behavior": int(pool.behavior[i]),
-                "alive": bool(pool.alive[i]),
-                "arrived": bool(pool.arrived[i]),
-            })
+        n = pool.n
+        self._times.append(np.full(n, t, dtype=np.int32))
+        self._agent_ids.append(np.arange(n, dtype=np.int32))
+        self._tri_idxs.append(pool.tri_idx.copy())
+        self._lats.append(self.centroids[pool.tri_idx, 0].copy())
+        self._lons.append(self.centroids[pool.tri_idx, 1].copy())
+        self._eds.append(pool.ed_kJ_g.copy())
+        self._behaviors.append(pool.behavior.copy())
+        self._alive.append(pool.alive.copy())
+        self._arrived.append(pool.arrived.copy())
 
     def to_dataframe(self) -> pd.DataFrame:
-        return pd.DataFrame(self._records)
+        if not self._times:
+            return pd.DataFrame(
+                columns=[
+                    "time",
+                    "agent_id",
+                    "tri_idx",
+                    "lat",
+                    "lon",
+                    "ed_kJ_g",
+                    "behavior",
+                    "alive",
+                    "arrived",
+                ]
+            )
+        return pd.DataFrame(
+            {
+                "time": np.concatenate(self._times),
+                "agent_id": np.concatenate(self._agent_ids),
+                "tri_idx": np.concatenate(self._tri_idxs),
+                "lat": np.concatenate(self._lats),
+                "lon": np.concatenate(self._lons),
+                "ed_kJ_g": np.concatenate(self._eds),
+                "behavior": np.concatenate(self._behaviors),
+                "alive": np.concatenate(self._alive),
+                "arrived": np.concatenate(self._arrived),
+            }
+        )
 
     def close(self):
         df = self.to_dataframe()
