@@ -1,8 +1,8 @@
 """ScenarioLoader: load a HexSim workspace + XML scenario → runnable simulation."""
+
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 
@@ -14,7 +14,11 @@ from salmon_ibm.population import Population
 from salmon_ibm.accumulators import AccumulatorManager, AccumulatorDef
 from salmon_ibm.traits import TraitManager, TraitDefinition, TraitType
 from salmon_ibm.events import (
-    Event, EventGroup, EveryStep, Once, MultiPopEventSequencer,
+    Event,
+    EventGroup,
+    EveryStep,
+    Once,
+    MultiPopEventSequencer,
 )
 from salmon_ibm.interactions import MultiPopulationManager
 
@@ -28,9 +32,9 @@ class HexSimSimulation:
 
     def __init__(self, populations, sequencer, environment, landscape, n_timesteps):
         self.populations = populations  # MultiPopulationManager
-        self.sequencer = sequencer      # MultiPopEventSequencer
+        self.sequencer = sequencer  # MultiPopEventSequencer
         self.environment = environment  # HexSimEnvironment
-        self.landscape = landscape      # dict with mesh, spatial_data, rng, etc.
+        self.landscape = landscape  # dict with mesh, spatial_data, rng, etc.
         self.n_timesteps = n_timesteps
         self.current_t = 0
         self.history = []
@@ -55,8 +59,9 @@ class HexSimSimulation:
 class ScenarioLoader:
     """Load a HexSim workspace + XML scenario → HexSimSimulation."""
 
-    def load(self, workspace_dir: str, scenario_xml: str,
-             rng_seed: int | None = None) -> HexSimSimulation:
+    def load(
+        self, workspace_dir: str, scenario_xml: str, rng_seed: int | None = None
+    ) -> HexSimSimulation:
         ws_dir = Path(workspace_dir)
         config = load_scenario_xml(scenario_xml)
 
@@ -78,7 +83,9 @@ class ScenarioLoader:
             multi_pop.register(pop)
 
         # 5. Build event tree
-        events = self._build_events(config["events"], config.get("global_variables", {}))
+        events = self._build_events(
+            config["events"], config.get("global_variables", {})
+        )
 
         # 5b. Load lookup tables from workspace CSVs
         self._load_lookup_tables(events, str(ws_dir))
@@ -115,8 +122,7 @@ class ScenarioLoader:
                 registry[name] = hm.values[mesh._water_full_idx].astype(np.float64)
         return registry
 
-    def _create_population(self, pop_def: dict, mesh: HexMesh,
-                           rng=None) -> Population:
+    def _create_population(self, pop_def: dict, mesh: HexMesh, rng=None) -> Population:
         """Create a Population from parsed XML definition."""
         if rng is None:
             rng = np.random.default_rng()
@@ -129,7 +135,11 @@ class ScenarioLoader:
             pool.alive[0] = False  # placeholder, not a real agent
         else:
             water_ids = np.where(mesh.water_mask)[0]
-            start_tris = rng.choice(water_ids, size=n, replace=True) if len(water_ids) > 0 else np.zeros(n, dtype=int)
+            start_tris = (
+                rng.choice(water_ids, size=n, replace=True)
+                if len(water_ids) > 0
+                else np.zeros(n, dtype=int)
+            )
             pool = AgentPool(n=n, start_tri=start_tris)
 
         pop = Population(name=pop_def["name"], pool=pool)
@@ -142,11 +152,17 @@ class ScenarioLoader:
             min_val_raw = acc.get("min_val")
             max_val_raw = acc.get("max_val")
             both_zero = (min_val_raw in (0, None)) and (max_val_raw in (0, None))
-            acc_defs.append(AccumulatorDef(
-                name=acc["name"],
-                min_val=None if both_zero else (min_val_raw if min_val_raw is not None else 0),
-                max_val=None if both_zero else (max_val_raw if max_val_raw is not None else 0),
-            ))
+            acc_defs.append(
+                AccumulatorDef(
+                    name=acc["name"],
+                    min_val=None
+                    if both_zero
+                    else (min_val_raw if min_val_raw is not None else 0),
+                    max_val=None
+                    if both_zero
+                    else (max_val_raw if max_val_raw is not None else 0),
+                )
+            )
         if acc_defs:
             pop.accumulator_mgr = AccumulatorManager(pop.pool.n, acc_defs)
 
@@ -155,38 +171,45 @@ class ScenarioLoader:
         for trait in pop_def.get("traits", []):
             if trait["type"] == "probabilistic":
                 categories = [c["name"] for c in trait["categories"]]
-                trait_defs.append(TraitDefinition(
-                    name=trait["name"],
-                    trait_type=TraitType.PROBABILISTIC,
-                    categories=categories,
-                ))
+                trait_defs.append(
+                    TraitDefinition(
+                        name=trait["name"],
+                        trait_type=TraitType.PROBABILISTIC,
+                        categories=categories,
+                    )
+                )
             elif trait["type"] == "accumulated":
                 categories = [c["name"] for c in trait["categories"]]
                 # Strip leading -inf from thresholds (np.digitize handles it implicitly)
-                thresholds = np.array([
-                    c["threshold"] for c in trait["categories"]
-                    if c["threshold"] != float("-inf")
-                ])
-                trait_defs.append(TraitDefinition(
-                    name=trait["name"],
-                    trait_type=TraitType.ACCUMULATED,
-                    categories=categories,
-                    accumulator_name=trait.get("accumulator"),
-                    thresholds=thresholds,
-                ))
+                thresholds = np.array(
+                    [
+                        c["threshold"]
+                        for c in trait["categories"]
+                        if c["threshold"] != float("-inf")
+                    ]
+                )
+                trait_defs.append(
+                    TraitDefinition(
+                        name=trait["name"],
+                        trait_type=TraitType.ACCUMULATED,
+                        categories=categories,
+                        accumulator_name=trait.get("accumulator"),
+                        thresholds=thresholds,
+                    )
+                )
         if trait_defs:
             pop.trait_mgr = TraitManager(pop.pool.n, trait_defs)
 
         return pop
 
-    def _build_events(self, event_defs: list[dict],
-                      global_variables: dict) -> list[Event]:
+    def _build_events(
+        self, event_defs: list[dict], global_variables: dict
+    ) -> list[Event]:
         """Convert parsed XML event dicts into Event objects."""
         # Import all event modules to populate EVENT_REGISTRY
         import salmon_ibm.events_builtin  # noqa: F401
-        import salmon_ibm.events_phase3   # noqa: F401
-        import salmon_ibm.events_hexsim   # noqa: F401
-        from salmon_ibm.events import EVENT_REGISTRY
+        import salmon_ibm.events_phase3  # noqa: F401
+        import salmon_ibm.events_hexsim  # noqa: F401
 
         events = []
         for edef in event_defs:
@@ -195,7 +218,9 @@ class ScenarioLoader:
                 events.append(evt)
         return events
 
-    def _build_single_event(self, edef: dict, global_variables: dict | None = None) -> Event | None:
+    def _build_single_event(
+        self, edef: dict, global_variables: dict | None = None
+    ) -> Event | None:
         """Recursively build an Event from a parsed dict."""
         etype = edef.get("type", "")
         name = edef.get("name", etype)
@@ -227,15 +252,18 @@ class ScenarioLoader:
 
         # Look up in EVENT_REGISTRY
         from salmon_ibm.events import EVENT_REGISTRY
+
         cls = EVENT_REGISTRY.get(etype)
         if cls is None:
             import warnings
+
             warnings.warn(
                 f"Event type '{etype}' not in EVENT_REGISTRY — "
                 f"replaced with no-op. Event: {name}",
                 stacklevel=2,
             )
             from salmon_ibm.events_hexsim import DataProbeEvent
+
             return DataProbeEvent(
                 name=f"[unimplemented:{etype}] {name}",
                 trigger=trigger,
@@ -246,6 +274,7 @@ class ScenarioLoader:
         # Try from_descriptor if available (Phase 3 incremental migration)
         if hasattr(cls, "from_descriptor"):
             from salmon_ibm.event_descriptors import DESCRIPTOR_REGISTRY
+
             desc_cls = DESCRIPTOR_REGISTRY.get(etype)
             if desc_cls is not None:
                 descriptor = desc_cls(
@@ -299,14 +328,30 @@ class ScenarioLoader:
     def _load_lookup_tables(self, events, workspace_dir: str) -> None:
         """Post-process events: load CSV files for DataLookupEvents."""
         from salmon_ibm.events_hexsim import DataLookupEvent
+
         ws = Path(workspace_dir)
         lookup_dir = ws / "Analysis" / "Data Lookup"
 
         for evt in events:
-            if isinstance(evt, DataLookupEvent) and evt.file_name and evt.lookup_table is None:
+            if (
+                isinstance(evt, DataLookupEvent)
+                and evt.file_name
+                and evt.lookup_table is None
+            ):
                 csv_path = lookup_dir / evt.file_name
                 if csv_path.exists():
-                    evt.lookup_table = np.loadtxt(csv_path, delimiter=",", dtype=np.float64)
+                    evt.lookup_table = np.loadtxt(
+                        csv_path, delimiter=",", dtype=np.float64
+                    )
+                else:
+                    import warnings
+
+                    warnings.warn(
+                        f"DataLookupEvent '{evt.name}': CSV file '{csv_path}' not found. "
+                        f"Event will be a no-op.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
             # Recurse into EventGroups
-            if hasattr(evt, 'sub_events'):
+            if hasattr(evt, "sub_events"):
                 self._load_lookup_tables(evt.sub_events, workspace_dir)

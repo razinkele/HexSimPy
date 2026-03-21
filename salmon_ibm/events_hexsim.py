@@ -292,7 +292,17 @@ class HexSimAccumulateEvent(Event):
             spatial = uf.get("spatial_data")
             source_trait = uf.get("source_trait")
 
-            if not acc_name or acc_name not in acc_mgr._name_to_idx:
+            if not acc_name:
+                continue
+            if acc_name not in acc_mgr._name_to_idx:
+                import warnings
+
+                warnings.warn(
+                    f"Updater '{func_name}' references unknown accumulator '{acc_name}'. "
+                    f"Available: {list(acc_mgr._name_to_idx.keys())}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
                 continue
 
             # Apply trait-combination sub-filtering if specified
@@ -303,6 +313,14 @@ class HexSimAccumulateEvent(Event):
             try:
                 handler = self._dispatch.get(func_name)
                 if handler is None:
+                    import warnings
+
+                    warnings.warn(
+                        f"Unknown updater function '{func_name}' for accumulator "
+                        f"'{acc_name}' — skipped. Known: {list(self._dispatch.keys())}",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
                     continue
 
                 if func_name == "Expression":
@@ -408,6 +426,16 @@ class PatchIntroductionEvent(Event):
         spatial_registry = landscape.get("spatial_data", {})
         layer = spatial_registry.get(self.patch_spatial_data)
         if layer is None:
+            import warnings
+
+            available = list(spatial_registry.keys()) if spatial_registry else []
+            warnings.warn(
+                f"PatchIntroductionEvent '{self.name}': spatial data layer "
+                f"'{self.patch_spatial_data}' not found. Available: {available}. "
+                f"No agents will be introduced.",
+                UserWarning,
+                stacklevel=2,
+            )
             return
         nonzero_cells = np.where(layer != 0)[0]
         if len(nonzero_cells) == 0:
