@@ -1,8 +1,12 @@
 """Shared fixtures and marks for salmon_ibm tests."""
+
 from pathlib import Path
 
-import numpy as np
 import pytest
+
+# Re-export shared mock classes so conftest.py is the single point of reference.
+# Import them from tests.helpers where the canonical definitions live.
+from tests.helpers import MockPopulation  # noqa: F401
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 GRID_FILE = DATA_DIR / "curonian_minimal_grid.nc"
@@ -19,6 +23,7 @@ def mesh():
     if not GRID_FILE.exists():
         pytest.skip("curonian_minimal_grid.nc not found")
     from salmon_ibm.mesh import TriMesh
+
     return TriMesh.from_netcdf(str(GRID_FILE))
 
 
@@ -28,4 +33,5 @@ def curonian_config():
     if not CONFIG_FILE.exists():
         pytest.skip("config_curonian_minimal.yaml not found")
     from salmon_ibm.config import load_config
+
     return load_config(str(CONFIG_FILE))

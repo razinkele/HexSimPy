@@ -1,16 +1,13 @@
 """Unit tests for multi-species interactions."""
+
 import numpy as np
-import pytest
-from salmon_ibm.interactions import MultiPopulationManager, InteractionEvent, InteractionOutcome
+from salmon_ibm.interactions import (
+    MultiPopulationManager,
+    InteractionEvent,
+    InteractionOutcome,
+)
 
-
-class MockPopulation:
-    def __init__(self, n, positions, alive=None):
-        self.n = n
-        self.tri_idx = np.array(positions, dtype=np.int64)
-        self.alive = np.ones(n, dtype=bool) if alive is None else np.array(alive, dtype=bool)
-        self.arrived = np.zeros(n, dtype=bool)
-        self.group_id = np.full(n, -1, dtype=np.int32)
+from tests.helpers import MockPopulation
 
 
 class TestMultiPopulationManager:
@@ -68,7 +65,8 @@ class TestInteractionEvent:
 
         event = InteractionEvent(
             name="predation",
-            pop_a_name="pred", pop_b_name="prey",
+            pop_a_name="pred",
+            pop_b_name="prey",
             encounter_probability=1.0,
             outcome=InteractionOutcome.PREDATION,
         )
@@ -87,19 +85,25 @@ class TestTransitionEvent:
         from salmon_ibm.agents import AgentPool
 
         pool = AgentPool(n=100, start_tri=0, rng_seed=42)
-        trait_defs = [TraitDefinition("disease", TraitType.PROBABILISTIC, ["S", "I", "R"])]
+        trait_defs = [
+            TraitDefinition("disease", TraitType.PROBABILISTIC, ["S", "I", "R"])
+        ]
         trait_mgr = TraitManager(100, trait_defs)
         # Start all as Susceptible (0)
         trait_mgr._data["disease"][:] = 0
         pop = Population("host", pool, trait_mgr=trait_mgr)
 
         # Transition: S->I with p=0.5, I->R with p=1.0, R stays
-        T = np.array([
-            [0.5, 0.5, 0.0],  # S: 50% chance to become I
-            [0.0, 0.0, 1.0],  # I: always becomes R
-            [0.0, 0.0, 1.0],  # R: stays R
-        ])
-        event = TransitionEvent(name="infect", trait_name="disease", transition_matrix=T)
+        T = np.array(
+            [
+                [0.5, 0.5, 0.0],  # S: 50% chance to become I
+                [0.0, 0.0, 1.0],  # I: always becomes R
+                [0.0, 0.0, 1.0],  # R: stays R
+            ]
+        )
+        event = TransitionEvent(
+            name="infect", trait_name="disease", transition_matrix=T
+        )
         landscape = {"rng": np.random.default_rng(42)}
         mask = pop.alive.copy()
         event.execute(pop, landscape, t=0, mask=mask)
