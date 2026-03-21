@@ -180,6 +180,14 @@ def _apply_trait_combo_mask(base_mask, uf, population):
         return base_mask
     trait_mgr = getattr(population, "trait_mgr", None)
     if trait_mgr is None:
+        import warnings
+
+        warnings.warn(
+            "Trait-combo filter requested but population has no trait_mgr. "
+            "Event will fire for ALL agents.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return base_mask
 
     # Check per-step cache
@@ -200,6 +208,15 @@ def _apply_trait_combo_mask(base_mask, uf, population):
     stride = 1
     for tname in reversed(stratified):
         if tname not in trait_mgr.definitions:
+            import warnings
+
+            warnings.warn(
+                f"Trait '{tname}' not found in trait_mgr. "
+                f"Available: {list(trait_mgr.definitions.keys())}. "
+                f"Event will fire for ALL agents.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
             return base_mask
         defn = trait_mgr.definitions[tname]
         n_cat = len(defn.categories)
@@ -207,6 +224,14 @@ def _apply_trait_combo_mask(base_mask, uf, population):
         stride *= n_cat
 
     if len(combo_flags) != stride:
+        import warnings
+
+        warnings.warn(
+            f"Trait combo flags length ({len(combo_flags)}) doesn't match "
+            f"expected stride ({stride}). Event will fire for ALL agents.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return base_mask
 
     enabled = combo_flags[flat_idx] == 1
@@ -343,7 +368,7 @@ class HexSimAccumulateEvent(Event):
                             cell_indices=population.tri_idx,
                         )
 
-            except Exception as e:
+            except (KeyError, ValueError, IndexError) as e:
                 import warnings
 
                 warnings.warn(
