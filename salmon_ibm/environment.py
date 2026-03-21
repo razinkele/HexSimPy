@@ -1,4 +1,5 @@
 """Time-varying environmental fields interpolated onto the triangular mesh."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -42,13 +43,18 @@ class Environment:
             "ssh": phy_cfg["ssh_var"],
         }
 
+        # Pre-load all time-varying data into memory for fast advance()
+        self._preloaded: dict[str, np.ndarray] = {}
+        for field_name, var_name in self._var.items():
+            self._preloaded[field_name] = self._phy[var_name].values
+
     def advance(self, t: int):
         self._prev_ssh = self.fields.get("ssh")
         self.current_t = t
         t_idx = t % self.n_timesteps
 
-        for field_name, var_name in self._var.items():
-            raw = self._phy[var_name].isel(time=t_idx).values
+        for field_name in self._var:
+            raw = self._preloaded[field_name][t_idx]
             flat = raw.ravel()
             tri_vals = flat[self.mesh.triangles].mean(axis=1)
             self.fields[field_name] = tri_vals
