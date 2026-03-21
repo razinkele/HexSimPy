@@ -6,7 +6,7 @@ import numpy as np
 from salmon_ibm.events import Event, register_event
 
 try:
-    from numba import njit
+    from numba import njit, prange
 
     HAS_NUMBA = True
 except ImportError:
@@ -20,13 +20,15 @@ except ImportError:
             return args[0]
         return decorator
 
+    prange = range
+
 
 # ---------------------------------------------------------------------------
 # Numba JIT kernels for HexSim movement (hot path)
 # ---------------------------------------------------------------------------
 
 
-@njit(cache=True)
+@njit(cache=True, parallel=True)
 def _move_gradient_numba(
     positions, water_nbrs, water_nbr_count, gradient, n_steps, walk_up, halt_dist
 ):
@@ -36,11 +38,9 @@ def _move_gradient_numba(
     """
     n = len(positions)
     distances = np.zeros(n, dtype=np.float64)
-    max_nbrs = water_nbrs.shape[1]
 
     for step in range(n_steps):
-        any_moved = False
-        for i in range(n):
+        for i in prange(n):
             if halt_dist > 0 and distances[i] >= halt_dist:
                 continue
             c = positions[i]
@@ -65,13 +65,10 @@ def _move_gradient_numba(
             if best_nb != c:
                 positions[i] = best_nb
                 distances[i] += 1.0
-                any_moved = True
-        if not any_moved:
-            break
     return positions, distances
 
 
-@njit(cache=True)
+@njit(cache=True, parallel=True)
 def _move_affinity_numba(
     positions,
     water_nbrs,
@@ -90,8 +87,7 @@ def _move_affinity_numba(
     distances = np.zeros(n, dtype=np.float64)
 
     for step in range(n_steps):
-        any_moved = False
-        for i in range(n):
+        for i in prange(n):
             if halt_dist > 0 and distances[i] >= halt_dist:
                 continue
             if targets[i] < 0:
@@ -116,13 +112,10 @@ def _move_affinity_numba(
             if best_nb != c:
                 positions[i] = best_nb
                 distances[i] += 1.0
-                any_moved = True
-        if not any_moved:
-            break
     return positions, distances
 
 
-@njit(cache=True)
+@njit(cache=True, parallel=True)
 def _set_affinity_numba(
     current_cells,
     water_nbrs,
@@ -135,7 +128,7 @@ def _set_affinity_numba(
     """JIT kernel: find best neighbor within bounds for each agent."""
     n = len(current_cells)
     targets = np.full(n, -1, dtype=np.intp)
-    for i in range(n):
+    for i in prange(n):
         cell = current_cells[i]
         count = water_nbr_count[cell]
         if count <= 0:
