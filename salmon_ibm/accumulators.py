@@ -144,8 +144,37 @@ _ALLOWED_NODE_TYPES = (
     ast.Attribute,  # needed for _g["name"], _rng.random
 )
 
+# Functions available in the HexSim DSL namespace (produced by translate_hexsim_expr)
+_HEXSIM_FUNCTIONS = frozenset(
+    {
+        "_cond",
+        "_g",
+        "_a",
+        "Floor",
+        "Pow",
+        "Exp",
+        "Max",
+        "Min",
+        "GasDev",
+        "Rand",
+    }
+)
 
-def _validate_expression(expr):
+
+def _validate_expression(expr, extra_names=None):
+    """Validate an expression AST for disallowed constructs.
+
+    Parameters
+    ----------
+    expr : str
+        The expression string to validate.
+    extra_names : frozenset or None
+        Additional function/name identifiers to allow beyond _SAFE_MATH.
+        Pass _HEXSIM_FUNCTIONS when validating translated HexSim expressions.
+    """
+    allowed_names = set(_SAFE_MATH)
+    if extra_names:
+        allowed_names |= extra_names
     tree = ast.parse(expr, mode="eval")
     for node in ast.walk(tree):
         if not isinstance(node, _ALLOWED_NODE_TYPES):
@@ -154,7 +183,7 @@ def _validate_expression(expr):
             )
         if isinstance(node, ast.Call):
             if isinstance(node.func, ast.Name):
-                if node.func.id not in _SAFE_MATH:
+                if node.func.id not in allowed_names:
                     raise ValueError(f"Unknown function in expression: {node.func.id}")
             # ast.Attribute calls (e.g., _rng.random) are allowed in HexSim mode
 
@@ -212,6 +241,7 @@ def updater_expression(
         from salmon_ibm.hexsim_expr import translate_hexsim_expr, build_hexsim_namespace
 
         translated = translate_hexsim_expr(expression)
+        _validate_expression(translated, extra_names=_HEXSIM_FUNCTIONS)
         n_masked = int(mask.sum())
         # Lazy dict: only copies columns that the expression actually reads
         # (avoids copying all 74 accumulators when expression uses 1-2)
