@@ -17,9 +17,18 @@ def salinity_cost(
     return np.minimum(1.0 + k * excess, max_cost)
 
 
-DO_OK = 0
-DO_ESCAPE = 1
-DO_LETHAL = 2
+from enum import IntEnum
+
+
+class DOState(IntEnum):
+    OK = 0
+    ESCAPE = 1
+    LETHAL = 2
+
+
+DO_OK = DOState.OK
+DO_ESCAPE = DOState.ESCAPE
+DO_LETHAL = DOState.LETHAL
 
 
 def do_override(

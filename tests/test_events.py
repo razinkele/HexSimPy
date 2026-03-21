@@ -1,13 +1,26 @@
 """Unit tests for the event engine."""
+
 import numpy as np
 import pytest
 
 from salmon_ibm.events import (
-    EveryStep, Once, Periodic, Window, RandomTrigger,
-    Event, EventSequencer, EventGroup,
+    EveryStep,
+    Once,
+    Periodic,
+    Window,
+    RandomTrigger,
+    Event,
+    EventSequencer,
+    EventGroup,
 )
 from salmon_ibm.agents import AgentPool
-from salmon_ibm.events_builtin import StageSpecificSurvivalEvent, IntroductionEvent, ReproductionEvent, FloaterCreationEvent, CensusEvent
+from salmon_ibm.events_builtin import (
+    StageSpecificSurvivalEvent,
+    IntroductionEvent,
+    ReproductionEvent,
+    FloaterCreationEvent,
+    CensusEvent,
+)
 from salmon_ibm.traits import TraitManager, TraitDefinition, TraitType
 from salmon_ibm.population import Population
 
@@ -31,7 +44,18 @@ class TestPeriodic:
     def test_fires_every_n_steps(self):
         trigger = Periodic(interval=3, offset=0)
         results = [trigger.should_fire(t) for t in range(10)]
-        assert results == [True, False, False, True, False, False, True, False, False, True]
+        assert results == [
+            True,
+            False,
+            False,
+            True,
+            False,
+            False,
+            True,
+            False,
+            False,
+            True,
+        ]
 
     def test_offset(self):
         trigger = Periodic(interval=4, offset=2)
@@ -71,6 +95,7 @@ class TestRandomTrigger:
 # Helpers for sequencer/group tests
 # ---------------------------------------------------------------------------
 
+
 class StubEvent(Event):
     def __init__(self, name, trigger=None):
         super().__init__(name=name, trigger=trigger or EveryStep())
@@ -93,12 +118,15 @@ class TestEventSequencer:
         e1 = StubEvent("first")
         e2 = StubEvent("second")
         orig1, orig2 = e1.execute, e2.execute
+
         def track1(*a, **kw):
             call_order.append("first")
             orig1(*a, **kw)
+
         def track2(*a, **kw):
             call_order.append("second")
             orig2(*a, **kw)
+
         e1.execute = track1
         e2.execute = track2
         seq = EventSequencer([e1, e2])
@@ -165,7 +193,12 @@ class TestEventGroup:
 # Built-in event types
 # ---------------------------------------------------------------------------
 
-from salmon_ibm.events_builtin import MovementEvent, SurvivalEvent, AccumulateEvent, CustomEvent
+from salmon_ibm.events_builtin import (
+    MovementEvent,
+    SurvivalEvent,
+    AccumulateEvent,
+    CustomEvent,
+)
 from salmon_ibm.bioenergetics import BioParams
 
 
@@ -217,8 +250,13 @@ class TestSurvivalEvent:
 class TestAccumulateEvent:
     def test_runs_updaters_in_order(self):
         call_log = []
-        def updater_a(pop, land, t, mask): call_log.append("a")
-        def updater_b(pop, land, t, mask): call_log.append("b")
+
+        def updater_a(pop, land, t, mask):
+            call_log.append("a")
+
+        def updater_b(pop, land, t, mask):
+            call_log.append("b")
+
         event = AccumulateEvent(name="acc", updaters=[updater_a, updater_b])
         pop = FakePopulation()
         mask = pop.alive & ~pop.arrived
@@ -228,6 +266,7 @@ class TestAccumulateEvent:
     def test_updater_modifies_population(self):
         def increment_steps(pop, land, t, mask):
             pop.steps = getattr(pop, "steps", 0) + 1
+
         event = AccumulateEvent(name="acc", updaters=[increment_steps])
         pop = FakePopulation()
         pop.steps = 0
@@ -239,7 +278,10 @@ class TestAccumulateEvent:
 class TestCustomEvent:
     def test_calls_callback(self):
         calls = []
-        def my_callback(pop, land, t, mask): calls.append(t)
+
+        def my_callback(pop, land, t, mask):
+            calls.append(t)
+
         event = CustomEvent(name="custom", callback=my_callback)
         pop = FakePopulation()
         mask = pop.alive & ~pop.arrived
@@ -248,7 +290,10 @@ class TestCustomEvent:
 
     def test_callback_receives_correct_mask(self):
         received = []
-        def capture(pop, land, t, mask): received.append(mask.copy())
+
+        def capture(pop, land, t, mask):
+            received.append(mask.copy())
+
         pop = FakePopulation(n=10)
         pop.alive[0:3] = False
         mask = pop.alive & ~pop.arrived
@@ -261,13 +306,16 @@ class TestCustomEvent:
 # YAML event loading
 # ---------------------------------------------------------------------------
 
-from salmon_ibm.events import load_events_from_config, EVENT_REGISTRY
+from salmon_ibm.events import load_events_from_config
 
 
 class TestLoadEventsFromConfig:
     def test_loads_custom_event(self):
         calls = []
-        def my_cb(pop, land, t, mask): calls.append(t)
+
+        def my_cb(pop, land, t, mask):
+            calls.append(t)
+
         defs = [{"type": "custom", "name": "my_cb"}]
         events = load_events_from_config(defs, {"my_cb": my_cb})
         assert len(events) == 1
@@ -276,6 +324,7 @@ class TestLoadEventsFromConfig:
     def test_loads_movement_event(self):
         # Ensure events_builtin is imported so register_event runs
         import salmon_ibm.events_builtin  # noqa: F401
+
         defs = [{"type": "movement", "name": "move", "params": {"n_micro_steps": 5}}]
         events = load_events_from_config(defs)
         assert len(events) == 1
@@ -292,7 +341,13 @@ class TestLoadEventsFromConfig:
             load_events_from_config(defs, {})
 
     def test_trigger_parsing(self):
-        defs = [{"type": "custom", "name": "x", "trigger": {"type": "periodic", "interval": 5, "offset": 2}}]
+        defs = [
+            {
+                "type": "custom",
+                "name": "x",
+                "trigger": {"type": "periodic", "interval": 5, "offset": 2},
+            }
+        ]
         events = load_events_from_config(defs, {"x": lambda *a: None})
         assert events[0].trigger.should_fire(2) is True
         assert events[0].trigger.should_fire(3) is False
@@ -303,11 +358,14 @@ class TestLoadEventsFromConfig:
 # Phase 2 lifecycle events
 # ---------------------------------------------------------------------------
 
+
 class TestStageSpecificSurvival:
     @pytest.fixture
     def pop_with_stages(self):
         pool = AgentPool(n=100, start_tri=0, rng_seed=42)
-        trait_defs = [TraitDefinition("stage", TraitType.PROBABILISTIC, ["juvenile", "adult"])]
+        trait_defs = [
+            TraitDefinition("stage", TraitType.PROBABILISTIC, ["juvenile", "adult"])
+        ]
         trait_mgr = TraitManager(100, trait_defs)
         trait_mgr._data["stage"][:50] = 0
         trait_mgr._data["stage"][50:] = 1
@@ -315,7 +373,9 @@ class TestStageSpecificSurvival:
         return pop
 
     def test_juvenile_high_mortality(self, pop_with_stages):
-        event = StageSpecificSurvivalEvent(name="survival", mortality_rates={"juvenile": 1.0, "adult": 0.0})
+        event = StageSpecificSurvivalEvent(
+            name="survival", mortality_rates={"juvenile": 1.0, "adult": 0.0}
+        )
         mask = pop_with_stages.alive.copy()
         landscape = {"rng": np.random.default_rng(42)}
         event.execute(pop_with_stages, landscape, t=0, mask=mask)
@@ -323,7 +383,9 @@ class TestStageSpecificSurvival:
         assert pop_with_stages.pool.alive[50:].sum() == 50
 
     def test_zero_mortality_preserves_all(self, pop_with_stages):
-        event = StageSpecificSurvivalEvent(name="survival", mortality_rates={"juvenile": 0.0, "adult": 0.0})
+        event = StageSpecificSurvivalEvent(
+            name="survival", mortality_rates={"juvenile": 0.0, "adult": 0.0}
+        )
         mask = pop_with_stages.alive.copy()
         landscape = {"rng": np.random.default_rng(42)}
         event.execute(pop_with_stages, landscape, t=0, mask=mask)
@@ -350,10 +412,19 @@ class TestIntroductionEvent:
 
     def test_sets_initial_traits(self):
         pool = AgentPool(n=5, start_tri=0, rng_seed=42)
-        trait_defs = [TraitDefinition("stage", TraitType.PROBABILISTIC, ["egg", "juvenile", "adult"])]
+        trait_defs = [
+            TraitDefinition(
+                "stage", TraitType.PROBABILISTIC, ["egg", "juvenile", "adult"]
+            )
+        ]
         trait_mgr = TraitManager(5, trait_defs)
         pop = Population("fish", pool, trait_mgr=trait_mgr)
-        event = IntroductionEvent(name="introduce", n_agents=3, positions=[0], initial_traits={"stage": "juvenile"})
+        event = IntroductionEvent(
+            name="introduce",
+            n_agents=3,
+            positions=[0],
+            initial_traits={"stage": "juvenile"},
+        )
         landscape = {"rng": np.random.default_rng(42)}
         event.execute(pop, landscape, t=0, mask=pop.alive.copy())
         assert (pop.trait_mgr._data["stage"][5:] == 1).all()
@@ -363,7 +434,9 @@ class TestReproductionEvent:
     @pytest.fixture
     def grouped_pop(self):
         pool = AgentPool(n=10, start_tri=5, rng_seed=42)
-        trait_defs = [TraitDefinition("stage", TraitType.PROBABILISTIC, ["juvenile", "adult"])]
+        trait_defs = [
+            TraitDefinition("stage", TraitType.PROBABILISTIC, ["juvenile", "adult"])
+        ]
         trait_mgr = TraitManager(10, trait_defs)
         trait_mgr._data["stage"][:] = 1
         pop = Population("fish", pool, trait_mgr=trait_mgr)
@@ -384,7 +457,12 @@ class TestReproductionEvent:
         assert (grouped_pop.pool.tri_idx[10:] == 5).all()
 
     def test_offspring_get_trait(self, grouped_pop):
-        event = ReproductionEvent(name="repro", clutch_mean=1.0, offspring_trait_name="stage", offspring_trait_value="juvenile")
+        event = ReproductionEvent(
+            name="repro",
+            clutch_mean=1.0,
+            offspring_trait_name="stage",
+            offspring_trait_value="juvenile",
+        )
         landscape = {"rng": np.random.default_rng(42)}
         event.execute(grouped_pop, landscape, t=0, mask=grouped_pop.alive.copy())
         assert (grouped_pop.trait_mgr._data["stage"][10:] == 0).all()
@@ -409,26 +487,33 @@ class TestFloaterCreationEvent:
     def test_releases_some_agents(self, all_grouped_pop):
         event = FloaterCreationEvent(name="release", probability=0.5)
         landscape = {"rng": np.random.default_rng(42)}
-        event.execute(all_grouped_pop, landscape, t=0, mask=all_grouped_pop.alive.copy())
+        event.execute(
+            all_grouped_pop, landscape, t=0, mask=all_grouped_pop.alive.copy()
+        )
         n_floaters = (all_grouped_pop.group_id == -1).sum()
         assert 0 < n_floaters < 20
 
     def test_probability_zero_releases_none(self, all_grouped_pop):
         event = FloaterCreationEvent(name="release", probability=0.0)
         landscape = {"rng": np.random.default_rng(42)}
-        event.execute(all_grouped_pop, landscape, t=0, mask=all_grouped_pop.alive.copy())
+        event.execute(
+            all_grouped_pop, landscape, t=0, mask=all_grouped_pop.alive.copy()
+        )
         assert (all_grouped_pop.group_id >= 0).all()
 
     def test_probability_one_releases_all(self, all_grouped_pop):
         event = FloaterCreationEvent(name="release", probability=1.0)
         landscape = {"rng": np.random.default_rng(42)}
-        event.execute(all_grouped_pop, landscape, t=0, mask=all_grouped_pop.alive.copy())
+        event.execute(
+            all_grouped_pop, landscape, t=0, mask=all_grouped_pop.alive.copy()
+        )
         assert (all_grouped_pop.group_id == -1).all()
 
 
 class TestCensusEvent:
     def test_records_basic_counts(self):
         from salmon_ibm.agents import AgentPool
+
         pool = AgentPool(n=20, start_tri=0, rng_seed=42)
         pop = Population("fish", pool)
         pop.pool.alive[15:] = False  # 15 alive, 5 dead
@@ -447,8 +532,11 @@ class TestCensusEvent:
 
     def test_records_trait_counts(self):
         from salmon_ibm.agents import AgentPool
+
         pool = AgentPool(n=10, start_tri=0, rng_seed=42)
-        trait_defs = [TraitDefinition("stage", TraitType.PROBABILISTIC, ["juv", "adult"])]
+        trait_defs = [
+            TraitDefinition("stage", TraitType.PROBABILISTIC, ["juv", "adult"])
+        ]
         trait_mgr = TraitManager(10, trait_defs)
         trait_mgr._data["stage"][:6] = 0  # 6 juvenile
         trait_mgr._data["stage"][6:] = 1  # 4 adult
@@ -465,6 +553,7 @@ class TestCensusEvent:
 
     def test_multiple_timesteps(self):
         from salmon_ibm.agents import AgentPool
+
         pool = AgentPool(n=10, start_tri=0, rng_seed=42)
         pop = Population("fish", pool)
         landscape = {}
@@ -480,7 +569,9 @@ class TestReproductionWithGenetics:
         from salmon_ibm.genetics import LocusDefinition, GenomeManager
 
         pool = AgentPool(n=10, start_tri=5, rng_seed=42)
-        trait_defs = [TraitDefinition("stage", TraitType.PROBABILISTIC, ["juv", "adult"])]
+        trait_defs = [
+            TraitDefinition("stage", TraitType.PROBABILISTIC, ["juv", "adult"])
+        ]
         trait_mgr = TraitManager(10, trait_defs)
         trait_mgr._data["stage"][:] = 1  # all adults
 
@@ -492,8 +583,10 @@ class TestReproductionWithGenetics:
         pop.group_id[:5] = 0  # first 5 grouped
 
         event = ReproductionEvent(
-            name="repro", clutch_mean=1.0,
-            offspring_trait_name="stage", offspring_trait_value="juv",
+            name="repro",
+            clutch_mean=1.0,
+            offspring_trait_name="stage",
+            offspring_trait_value="juv",
         )
         landscape = {"rng": np.random.default_rng(42)}
         event.execute(pop, landscape, t=0, mask=pop.alive.copy())
@@ -512,6 +605,7 @@ from salmon_ibm.events_builtin import LogSnapshotEvent, SummaryReportEvent
 class TestLogSnapshotEvent:
     def test_saves_npz_file(self, tmp_path):
         from salmon_ibm.agents import AgentPool
+
         pool = AgentPool(n=10, start_tri=0, rng_seed=42)
         pop = Population("fish", pool)
         landscape = {"log_dir": str(tmp_path)}
@@ -528,6 +622,7 @@ class TestLogSnapshotEvent:
 
     def test_no_crash_without_log_dir(self):
         from salmon_ibm.agents import AgentPool
+
         pool = AgentPool(n=5, start_tri=0, rng_seed=42)
         pop = Population("fish", pool)
         landscape = {}
@@ -535,9 +630,31 @@ class TestLogSnapshotEvent:
         event.execute(pop, landscape, t=0, mask=pop.alive.copy())  # should not raise
 
 
+def test_event_execution_with_all_dead_mask():
+    """Events should handle all-False mask without error."""
+    from salmon_ibm.events import EventSequencer
+    from salmon_ibm.events_builtin import CustomEvent
+
+    called = []
+
+    def cb(pop, landscape, t, mask):
+        called.append(mask.sum())
+
+    seq = EventSequencer([CustomEvent(name="test", callback=cb)])
+    from salmon_ibm.agents import AgentPool
+    from salmon_ibm.population import Population
+
+    pool = AgentPool(n=5, start_tri=np.zeros(5, dtype=int))
+    pool.alive[:] = False
+    pop = Population(name="test", pool=pool)
+    seq.step(pop, {}, 0)
+    assert called == [0]
+
+
 class TestSummaryReportEvent:
     def test_records_summary(self):
         from salmon_ibm.agents import AgentPool
+
         pool = AgentPool(n=20, start_tri=0, rng_seed=42)
         pop = Population("fish", pool)
         pop.pool.alive[15:] = False
@@ -554,6 +671,7 @@ class TestSummaryReportEvent:
 
     def test_accumulates_over_timesteps(self):
         from salmon_ibm.agents import AgentPool
+
         pool = AgentPool(n=10, start_tri=0, rng_seed=42)
         pop = Population("fish", pool)
         landscape = {}

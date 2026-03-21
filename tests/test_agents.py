@@ -1,6 +1,5 @@
 import numpy as np
-import pytest
-from salmon_ibm.agents import Behavior, FishAgent, AgentPool
+from salmon_ibm.agents import Behavior, AgentPool
 
 
 def test_behavior_enum():
@@ -47,3 +46,13 @@ def test_pool_initial_energy_density():
     pool = AgentPool(n=5, start_tri=0)
     assert np.all(pool.ed_kJ_g > 4.0)
     assert np.all(pool.ed_kJ_g < 10.0)
+
+
+def test_agent_pool_zero_agents():
+    """AgentPool with n=0 should not crash."""
+    from salmon_ibm.agents import AgentPool
+
+    pool = AgentPool(n=0, start_tri=np.array([], dtype=int))
+    assert pool.n == 0
+    assert len(pool.alive) == 0
+    assert pool.t3h_mean().shape == (0,)
