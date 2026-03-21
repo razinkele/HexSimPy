@@ -10,6 +10,7 @@ Note: PATCH_HEXMAP files store dimensions transposed relative to
 GridMeta — ``hm.width`` is the data stride (= grid nrows), and
 ``hm.height`` is the number of data-rows (= grid ncols).
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -17,10 +18,11 @@ from pathlib import Path
 import numpy as np
 from scipy.spatial import cKDTree
 
-from heximpy.hxnparser import GridMeta, HexMap, Workspace, read_barriers
+from heximpy.hxnparser import Workspace
 
 
 # ── Hex grid geometry ────────────────────────────────────────────────────────
+
 
 def _rowcol_to_flat_narrow(row: int, col: int, width: int) -> int:
     """Convert (row, col) to flat index for narrow grid (flag=1).
@@ -35,8 +37,9 @@ def _rowcol_to_flat_narrow(row: int, col: int, width: int) -> int:
     return flat
 
 
-def _hex_neighbors_offset(row: int, col: int, ncols: int, nrows: int,
-                          n_data: int, flag: int = 0) -> list[int]:
+def _hex_neighbors_offset(
+    row: int, col: int, ncols: int, nrows: int, n_data: int, flag: int = 0
+) -> list[int]:
     """Compute flat-index neighbors for (row, col) in an offset hex grid.
 
     Uses pointy-top odd-row offset convention:
@@ -47,7 +50,7 @@ def _hex_neighbors_offset(row: int, col: int, ncols: int, nrows: int,
     """
     if row % 2 == 0:  # even row (not shifted)
         offsets = [(-1, -1), (-1, 0), (0, -1), (0, 1), (1, -1), (1, 0)]
-    else:             # odd row (shifted right)
+    else:  # odd row (shifted right)
         offsets = [(-1, 0), (-1, 1), (0, -1), (0, 1), (1, 0), (1, 1)]
 
     result = []
@@ -68,6 +71,7 @@ def _hex_neighbors_offset(row: int, col: int, ncols: int, nrows: int,
 
 # ── HexMesh class ────────────────────────────────────────────────────────────
 
+
 class HexMesh:
     """Water-only hexagonal mesh that duck-types TriMesh.
 
@@ -75,25 +79,37 @@ class HexMesh:
     compact water-cell numbering unless stated otherwise.
     """
 
-    def __init__(self, centroids, depth, neighbors, areas, water_full_idx,
-                 full_to_compact, ncols, nrows, n_data, *, edge=1.0,
-                 workspace=None):
-        self.centroids = centroids        # (N_water, 2)  [y, x] in meters
-        self.depth = depth                # (N_water,)
-        self.neighbors = neighbors        # (N_water, 6)  compact indices, -1 = none
-        self.areas = areas                # (N_water,)    hex area in m²
+    def __init__(
+        self,
+        centroids,
+        depth,
+        neighbors,
+        areas,
+        water_full_idx,
+        full_to_compact,
+        ncols,
+        nrows,
+        n_data,
+        *,
+        edge=1.0,
+        workspace=None,
+    ):
+        self.centroids = centroids  # (N_water, 2)  [y, x] in meters
+        self.depth = depth  # (N_water,)
+        self.neighbors = neighbors  # (N_water, 6)  compact indices, -1 = none
+        self.areas = areas  # (N_water,)    hex area in m²
         self.n_cells = len(centroids)
         self.water_mask = np.ones(self.n_cells, dtype=bool)  # all True
 
         # Internal mappings
-        self._water_full_idx = water_full_idx    # (N_water,) full flat indices
+        self._water_full_idx = water_full_idx  # (N_water,) full flat indices
         self._full_to_compact = full_to_compact  # dict full_idx → compact_idx
         self._ncols = ncols
         self._nrows = nrows
         self._n_data = n_data
-        self._edge = edge                        # hex edge length in meters
+        self._edge = edge  # hex edge length in meters
         self._tree = cKDTree(centroids)
-        self._workspace = workspace              # hxnparser Workspace (optional)
+        self._workspace = workspace  # hxnparser Workspace (optional)
 
         # Precompute padded water-neighbor arrays for vectorized movement
         self._water_nbrs = neighbors.copy()
@@ -136,17 +152,20 @@ class HexMesh:
                 dy += df * dc[0] / norm
                 dx += df * dc[1] / norm
 
-        mag = np.sqrt(dy ** 2 + dx ** 2)
+        mag = np.sqrt(dy**2 + dx**2)
         if mag > 0:
             dy /= mag
             dx /= mag
         return (dy, dx)
 
     @classmethod
-    def from_hexsim(cls, workspace_dir: str | Path,
-                    species: str = "chinook",
-                    extent_layer: str | None = None,
-                    depth_layer: str | None = None) -> HexMesh:
+    def from_hexsim(
+        cls,
+        workspace_dir: str | Path,
+        species: str = "chinook",
+        extent_layer: str | None = None,
+        depth_layer: str | None = None,
+    ) -> HexMesh:
         """Load a HexSim workspace directory → HexMesh.
 
         Parameters
@@ -167,8 +186,11 @@ class HexMesh:
         else:
             # Try known extent layer names in priority order
             _EXTENT_CANDIDATES = [
-                "River [ extent ]", "Lagoon [ extent ]",
-                "Habitat Map", "Species Range", "Study Area",
+                "River [ extent ]",
+                "Lagoon [ extent ]",
+                "Habitat Map",
+                "Species Range",
+                "Study Area",
             ]
             for name in _EXTENT_CANDIDATES:
                 extent_hm = ws.hexmaps.get(name)
@@ -179,9 +201,7 @@ class HexMesh:
                 first_name = next(iter(ws.hexmaps))
                 extent_hm = ws.hexmaps[first_name]
         if extent_hm is None:
-            raise FileNotFoundError(
-                f"No extent layer found in {workspace_dir}"
-            )
+            raise FileNotFoundError(f"No extent layer found in {workspace_dir}")
         extent = extent_hm.values
         n_data = len(extent)
 
@@ -190,8 +210,8 @@ class HexMesh:
         #   hm.height = data rows   (short axis)  = grid ncols
         # The flat array is row-major with hm.width as stride.
         # After decomposing: data_row → spatial col (x), data_col → spatial row (y).
-        data_stride = extent_hm.width   # columns per data-row
-        data_nrows = extent_hm.height   # number of data-rows
+        data_stride = extent_hm.width  # columns per data-row
+        data_nrows = extent_hm.height  # number of data-rows
 
         # Validate GridMeta ↔ HexMap dimension mapping
         if ws.grid.data_height != extent_hm.height:
@@ -206,6 +226,8 @@ class HexMesh:
             )
 
         # Water mask: any nonzero value = water
+        # HexSim hex-maps store integer-valued floats (0.0 = no-data, nonzero = water).
+        # Exact float comparison with 0.0 is safe for this data format.
         water_flat = np.where(extent != 0.0)[0]
         n_water = len(water_flat)
 
@@ -247,8 +269,11 @@ class HexMesh:
         if depth_layer:
             depth_hm = ws.hexmaps.get(depth_layer)
         if depth_hm is None:
-            for name in [f"River Depth [ {species} ]", "River [ depth ]",
-                         "Lagoon [ depth ]"]:
+            for name in [
+                f"River Depth [ {species} ]",
+                "River [ depth ]",
+                "Lagoon [ depth ]",
+            ]:
                 depth_hm = ws.hexmaps.get(name)
                 if depth_hm is not None:
                     break
@@ -264,7 +289,9 @@ class HexMesh:
             fi = int(water_flat[ci])
             r = int(data_rows[ci])
             c = int(data_cols[ci])
-            full_nbrs = _hex_neighbors_offset(r, c, data_stride, data_nrows, n_data, extent_hm.flag)
+            full_nbrs = _hex_neighbors_offset(
+                r, c, data_stride, data_nrows, n_data, extent_hm.flag
+            )
             ni = 0
             for fn in full_nbrs:
                 if fn in full_to_compact:
@@ -272,9 +299,19 @@ class HexMesh:
                     ni += 1
 
         # 6. Constant hex areas (flat-top: A = (3√3/2) × edge²)
-        hex_area = (3.0 * np.sqrt(3.0) / 2.0) * edge ** 2  # in m²
+        hex_area = (3.0 * np.sqrt(3.0) / 2.0) * edge**2  # in m²
         areas = np.full(n_water, hex_area)
 
-        return cls(centroids, depth, neighbors, areas,
-                   water_flat, full_to_compact, data_stride, data_nrows,
-                   n_data, edge=edge, workspace=ws)
+        return cls(
+            centroids,
+            depth,
+            neighbors,
+            areas,
+            water_flat,
+            full_to_compact,
+            data_stride,
+            data_nrows,
+            n_data,
+            edge=edge,
+            workspace=ws,
+        )

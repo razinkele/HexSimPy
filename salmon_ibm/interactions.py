@@ -1,7 +1,8 @@
 """Multi-species interaction system: population management and encounter events."""
+
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
@@ -18,7 +19,9 @@ class MultiPopulationManager:
 
     def __init__(self):
         self.populations: dict[str, Any] = {}  # name -> Population
-        self._cell_index: dict[str, dict[int, np.ndarray]] = {}  # pop_name -> {cell_id -> agent_indices}
+        self._cell_index: dict[
+            str, dict[int, np.ndarray]
+        ] = {}  # pop_name -> {cell_id -> agent_indices}
 
     def register(self, name_or_population, population=None) -> None:
         """Register a population.
@@ -63,7 +66,9 @@ class MultiPopulationManager:
         idx = self._cell_index.get(name, {})
         return idx.get(cell_id, np.array([], dtype=np.int64))
 
-    def co_located_pairs(self, pop_a: str, pop_b: str) -> list[tuple[np.ndarray, np.ndarray]]:
+    def co_located_pairs(
+        self, pop_a: str, pop_b: str
+    ) -> list[tuple[np.ndarray, np.ndarray]]:
         """Find cells where both populations have agents.
 
         Returns list of (agents_a, agents_b) for each shared cell.
@@ -80,9 +85,9 @@ class MultiPopulationManager:
 
 
 class InteractionOutcome(Enum):
-    PREDATION = "predation"       # prey dies, predator gains resource
-    COMPETITION = "competition"   # loser incurs penalty
-    DISEASE = "disease"           # pathogen transmission (handled by TransitionEvent)
+    PREDATION = "predation"  # prey dies, predator gains resource
+    COMPETITION = "competition"  # loser incurs penalty
+    DISEASE = "disease"  # pathogen transmission (handled by TransitionEvent)
 
 
 @register_event("interaction")
@@ -95,6 +100,7 @@ class InteractionEvent(Event):
     The ``population`` parameter in execute() is the primary population;
     the partner population is retrieved from the multi-pop manager.
     """
+
     pop_a_name: str = ""  # e.g., "predator"
     pop_b_name: str = ""  # e.g., "prey"
     encounter_probability: float = 0.1  # P(encounter) per co-located pair
@@ -127,8 +133,17 @@ class InteractionEvent(Event):
                         if self.outcome == InteractionOutcome.PREDATION:
                             pop_b.alive[b_idx] = False
                             stats["kills"] += 1
-                            if self.resource_gain_acc and pop_a.accumulator_mgr is not None:
-                                acc_idx = pop_a.accumulator_mgr._resolve_idx(self.resource_gain_acc)
-                                pop_a.accumulator_mgr.data[a_idx, acc_idx] += self.resource_gain_amount
+                            if (
+                                self.resource_gain_acc
+                                and pop_a.accumulator_mgr is not None
+                            ):
+                                acc_idx = pop_a.accumulator_mgr._resolve_idx(
+                                    self.resource_gain_acc
+                                )
+                                pop_a.accumulator_mgr.data[a_idx, acc_idx] += (
+                                    self.resource_gain_amount
+                                )
 
-        return stats
+        # Store stats in landscape for observability (previously returned but discarded)
+        interaction_stats = landscape.setdefault("interaction_stats", [])
+        interaction_stats.append({"event": self.name, "t": t, **stats})

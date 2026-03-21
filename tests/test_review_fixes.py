@@ -1,7 +1,7 @@
 """Tests for post-review bugfixes."""
+
 import numpy as np
 import pytest
-from pathlib import Path
 
 
 class TestDataLookupLoading:
@@ -12,6 +12,7 @@ class TestDataLookupLoading:
         np.savetxt(csv_file, np.array([[1.0, 2.0], [3.0, 4.0]]), delimiter=",")
 
         from salmon_ibm.scenario_loader import ScenarioLoader
+
         loader = ScenarioLoader()
 
         edef = {
@@ -24,9 +25,6 @@ class TestDataLookupLoading:
                 "target_accumulator": "target",
             },
         }
-        import salmon_ibm.events_builtin
-        import salmon_ibm.events_phase3
-        import salmon_ibm.events_hexsim
 
         evt = loader._build_single_event(edef, {})
         loader._load_lookup_tables([evt], str(tmp_path))
@@ -47,10 +45,13 @@ class TestTraitFilterFormat:
 
         pool = AgentPool(n=4, start_tri=np.zeros(4, dtype=int))
         pop = Population(name="test", pool=pool)
-        trait_defs = [TraitDefinition(
-            name="stage", trait_type=TraitType.PROBABILISTIC,
-            categories=["juvenile", "adult"]
-        )]
+        trait_defs = [
+            TraitDefinition(
+                name="stage",
+                trait_type=TraitType.PROBABILISTIC,
+                categories=["juvenile", "adult"],
+            )
+        ]
         pop.trait_mgr = TraitManager(4, trait_defs)
         pop.trait_mgr._data["stage"][:] = np.array([0, 0, 1, 1])
 
@@ -108,9 +109,12 @@ class TestReproductionMateSelection:
         pop.genome = gm
 
         evt = ReproductionEvent(
-            name="repro", trigger=EveryStep(),
-            clutch_mean=2.0, min_group_size=2,
-            offspring_mass_mean=100.0, offspring_mass_std=10.0,
+            name="repro",
+            trigger=EveryStep(),
+            clutch_mean=2.0,
+            min_group_size=2,
+            offspring_mass_mean=100.0,
+            offspring_mass_std=10.0,
         )
         rng = np.random.default_rng(42)
         landscape = {"rng": rng}
@@ -121,7 +125,9 @@ class TestReproductionMateSelection:
         if n_offspring > 0:
             offspring_geno = pop.genome.genotypes[4:, 0, :]
             has_heterozygote = np.any(offspring_geno[:, 0] != offspring_geno[:, 1])
-            assert has_heterozygote, "With two homozygous parents, offspring should be heterozygous"
+            assert has_heterozygote, (
+                "With two homozygous parents, offspring should be heterozygous"
+            )
 
 
 class TestAccumulatorBounds:
@@ -149,7 +155,9 @@ class TestAccumulatorBounds:
         assert mgr is not None
 
         sp_def = mgr.definitions[mgr._resolve_idx("survival_prob")]
-        assert sp_def.min_val == 0, "lowerBound=0 with upperBound=1 should keep min_val=0"
+        assert sp_def.min_val == 0, (
+            "lowerBound=0 with upperBound=1 should keep min_val=0"
+        )
         assert sp_def.max_val == 1, "upperBound=1 should be preserved"
 
         ub_def = mgr.definitions[mgr._resolve_idx("unbounded")]
@@ -161,6 +169,7 @@ class TestScenarioLoaderReproducibility:
     def _make_mock_mesh(self, n_cells=20):
         """Create a minimal mock HexMesh with a water_mask."""
         from unittest.mock import MagicMock
+
         mesh = MagicMock()
         mesh.water_mask = np.ones(n_cells, dtype=bool)
         return mesh
@@ -168,6 +177,7 @@ class TestScenarioLoaderReproducibility:
     def test_same_seed_produces_same_agent_positions(self):
         """_create_population with same seeded RNG must produce identical tri_idx."""
         from salmon_ibm.scenario_loader import ScenarioLoader
+
         loader = ScenarioLoader()
         mesh = self._make_mock_mesh(n_cells=20)
         pop_def = {"name": "test_pop", "initial_size": 10}
@@ -179,13 +189,15 @@ class TestScenarioLoaderReproducibility:
         pop2 = loader._create_population(pop_def, mesh, rng2)
 
         np.testing.assert_array_equal(
-            pop1.tri_idx, pop2.tri_idx,
-            err_msg="Same seed should produce identical agent positions"
+            pop1.tri_idx,
+            pop2.tri_idx,
+            err_msg="Same seed should produce identical agent positions",
         )
 
     def test_different_seeds_produce_different_positions(self):
         """_create_population with different seeds should produce different tri_idx."""
         from salmon_ibm.scenario_loader import ScenarioLoader
+
         loader = ScenarioLoader()
         mesh = self._make_mock_mesh(n_cells=20)
         pop_def = {"name": "test_pop", "initial_size": 10}
@@ -197,18 +209,21 @@ class TestScenarioLoaderReproducibility:
         pop_b = loader._create_population(pop_def, mesh, rng_b)
 
         # With 10 agents in 20 cells and different seeds, positions should differ
-        assert not np.array_equal(pop_a.tri_idx, pop_b.tri_idx), \
+        assert not np.array_equal(pop_a.tri_idx, pop_b.tri_idx), (
             "Different seeds should produce different agent positions"
+        )
 
     def test_same_seed_produces_same_populations(self):
         """Two loads with same seed should produce identical agent positions."""
         import os
+
         ws = "HexSimPLE"
         xml = "HexSimPLE/Scenarios/HexSimPLE.xml"
         if not os.path.exists(xml):
             pytest.skip("HexSimPLE not available")
 
         from salmon_ibm.scenario_loader import ScenarioLoader
+
         loader = ScenarioLoader()
         sim1 = loader.load(ws, xml, rng_seed=123)
         sim2 = loader.load(ws, xml, rng_seed=123)
@@ -216,8 +231,11 @@ class TestScenarioLoaderReproducibility:
         for pname in sim1.populations.populations:
             p1 = sim1.populations.populations[pname]
             p2 = sim2.populations.populations[pname]
-            np.testing.assert_array_equal(p1.tri_idx, p2.tri_idx,
-                err_msg=f"Population {pname} positions differ with same seed")
+            np.testing.assert_array_equal(
+                p1.tri_idx,
+                p2.tri_idx,
+                err_msg=f"Population {pname} positions differ with same seed",
+            )
 
 
 class TestInteractionDeadPrey:
@@ -226,7 +244,9 @@ class TestInteractionDeadPrey:
         from salmon_ibm.population import Population
         from salmon_ibm.agents import AgentPool
         from salmon_ibm.interactions import (
-            MultiPopulationManager, InteractionEvent, InteractionOutcome,
+            MultiPopulationManager,
+            InteractionEvent,
+            InteractionOutcome,
         )
         from salmon_ibm.events import EveryStep
 
@@ -241,8 +261,10 @@ class TestInteractionDeadPrey:
         mgr.register(prey)
 
         evt = InteractionEvent(
-            name="hunt", trigger=EveryStep(),
-            pop_a_name="pred", pop_b_name="prey",
+            name="hunt",
+            trigger=EveryStep(),
+            pop_a_name="pred",
+            pop_b_name="prey",
             outcome=InteractionOutcome.PREDATION,
             encounter_probability=1.0,
         )
@@ -250,7 +272,8 @@ class TestInteractionDeadPrey:
         rng = np.random.default_rng(42)
         landscape = {"multi_pop_mgr": mgr, "rng": rng}
         mask = pred.alive.copy()
-        stats = evt.execute(pred, landscape, 0, mask)
+        evt.execute(pred, landscape, 0, mask)
+        stats = landscape["interaction_stats"][-1]
 
         assert not prey.alive[0], "Prey should be dead"
         # With the bug, kills==2 (dead prey re-killed by second predator).
@@ -263,6 +286,7 @@ class TestInteractionDeadPrey:
 class TestStreamNetworkBFS:
     def test_all_upstream_returns_correct_segments(self):
         from salmon_ibm.network import StreamNetwork, SegmentDefinition
+
         segs = [
             SegmentDefinition(id=0, length=100, upstream_ids=[1, 2]),
             SegmentDefinition(id=1, length=100, upstream_ids=[3]),
@@ -275,6 +299,7 @@ class TestStreamNetworkBFS:
 
     def test_all_downstream_returns_correct_segments(self):
         from salmon_ibm.network import StreamNetwork, SegmentDefinition
+
         segs = [
             SegmentDefinition(id=0, length=100, upstream_ids=[], downstream_ids=[1]),
             SegmentDefinition(id=1, length=100, upstream_ids=[0], downstream_ids=[2]),

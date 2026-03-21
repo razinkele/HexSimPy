@@ -6,6 +6,7 @@ Only quote references need regex; function names are injected into the eval name
 MUST NOT import from salmon_ibm.accumulators (circular import risk).
 Only import: re, numpy, ast.
 """
+
 from __future__ import annotations
 
 import re
@@ -42,7 +43,9 @@ def translate_hexsim_expr(expr: str) -> str:
     # Match either 'single-quoted' or "double-quoted" in one pass
     result = re.sub(r"'([^']+)'|\"([^\"]+)\"", _replace_quotes, expr)
     # Rename Cond to _cond (sign-of-difference semantics: test > 0 = true)
-    result = re.sub(r'\bCond\b', '_cond', result)
+    result = re.sub(r"\bCond\b", "_cond", result)
+    if len(_translate_cache) > 10000:
+        _translate_cache.clear()  # prevent unbounded growth
     _translate_cache[expr] = result
     return result
 
@@ -59,24 +62,32 @@ def build_hexsim_namespace(globals_dict, acc_dict, rng, n_masked):
     """
     ns = {
         # Data lookups
-        '_g': globals_dict,
-        '_a': acc_dict,
+        "_g": globals_dict,
+        "_a": acc_dict,
         # HexSim functions (injected by name — Python parser handles nesting)
-        '_cond': lambda test, t, f: np.where(np.asarray(test) > 0, t, f),
-        'Floor': np.floor,
-        'Pow': np.power,
-        'Exp': np.exp,
-        'Max': np.maximum,
-        'Min': np.minimum,
-        'GasDev': lambda: rng.standard_normal(n_masked),
-        'Rand': lambda: rng.random(n_masked),
+        "_cond": lambda test, t, f: np.where(np.asarray(test) > 0, t, f),
+        "Floor": np.floor,
+        "Pow": np.power,
+        "Exp": np.exp,
+        "Max": np.maximum,
+        "Min": np.minimum,
+        "GasDev": lambda: rng.standard_normal(n_masked),
+        "Rand": lambda: rng.random(n_masked),
         # Standard math (backward compat with existing _SAFE_MATH)
-        'np': np,
-        'sqrt': np.sqrt, 'abs': np.abs, 'exp': np.exp,
-        'log': np.log, 'log10': np.log10,
-        'sin': np.sin, 'cos': np.cos, 'tan': np.tan,
-        'minimum': np.minimum, 'maximum': np.maximum,
-        'clip': np.clip, 'where': np.where,
-        'pi': np.pi, 'e': np.e,
+        "np": np,
+        "sqrt": np.sqrt,
+        "abs": np.abs,
+        "exp": np.exp,
+        "log": np.log,
+        "log10": np.log10,
+        "sin": np.sin,
+        "cos": np.cos,
+        "tan": np.tan,
+        "minimum": np.minimum,
+        "maximum": np.maximum,
+        "clip": np.clip,
+        "where": np.where,
+        "pi": np.pi,
+        "e": np.e,
     }
     return ns

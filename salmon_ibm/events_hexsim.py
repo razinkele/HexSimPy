@@ -195,6 +195,8 @@ def _apply_trait_combo_mask(base_mask, uf, population):
     if combo_flags is None:
         combo_flags = np.array([int(x) for x in str(combos_str).split()], dtype=np.int8)
         _combo_flags_cache[combos_str] = combo_flags
+        if len(_combo_flags_cache) > 10000:
+            _combo_flags_cache.clear()  # prevent unbounded growth
 
     # Build flat combo index using mixed-radix encoding
     flat_idx = np.zeros(len(base_mask), dtype=np.int32)
@@ -437,6 +439,8 @@ class PatchIntroductionEvent(Event):
                 stacklevel=2,
             )
             return
+        # HexSim hex-maps store integer-valued floats (0.0 = no-data, nonzero = water).
+        # Exact float comparison with 0 is safe for this data format.
         nonzero_cells = np.where(layer != 0)[0]
         if len(nonzero_cells) == 0:
             return

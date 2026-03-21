@@ -1,4 +1,5 @@
 """Built-in event types that wrap existing salmon IBM logic."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -6,17 +7,17 @@ from typing import Callable
 
 import numpy as np
 
-from salmon_ibm.events import Event, EveryStep, EventTrigger, register_event
+from salmon_ibm.events import Event, register_event
 from salmon_ibm.movement import execute_movement
 from salmon_ibm.bioenergetics import BioParams, update_energy
 from salmon_ibm.estuary import salinity_cost
-from salmon_ibm.population import Population
 
 
 @register_event("movement")
 @dataclass
 class MovementEvent(Event):
     """Wraps execute_movement() as an event."""
+
     n_micro_steps: int = 3
     cwr_threshold: float = 16.0
 
@@ -26,7 +27,9 @@ class MovementEvent(Event):
         rng = landscape["rng"]
         barrier_arrays = landscape.get("barrier_arrays")
         execute_movement(
-            population, mesh, fields,
+            population,
+            mesh,
+            fields,
             seed=int(rng.integers(2**31)),
             n_micro_steps=self.n_micro_steps,
             cwr_threshold=self.cwr_threshold,
@@ -38,6 +41,7 @@ class MovementEvent(Event):
 @dataclass
 class SurvivalEvent(Event):
     """Bioenergetics energy update + thermal/starvation mortality."""
+
     bio_params: BioParams = field(default_factory=BioParams)
     thermal: bool = True
     starvation: bool = True
@@ -52,7 +56,18 @@ class SurvivalEvent(Event):
 
         if self.starvation and alive.any():
             activity = activity_lut[population.behavior]
-            sal = fields.get("salinity", np.zeros(len(fields["temperature"])))
+            sal = fields.get("salinity")
+            if sal is None:
+                sal = np.zeros(len(fields["temperature"]))
+                if not getattr(self, "_salinity_warned", False):
+                    import warnings
+
+                    warnings.warn(
+                        "No 'salinity' field in environment — using zeros (no salinity cost).",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                    self._salinity_warned = True
             sal_at_agents = sal[population.tri_idx]
             s_cfg = est_cfg.get("salinity_cost", {})
             sal_cost_arr = salinity_cost(
@@ -62,8 +77,11 @@ class SurvivalEvent(Event):
                 k=s_cfg.get("k", 0.6),
             )
             new_ed, dead, new_mass = update_energy(
-                population.ed_kJ_g[alive], population.mass_g[alive],
-                temps[alive], activity[alive], sal_cost_arr[alive],
+                population.ed_kJ_g[alive],
+                population.mass_g[alive],
+                temps[alive],
+                activity[alive],
+                sal_cost_arr[alive],
                 self.bio_params,
             )
             population.ed_kJ_g[alive] = new_ed
@@ -73,7 +91,9 @@ class SurvivalEvent(Event):
 
         if self.thermal:
             # Recompute alive mask after starvation kills
-            current_alive = population.alive & ~getattr(population, 'arrived', np.zeros(0, dtype=bool))
+            current_alive = population.alive & ~getattr(
+                population, "arrived", np.zeros(0, dtype=bool)
+            )
             thermal_kill = current_alive & (temps >= self.bio_params.T_MAX)
             population.alive[thermal_kill] = False
 
@@ -82,6 +102,7 @@ class SurvivalEvent(Event):
 @dataclass
 class AccumulateEvent(Event):
     """Runs updater functions that modify agent state."""
+
     updaters: list[Callable] = field(default_factory=list)
 
     def execute(self, population, landscape, t, mask):
@@ -92,6 +113,7 @@ class AccumulateEvent(Event):
 @dataclass
 class CustomEvent(Event):
     """Generic event that delegates to a Python callback."""
+
     callback: Callable = field(default=lambda pop, land, t, mask: None)
 
     def execute(self, population, landscape, t, mask):
@@ -102,6 +124,7 @@ class CustomEvent(Event):
 @dataclass
 class StageSpecificSurvivalEvent(Event):
     """Trait-filtered survival with stage-specific mortality rates."""
+
     trait_name: str = "stage"
     mortality_rates: dict[str, float] = field(default_factory=dict)
     density_dependent: bool = False
@@ -111,7 +134,9 @@ class StageSpecificSurvivalEvent(Event):
         if not mask.any():
             return
         rng = landscape.get("rng", np.random.default_rng())
-        trait_mgr = getattr(population, 'trait_mgr', None) or getattr(population, 'traits', None)
+        trait_mgr = getattr(population, "trait_mgr", None) or getattr(
+            population, "traits", None
+        )
         if trait_mgr is None:
             default_rate = self.mortality_rates.get("default", 0.0)
             if default_rate > 0:
@@ -132,10 +157,12 @@ class StageSpecificSurvivalEvent(Event):
             mesh = landscape.get("mesh")
             if mesh is not None:
                 positions = population.tri_idx[alive_idx]
-                n_cells = mesh.n_cells if hasattr(mesh, 'n_cells') else mesh.n_triangles
+                n_cells = mesh.n_cells if hasattr(mesh, "n_cells") else mesh.n_triangles
                 cell_counts = np.bincount(positions, minlength=n_cells)
                 local_density = cell_counts[positions].astype(np.float64)
-                density_factor = 1.0 + self.density_scale * np.maximum(local_density - 1.0, 0.0)
+                density_factor = 1.0 + self.density_scale * np.maximum(
+                    local_density - 1.0, 0.0
+                )
                 mort_prob = np.minimum(mort_prob * density_factor, 1.0)
         rolls = rng.random(len(alive_idx))
         die_local = rolls < mort_prob
@@ -147,6 +174,7 @@ class StageSpecificSurvivalEvent(Event):
 @dataclass
 class IntroductionEvent(Event):
     """Add new individuals to the population."""
+
     n_agents: int = 10
     positions: list[int] = field(default_factory=lambda: [0])
     initial_mass_mean: float = 3500.0
@@ -176,8 +204,12 @@ class IntroductionEvent(Event):
                 pos_arr = np.tile(pos_arr, (n // len(pos_arr)) + 1)[:n]
         mass = np.clip(
             rng.normal(self.initial_mass_mean, self.initial_mass_std, n),
-            self.initial_mass_mean * 0.5, self.initial_mass_mean * 1.5)
-        new_idx = population.add_agents(n, pos_arr, mass_g=mass, ed_kJ_g=self.initial_ed)
+            self.initial_mass_mean * 0.5,
+            self.initial_mass_mean * 1.5,
+        )
+        new_idx = population.add_agents(
+            n, pos_arr, mass_g=mass, ed_kJ_g=self.initial_ed
+        )
         if population.trait_mgr is not None:
             for trait_name, cat_name in self.initial_traits.items():
                 defn = population.trait_mgr.definitions[trait_name]
@@ -193,6 +225,7 @@ class IntroductionEvent(Event):
 @dataclass
 class ReproductionEvent(Event):
     """Group-based reproduction with Poisson clutch sizes."""
+
     clutch_mean: float = 4.0
     offspring_trait_name: str = "stage"
     offspring_trait_value: str = "juvenile"
@@ -206,9 +239,13 @@ class ReproductionEvent(Event):
         can_reproduce = mask & (population.group_id >= 0)
         if self.min_group_size > 1:
             group_ids = population.group_id[can_reproduce]
-            unique_groups, counts = np.unique(group_ids[group_ids >= 0], return_counts=True)
+            unique_groups, counts = np.unique(
+                group_ids[group_ids >= 0], return_counts=True
+            )
             valid_groups = set(unique_groups[counts >= self.min_group_size])
-            can_reproduce = can_reproduce & np.isin(population.group_id, list(valid_groups))
+            can_reproduce = can_reproduce & np.isin(
+                population.group_id, list(valid_groups)
+            )
         reproducer_idx = np.where(can_reproduce)[0]
         if len(reproducer_idx) == 0:
             return
@@ -219,11 +256,18 @@ class ReproductionEvent(Event):
         parent_positions = population.tri_idx[reproducer_idx]
         offspring_positions = np.repeat(parent_positions, clutch_sizes)
         offspring_mass = np.clip(
-            rng.normal(self.offspring_mass_mean, self.offspring_mass_std, total_offspring),
-            self.offspring_mass_mean * 0.5, self.offspring_mass_mean * 1.5)
+            rng.normal(
+                self.offspring_mass_mean, self.offspring_mass_std, total_offspring
+            ),
+            self.offspring_mass_mean * 0.5,
+            self.offspring_mass_mean * 1.5,
+        )
         new_idx = population.add_agents(
-            total_offspring, offspring_positions,
-            mass_g=offspring_mass, ed_kJ_g=self.offspring_ed)
+            total_offspring,
+            offspring_positions,
+            mass_g=offspring_mass,
+            ed_kJ_g=self.offspring_ed,
+        )
         if population.trait_mgr is not None and self.offspring_trait_name:
             defn = population.trait_mgr.definitions[self.offspring_trait_name]
             cat_idx = defn.categories.index(self.offspring_trait_value)
@@ -240,12 +284,21 @@ class ReproductionEvent(Event):
                 cs = clutch_sizes[i]
                 if gid >= 0:
                     group_members = np.where(
-                        (population.group_id == gid) & population.alive
+                        (population.group_id == gid)
+                        & population.alive
                         & (np.arange(population.n) != rep_idx)
                     )[0]
                     if len(group_members) > 0:
                         mate = rng.choice(group_members)
-                        parent2_indices[offset:offset + cs] = mate
+                        parent2_indices[offset : offset + cs] = mate
+                    else:
+                        import warnings
+
+                        warnings.warn(
+                            f"Agent {rep_idx} (group {gid}) has no available mates — self-mating.",
+                            RuntimeWarning,
+                            stacklevel=2,
+                        )
                 offset += cs
             population.genome.recombine(parent1_indices, parent2_indices, new_idx)
 
@@ -254,6 +307,7 @@ class ReproductionEvent(Event):
 @dataclass
 class FloaterCreationEvent(Event):
     """Release agents from groups to become floaters."""
+
     probability: float = 0.1
 
     def execute(self, population, landscape, t, mask):
@@ -276,6 +330,7 @@ class CensusEvent(Event):
     Results are stored in landscape["census_records"] as a list of dicts.
     Each dict has: time, trait counts, total alive, total dead.
     """
+
     trait_names: list[str] = field(default_factory=list)
 
     def execute(self, population, landscape, t, mask):
@@ -287,7 +342,9 @@ class CensusEvent(Event):
         }
 
         # Count by trait if trait manager exists
-        trait_mgr = getattr(population, 'trait_mgr', None) or getattr(population, 'traits', None)
+        trait_mgr = getattr(population, "trait_mgr", None) or getattr(
+            population, "traits", None
+        )
         if trait_mgr is not None and self.trait_names:
             for trait_name in self.trait_names:
                 if trait_name in trait_mgr.definitions:
@@ -305,7 +362,6 @@ class CensusEvent(Event):
         landscape["census_records"].append(record)
 
 
-import tempfile
 from pathlib import Path
 
 
@@ -317,6 +373,7 @@ class LogSnapshotEvent(Event):
     Saves to landscape["log_dir"]/<prefix>_t<timestep>.npz
     containing: tri_idx, alive, behavior, ed_kJ_g, mass_g arrays.
     """
+
     prefix: str = "snapshot"
 
     def execute(self, population, landscape, t, mask):
