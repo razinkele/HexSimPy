@@ -289,16 +289,19 @@ class ScenarioLoader:
                 return evt
 
         # Build event with available params
-        try:
-            evt = cls(
-                name=name,
-                trigger=trigger,
-                population_name=population_name,
-                enabled=enabled,
-            )
-        except TypeError:
-            evt = cls(name=name, trigger=trigger)
+        import inspect
+
+        sig = inspect.signature(cls)
+        init_kwargs = {"name": name, "trigger": trigger}
+        if "population_name" in sig.parameters:
+            init_kwargs["population_name"] = population_name
+        if "enabled" in sig.parameters:
+            init_kwargs["enabled"] = enabled
+        evt = cls(**init_kwargs)
+        # Set attributes that weren't in the constructor
+        if "population_name" not in sig.parameters:
             evt.population_name = population_name
+        if "enabled" not in sig.parameters:
             evt.enabled = enabled
 
         # Apply params if present
