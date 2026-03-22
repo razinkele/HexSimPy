@@ -35,7 +35,7 @@ python scripts/parity_test.py \
 
 | Function | Purpose |
 |----------|---------|
-| `patch_scenario_xml(src, dst, workspace, start_log_step)` | Replace hardcoded absolute paths (`F:\Marcia\...`) with local workspace, set `startLogStep=1`. Data Probe events are already in the XML and only need their paths fixed. |
+| `patch_scenario_xml(src, dst, workspace, start_log_step, n_steps)` | Replace hardcoded absolute paths (`F:\Marcia\...`) with local workspace, set `startLogStep`, set `<timesteps>` to `n_steps`. Data Probe events are already in the XML and only need their paths fixed. |
 | `run_hexsim_engine(patched_xml, seed, timeout)` | Run `HexSimEngine64.exe -r <seed> <xml>` via subprocess with timeout. The `-r` flag sets the simulation seed (verified: `HexSimEngine [-r simulationSeed] scenario.xml`). Returns `(elapsed_s, census_dict, probe_dict)`. Handles `TimeoutExpired` gracefully by collecting partial results. |
 | `run_hexsimpy(workspace, scenario_xml, seed, n_steps, probe_interval)` | Run `ScenarioLoader.load()` then a **manual `sim.step()` loop** (not `sim.run()` — the loop is needed to collect per-population census and periodic agent snapshots). Returns `(elapsed_s, census_dict, agent_snapshots)`. |
 | `parse_hexsim_census(result_dir)` | Parse HexSim `*.csv` census files into `{pop_id: {step: {size, traits, lambda}}}` |
@@ -151,6 +151,7 @@ Both engines use different RNG implementations (C++ Mersenne Twister vs NumPy PC
 | Mean energy density (kJ/g) | Data Probe `Energy Density` column | `np.mean(pool.ed_kJ_g[alive])` | < 5% relative |
 | Mean mass (g) | Data Probe `Mass` column | `np.mean(pool.mass_g[alive])` | < 5% relative |
 | Energy density std dev | Data Probe | `np.std(pool.ed_kJ_g[alive])` | < 10% relative |
+| Mass std dev | Data Probe | `np.std(pool.mass_g[alive])` | < 10% relative |
 | Spatial distribution | Data Probe cell IDs | `pool.tri_idx` histogram (occupied cells only) | Jensen-Shannon divergence < 0.3 |
 
 **Accumulator-to-column mapping**: Discovered programmatically by `build_accumulator_map()` which parses `<accumulator name="...">` elements from the scenario XML in definition order. Both engines use the same hex cell indexing (compact water-cell IDs from `HexMesh`), so cell indices are directly comparable.
@@ -232,8 +233,8 @@ To avoid excessive memory use, HexSimPy snapshots are collected every `probe_int
 
 ```python
 snapshot = {
-    "step": t,
-    "pop_name": name,
+    "step": step,
+    "pop_name": pname,
     "n_alive": pop.n_alive,
     "ed_kJ_g_mean": np.mean(pool.ed_kJ_g[alive]),
     "ed_kJ_g_std": np.std(pool.ed_kJ_g[alive]),
@@ -320,6 +321,7 @@ The skill body will contain:
 | No Data Probe output | Skip agent comparison, report census-only verdict |
 | Scenario XML not found | Exit with error message |
 | Stale Results directory | `shutil.rmtree` before each run to prevent parsing old output |
+| Cell ID mismatch | Sanity check: `assert max_cell_id_from_probe <= mesh.n_cells`. If HexSim uses full-grid IDs while HexSimPy uses compact IDs, spatial comparison is invalid — report error and skip spatial metrics |
 
 ---
 
