@@ -1,6 +1,6 @@
 # salmon_ibm API Reference
 
-This document covers the public API for each module in the `salmon_ibm` package (32 modules). Private functions and methods (those starting with `_`) are omitted.
+This document covers the public API for 30 modules in the `salmon_ibm` package. Private functions and methods (those starting with `_`) are omitted. Two internal modules (`__init__`, `hexsim_viewer`) are excluded.
 
 ---
 

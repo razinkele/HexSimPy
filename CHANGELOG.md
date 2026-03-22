@@ -4,7 +4,19 @@ All notable changes to the HexSimPy Baltic Salmon IBM are documented in this fil
 
 ---
 
-## Recent Changes (March 2022, 2026)
+## v1.0.0 (2026-03-22)
+
+### Benchmark & Validation
+- `f31ee9d` docs: add expected model behavior from Snyder 2019/2022 publications
+- `fb39f77` fix: scenario_loader CSV path resolution + header handling, add parity section to README
+- `2ecb662` bench: add Columbia steelhead benchmark — HexSimPy 2.1x faster than C++
+
+### Documentation
+- `ffcfc3f` docs: update README, API reference, add CHANGELOG and model manual
+
+---
+
+## Pre-release Changes
 
 ### Bug Fixes
 - `d997335` fix: grid persistence on step + improved map contrast

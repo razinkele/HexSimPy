@@ -21,7 +21,7 @@ A Python reimplementation of EPA HexSim for simulating Baltic salmon migration t
 - **Reporting framework** — productivity, demographic, genetic, and dispersal reports with spatial tallies
 - **Ensemble runner** with multiprocessing for parallel replicates
 - **Shiny web UI** with deck.gl map, streaming charts, trail visualization, and live stats
-- **557 tests passing** (~4 minute runtime)
+- **556 tests passing**, 14 skipped (~4.5 minute runtime)
 
 ## Performance
 
@@ -116,7 +116,7 @@ salmon_ibm/              — Core simulation engine (32 modules)
   hexsim_viewer.py       — HexSim viewer integration
 heximpy/                 — HexSim binary file parser (.hxn, .hbf, .grid)
 hexsimlab/               — Prototype GPU/Numba grid tools (incomplete, guarded)
-tests/                   — 557 pytest tests
+tests/                   — 556 pytest tests (14 skipped)
 ui/                      — Shiny UI components
 www/                     — HTML/CSS/JS assets (streaming charts, styling)
 scripts/                 — Utility and debug scripts
@@ -178,8 +178,10 @@ HexSimPy loads and runs real HexSim XML scenarios (`.xml`) from EPA HexSim works
 | Document | Description |
 |----------|-------------|
 | [docs/model-manual.md](docs/model-manual.md) | Data requirements, configuration schema, and model setup guide |
-| [docs/api-reference.md](docs/api-reference.md) | Public API reference for all 32 modules |
-| [CHANGELOG.md](CHANGELOG.md) | Version history organized by category |
+| [docs/api-reference.md](docs/api-reference.md) | Public API reference for all 30 documented modules |
+| [docs/benchmark_columbia_steelhead.md](docs/benchmark_columbia_steelhead.md) | Comparative benchmark vs HexSim 4.0.20 with publication validation |
+| [docs/comparison-python-vs-original-hexsim.md](docs/comparison-python-vs-original-hexsim.md) | Feature-by-feature comparison with original HexSim |
+| [CHANGELOG.md](CHANGELOG.md) | Version history organized by development phase |
 | [heximpy/README.md](heximpy/README.md) | HexSim binary file parser quick start |
 | [heximpy/API.md](heximpy/API.md) | heximpy API reference |
 | [heximpy/FILE_FORMATS.md](heximpy/FILE_FORMATS.md) | HexSim binary format specifications |
@@ -236,7 +238,11 @@ HexSim XML Scenario ─┤
 
 ## References
 
-- Schumaker, N.H. (2024). HexSim. U.S. Environmental Protection Agency, Corvallis, Oregon.
-- Snyder, M.N., et al. (2019). A behavioral decision framework for modeling Atlantic salmon smolt migration. *Ecological Modelling*.
+- Snyder, M.N., Schumaker, N.H., Ebersole, J.L., et al. (2019). Individual based modeling of fish migration in a 2-D river system: model description and case study. *Landscape Ecology* 34:737–754.
+- Snyder, M.N., Schumaker, N.H., Dunham, J.B., et al. (2022). Tough places and safe spaces: Can refuges save salmon from a warming climate? *Ecosphere* 13(11):e4265.
+- Snyder, M.N., Schumaker, N.H., & Ebersole, J.L. (2020). HexSim migration corridor simulation model results. EPA Technical Memorandum (CWR Plan Appendix 21).
+- Fulford, R.S., Tolan, J.L., & Hagy, J.H. (2024). Simulating implications of fish behavioral response for managing hypoxia in estuaries. *Ecological Modelling* 490:110635.
+- Schumaker, N.H. & Brookes, A. (2018). HexSim: a modeling environment for ecology and conservation. *Landscape Ecology* 33:197–211.
 - Forseth, T., et al. (2001). Bioenergetics of Atlantic salmon. *Canadian Journal of Fisheries and Aquatic Sciences*.
 - Hanson, P.C., et al. (1997). Fish Bioenergetics 3.0. *University of Wisconsin Sea Grant Institute*.
+- Stewart, D.J. & Ibarra, M. (1991). Predation and production by salmonine fishes in Lake Michigan. *Canadian Journal of Fisheries and Aquatic Sciences* 48:909–922.
