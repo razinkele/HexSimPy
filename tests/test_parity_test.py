@@ -554,3 +554,94 @@ class TestCompareAgents:
         mass_divs = [d for d in result if d.metric == "mean_mass"]
         assert len(mass_divs) == 1
         assert mass_divs[0].rel_error == pytest.approx(0.5)
+
+
+# ---------------------------------------------------------------------------
+# TASK 6 tests: run_hexsim_engine, generate_report
+# ---------------------------------------------------------------------------
+
+
+class TestRunHexsimEngine:
+    def test_missing_engine_returns_none(self, tmp_path):
+        from parity_test import run_hexsim_engine
+
+        fake_xml = tmp_path / "Scenarios" / "test.xml"
+        fake_xml.parent.mkdir(parents=True)
+        fake_xml.write_text("<scenario/>")
+
+        elapsed, census, probe = run_hexsim_engine(
+            str(fake_xml), str(tmp_path / "nonexistent.exe")
+        )
+        assert elapsed is None
+        assert census == {}
+        assert probe == {}
+
+
+class TestGenerateReport:
+    def test_generates_markdown(self, tmp_path):
+        from parity_test import generate_report
+
+        out = tmp_path / "report.md"
+        v = generate_report(
+            hexsim_time=10.5,
+            hexsimpy_time=5.2,
+            census_divs=[],
+            agent_divs=[],
+            hexsimpy_history=[
+                {"step": 9, "pop_name": "Chinook", "n_alive": 100},
+            ],
+            output_path=str(out),
+            scenario_name="test_scenario",
+            n_steps=10,
+            seed=42,
+        )
+        assert v == "PASS"
+        assert out.exists()
+        text = out.read_text()
+        assert "# Parity Report: test_scenario" in text
+        assert "PASS" in text
+        assert "10.50s" in text
+        assert "5.20s" in text
+        assert "Chinook" in text
+
+    def test_report_includes_divergences(self, tmp_path):
+        from parity_test import Divergence, generate_report
+
+        out = tmp_path / "report.md"
+        census_divs = [
+            Divergence(
+                step=5,
+                pop="Chinook",
+                metric="size",
+                hexsim_val=200.0,
+                hexsimpy_val=100.0,
+                rel_error=0.50,
+            )
+        ]
+        agent_divs = [
+            Divergence(
+                step=5,
+                pop="Chinook",
+                metric="mean_ed",
+                hexsim_val=10.0,
+                hexsimpy_val=5.0,
+                rel_error=0.50,
+            )
+        ]
+        v = generate_report(
+            hexsim_time=None,
+            hexsimpy_time=3.0,
+            census_divs=census_divs,
+            agent_divs=agent_divs,
+            hexsimpy_history=[],
+            output_path=str(out),
+            scenario_name="fail_scenario",
+            n_steps=10,
+            seed=42,
+        )
+        assert v == "FAIL"
+        text = out.read_text()
+        assert "FAIL" in text
+        assert "200.00" in text
+        assert "mean_ed" in text
+        assert "not available" in text  # hexsim_time is None

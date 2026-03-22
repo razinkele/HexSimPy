@@ -567,3 +567,161 @@ def compare_agents(
                     )
 
     return divergences
+
+
+# ---------------------------------------------------------------------------
+# TASK 6: HexSim engine runner and report generator
+# ---------------------------------------------------------------------------
+
+import shutil  # noqa: E402
+import subprocess  # noqa: E402
+
+
+def run_hexsim_engine(
+    patched_xml: str,
+    hexsim_exe: str,
+    seed: int = 42,
+    timeout: int = 3600,
+) -> tuple[float | None, dict[int, dict[int, dict]], dict]:
+    """Run HexSim 4.0.20 engine on a patched scenario XML.
+
+    Returns (elapsed_seconds | None, census, probe).
+    If exe not found, returns (None, {}, {}).
+    """
+    exe_path = Path(hexsim_exe)
+    xml_path = Path(patched_xml)
+
+    if not exe_path.is_file():
+        print(f"HexSim engine not found: {exe_path}")
+        return None, {}, {}
+
+    # workspace = patched_xml's grandparent (Scenarios/foo.xml -> workspace)
+    workspace = xml_path.parent.parent
+    result_dir = workspace / "Results" / xml_path.stem
+
+    # Clean previous results
+    if result_dir.exists():
+        shutil.rmtree(result_dir)
+
+    # Run engine
+    cmd = [str(exe_path), str(xml_path), str(seed)]
+    print(f"Running HexSim engine: {' '.join(cmd)}")
+
+    t0 = time.perf_counter()
+    try:
+        proc = subprocess.run(
+            cmd,
+            timeout=timeout,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.TimeoutExpired:
+        print(f"HexSim engine timed out after {timeout}s")
+        return None, {}, {}
+
+    elapsed = time.perf_counter() - t0
+
+    if proc.returncode != 0:
+        print(f"HexSim engine failed (rc={proc.returncode})")
+        if proc.stderr:
+            print(f"stderr: {proc.stderr[:500]}")
+        return None, {}, {}
+
+    # Parse outputs
+    census = {}
+    probe = {}
+    if result_dir.is_dir():
+        census = parse_hexsim_census(str(result_dir))
+        # Build accumulator map from the patched XML for probe parsing
+        acc_map = build_accumulator_map(str(xml_path))
+        probe = parse_hexsim_data_probe(str(result_dir), acc_map)
+
+    return elapsed, census, probe
+
+
+def generate_report(
+    hexsim_time: float | None,
+    hexsimpy_time: float,
+    census_divs: list[Divergence],
+    agent_divs: list[Divergence],
+    hexsimpy_history: list[dict],
+    output_path: str,
+    scenario_name: str,
+    n_steps: int,
+    seed: int,
+) -> str:
+    """Write a markdown parity report. Returns the verdict string."""
+    v = verdict(census_divs, agent_divs)
+
+    lines: list[str] = []
+    lines.append(f"# Parity Report: {scenario_name}")
+    lines.append("")
+    lines.append(f"- **Verdict:** {v}")
+    lines.append(f"- **Steps:** {n_steps}")
+    lines.append(f"- **Seed:** {seed}")
+    lines.append(f"- **Date:** {time.strftime('%Y-%m-%d %H:%M')}")
+    lines.append("")
+
+    # Timing
+    lines.append("## Timing")
+    lines.append("")
+    if hexsim_time is not None:
+        lines.append(f"- HexSim C++: {hexsim_time:.2f}s")
+    else:
+        lines.append("- HexSim C++: not available")
+    lines.append(f"- HexSimPy: {hexsimpy_time:.2f}s")
+    lines.append("")
+
+    # Census divergences
+    lines.append("## Census Divergences")
+    lines.append("")
+    if census_divs:
+        lines.append("| Step | Pop | Metric | HexSim | HexSimPy | Rel Error |")
+        lines.append("|------|-----|--------|--------|----------|-----------|")
+        for d in census_divs:
+            lines.append(
+                f"| {d.step} | {d.pop} | {d.metric} | "
+                f"{d.hexsim_val:.2f} | {d.hexsimpy_val:.2f} | "
+                f"{d.rel_error:.4f} |"
+            )
+    else:
+        lines.append("No census divergences detected.")
+    lines.append("")
+
+    # Agent divergences
+    lines.append("## Agent Divergences")
+    lines.append("")
+    if agent_divs:
+        lines.append("| Step | Pop | Metric | HexSim | HexSimPy | Rel Error |")
+        lines.append("|------|-----|--------|--------|----------|-----------|")
+        for d in agent_divs:
+            lines.append(
+                f"| {d.step} | {d.pop} | {d.metric} | "
+                f"{d.hexsim_val:.2f} | {d.hexsimpy_val:.2f} | "
+                f"{d.rel_error:.4f} |"
+            )
+    else:
+        lines.append("No agent divergences detected.")
+    lines.append("")
+
+    # Population summary from HexSimPy
+    lines.append("## HexSimPy Population Summary")
+    lines.append("")
+    if hexsimpy_history:
+        # Last step per population
+        last_by_pop: dict[str, dict] = {}
+        for entry in hexsimpy_history:
+            last_by_pop[entry["pop_name"]] = entry
+        for pop_name, entry in sorted(last_by_pop.items()):
+            lines.append(
+                f"- **{pop_name}**: {entry['n_alive']} alive at step {entry['step']}"
+            )
+    lines.append("")
+
+    report_text = "\n".join(lines)
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(report_text, encoding="utf-8")
+    print(f"Report written to {out}")
+
+    return v
