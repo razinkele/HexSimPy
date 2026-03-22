@@ -348,9 +348,18 @@ class ScenarioLoader:
                 csv_name = Path(evt.file_name).name
                 csv_path = lookup_dir / csv_name
                 if csv_path.exists():
-                    evt.lookup_table = np.loadtxt(
-                        csv_path, delimiter=",", dtype=np.float64
-                    )
+                    # Some CSVs have headers (quoted strings), skip them
+                    try:
+                        evt.lookup_table = np.loadtxt(
+                            csv_path, delimiter=",", dtype=np.float64
+                        )
+                    except ValueError:
+                        evt.lookup_table = np.loadtxt(
+                            csv_path,
+                            delimiter=",",
+                            dtype=np.float64,
+                            skiprows=1,
+                        )
                 else:
                     import warnings
 
