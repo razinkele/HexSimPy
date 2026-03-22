@@ -193,3 +193,56 @@ class TestParseHexsimCensus:
         (tmp_path / "readme.txt").write_text("not a csv")
         result = parse_hexsim_census(str(tmp_path))
         assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# TASK 3 tests: run_hexsimpy
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not SCENARIO_XML.exists(), reason="Columbia workspace not present")
+class TestRunHexsimpy:
+    @pytest.fixture(scope="class")
+    def patched_scenario(self, tmp_path_factory):
+        """Patch scenario XML with local workspace paths."""
+        from parity_test import patch_scenario_xml
+
+        tmp = tmp_path_factory.mktemp("scenario")
+        dst = tmp / "patched.xml"
+        patch_scenario_xml(
+            str(SCENARIO_XML), str(dst), str(WORKSPACE), start_log_step=1, n_steps=5
+        )
+        return dst
+
+    @pytest.fixture(scope="class")
+    def run_result(self, patched_scenario):
+        """Run HexSimPy for 5 steps and cache result for the class."""
+        from parity_test import run_hexsimpy
+
+        return run_hexsimpy(
+            str(WORKSPACE), str(patched_scenario), seed=42, n_steps=5, probe_interval=3
+        )
+
+    def test_returns_tuple_of_three(self, run_result):
+        assert len(run_result) == 3
+
+    def test_elapsed_positive(self, run_result):
+        elapsed, _, _ = run_result
+        assert elapsed > 0
+
+    def test_census_has_entries(self, run_result):
+        _, census, _ = run_result
+        assert len(census) > 0
+
+    def test_census_entry_has_required_keys(self, run_result):
+        _, census, _ = run_result
+        entry = census[0]
+        assert "pop_name" in entry
+        assert "n_alive" in entry
+        assert "step" in entry
+
+    def test_snapshots_collected(self, run_result):
+        """Snapshots should be collected at probe_interval steps."""
+        _, _, snapshots = run_result
+        # With 5 steps and probe_interval=3, expect snapshots at step 3
+        assert len(snapshots) >= 1
