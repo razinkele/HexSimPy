@@ -725,3 +725,146 @@ def generate_report(
     print(f"Report written to {out}")
 
     return v
+
+
+# ---------------------------------------------------------------------------
+# TASK 7: CLI main and integration
+# ---------------------------------------------------------------------------
+
+import argparse  # noqa: E402
+
+
+def main() -> None:
+    """CLI entry point for parity testing."""
+    parser = argparse.ArgumentParser(
+        description="Run parity test between HexSim C++ and HexSimPy."
+    )
+    parser.add_argument(
+        "--workspace", required=True, help="Path to HexSim workspace directory"
+    )
+    parser.add_argument(
+        "--scenario",
+        required=True,
+        help="Relative path to scenario XML within workspace",
+    )
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=2928,
+        help="Number of simulation steps (default: 2928)",
+    )
+    parser.add_argument(
+        "--seed", type=int, default=42, help="Random seed (default: 42)"
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=3600,
+        help="HexSim engine timeout in seconds (default: 3600)",
+    )
+    parser.add_argument(
+        "--hexsim-exe",
+        default="HexSim 4.0.20/HexSimEngine64.exe",
+        help="Path to HexSim engine executable",
+    )
+    parser.add_argument(
+        "--probe-interval",
+        type=int,
+        default=100,
+        help="Agent snapshot interval in steps (default: 100)",
+    )
+    parser.add_argument(
+        "--output",
+        default="docs/parity-report.md",
+        help="Output report path (default: docs/parity-report.md)",
+    )
+
+    args = parser.parse_args()
+
+    # Resolve paths
+    workspace = Path(args.workspace).resolve()
+    scenario_xml = workspace / args.scenario
+
+    # Validate
+    if not workspace.is_dir():
+        print(f"ERROR: Workspace not found: {workspace}")
+        sys.exit(1)
+    if not scenario_xml.is_file():
+        print(f"ERROR: Scenario XML not found: {scenario_xml}")
+        sys.exit(1)
+
+    scenario_name = scenario_xml.stem
+
+    # Step 1: Patch XML
+    patched_dir = workspace / "Scenarios"
+    patched_xml = patched_dir / f"{scenario_name}_parity.xml"
+    print(f"Patching scenario XML -> {patched_xml}")
+    patch_scenario_xml(
+        str(scenario_xml),
+        str(patched_xml),
+        str(workspace),
+        start_log_step=1,
+        n_steps=args.steps,
+    )
+
+    # Step 2: Build accumulator map
+    acc_map = build_accumulator_map(str(patched_xml))
+    print(f"Accumulator map: {len(acc_map)} populations")
+
+    # Build pop_id_to_name from XML
+    tree = ET.parse(str(patched_xml))
+    root = tree.getroot()
+    pop_id_to_name: dict[int, str] = {}
+    for idx, pop_el in enumerate(root.findall("population")):
+        name = pop_el.get("name", f"Pop{idx}")
+        pop_id_to_name[idx] = name
+    print(f"Populations: {pop_id_to_name}")
+
+    # Step 3: Run HexSim C++ engine
+    hexsim_exe = Path(args.hexsim_exe)
+    if not hexsim_exe.is_absolute():
+        hexsim_exe = PROJECT / args.hexsim_exe
+    hs_time, hs_census, hs_probe = run_hexsim_engine(
+        str(patched_xml), str(hexsim_exe), seed=args.seed, timeout=args.timeout
+    )
+
+    # Step 4: Run HexSimPy
+    print(f"Running HexSimPy for {args.steps} steps...")
+    py_time, py_census, py_snapshots = run_hexsimpy(
+        str(workspace),
+        str(patched_xml),
+        seed=args.seed,
+        n_steps=args.steps,
+        probe_interval=args.probe_interval,
+    )
+    print(f"HexSimPy completed in {py_time:.2f}s")
+
+    # Step 5: Compare census
+    census_divs = compare_census(hs_census, py_census, pop_id_to_name)
+    print(f"Census divergences: {len(census_divs)}")
+
+    # Step 6: Compare agents
+    agent_divs = compare_agents(hs_probe, py_snapshots, pop_id_to_name)
+    print(f"Agent divergences: {len(agent_divs)}")
+
+    # Step 7: Generate report
+    output_path = Path(args.output)
+    if not output_path.is_absolute():
+        output_path = PROJECT / args.output
+
+    v = generate_report(
+        hexsim_time=hs_time,
+        hexsimpy_time=py_time,
+        census_divs=census_divs,
+        agent_divs=agent_divs,
+        hexsimpy_history=py_census,
+        output_path=str(output_path),
+        scenario_name=scenario_name,
+        n_steps=args.steps,
+        seed=args.seed,
+    )
+    print(f"Verdict: {v}")
+
+
+if __name__ == "__main__":
+    main()
