@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import numpy as np  # noqa: F401
 import pytest
 
 # Make scripts/ importable
@@ -400,3 +401,156 @@ class TestVerdict:
             )
         ]
         assert verdict(divs, []) == "PASS"
+
+
+# ---------------------------------------------------------------------------
+# TASK 5 tests: parse_hexsim_data_probe, compare_agents
+# ---------------------------------------------------------------------------
+
+
+class TestParseHexsimDataProbe:
+    def _write_probe_csv(self, probe_dir, filename, rows):
+        import csv
+
+        probe_dir.mkdir(parents=True, exist_ok=True)
+        with open(probe_dir / filename, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerows(rows)
+
+    def test_basic_parsing(self, tmp_path):
+        from parity_test import parse_hexsim_data_probe
+
+        header = ["Run", "Time Step", "Population", "Individual", "Acc0", "Acc1"]
+        rows = [
+            header,
+            ["0", "5", "0", "100", "3.5", "10.0"],
+            ["0", "5", "0", "101", "4.0", "12.0"],
+        ]
+        probe_dir = tmp_path / "Data Probe"
+        self._write_probe_csv(probe_dir, "probe.csv", rows)
+
+        acc_map = {0: {0: "Energy Density", 1: "Mass"}}
+        result = parse_hexsim_data_probe(str(tmp_path), acc_map)
+
+        assert 0 in result
+        assert 5 in result[0]
+        assert 100 in result[0][5]
+        assert result[0][5][100]["Energy Density"] == pytest.approx(3.5)
+        assert result[0][5][101]["Mass"] == pytest.approx(12.0)
+
+    def test_empty_dir_returns_empty(self, tmp_path):
+        from parity_test import parse_hexsim_data_probe
+
+        result = parse_hexsim_data_probe(str(tmp_path), {})
+        assert result == {}
+
+    def test_no_data_probe_dir_returns_empty(self, tmp_path):
+        from parity_test import parse_hexsim_data_probe
+
+        result = parse_hexsim_data_probe(str(tmp_path / "nonexistent"), {})
+        assert result == {}
+
+    def test_unnamed_accumulators(self, tmp_path):
+        from parity_test import parse_hexsim_data_probe
+
+        header = ["Run", "Time Step", "Population", "Individual", "Acc0"]
+        rows = [header, ["0", "0", "1", "0", "99.0"]]
+        probe_dir = tmp_path / "Data Probe"
+        self._write_probe_csv(probe_dir, "probe.csv", rows)
+
+        # No accumulator map for pop 1 — should fall back to Acc0
+        result = parse_hexsim_data_probe(str(tmp_path), {})
+        assert result[1][0][0]["Acc0"] == pytest.approx(99.0)
+
+    def test_multiple_steps(self, tmp_path):
+        from parity_test import parse_hexsim_data_probe
+
+        header = ["Run", "Time Step", "Population", "Individual", "Acc0"]
+        rows = [
+            header,
+            ["0", "0", "0", "1", "1.0"],
+            ["0", "5", "0", "1", "2.0"],
+        ]
+        probe_dir = tmp_path / "Data Probe"
+        self._write_probe_csv(probe_dir, "probe.csv", rows)
+
+        result = parse_hexsim_data_probe(str(tmp_path), {0: {0: "Energy"}})
+        assert 0 in result[0]
+        assert 5 in result[0]
+        assert result[0][0][1]["Energy"] == pytest.approx(1.0)
+        assert result[0][5][1]["Energy"] == pytest.approx(2.0)
+
+
+class TestCompareAgents:
+    def test_detects_energy_divergence(self):
+        from parity_test import compare_agents
+
+        hexsim_probe = {
+            0: {
+                10: {
+                    1: {"Energy Density": 10.0, "Mass": 50.0},
+                    2: {"Energy Density": 12.0, "Mass": 55.0},
+                }
+            }
+        }
+        snapshots = [
+            {
+                "step": 10,
+                "pop_name": "Chinook",
+                "n_alive": 2,
+                "ed_kJ_g": np.array([5.0, 6.0]),  # much lower than HexSim
+                "mass_g": np.array([50.0, 55.0]),
+                "tri_idx": np.array([0, 1]),
+                "n_cells": 100,
+            }
+        ]
+        pop_id_to_name = {0: "Chinook"}
+        result = compare_agents(hexsim_probe, snapshots, pop_id_to_name)
+        ed_divs = [d for d in result if d.metric == "mean_ed"]
+        assert len(ed_divs) == 1
+        assert ed_divs[0].rel_error > 0.4  # ~50% divergence
+
+    def test_exact_match_no_divergence(self):
+        from parity_test import compare_agents
+
+        hexsim_probe = {
+            0: {
+                10: {
+                    1: {"Energy Density": 10.0, "Mass": 50.0},
+                }
+            }
+        }
+        snapshots = [
+            {
+                "step": 10,
+                "pop_name": "Chinook",
+                "n_alive": 1,
+                "ed_kJ_g": np.array([10.0]),
+                "mass_g": np.array([50.0]),
+                "tri_idx": np.array([0]),
+                "n_cells": 100,
+            }
+        ]
+        pop_id_to_name = {0: "Chinook"}
+        result = compare_agents(hexsim_probe, snapshots, pop_id_to_name)
+        assert result == []
+
+    def test_mass_divergence(self):
+        from parity_test import compare_agents
+
+        hexsim_probe = {0: {5: {1: {"Energy Density": 10.0, "Mass": 100.0}}}}
+        snapshots = [
+            {
+                "step": 5,
+                "pop_name": "Chinook",
+                "n_alive": 1,
+                "ed_kJ_g": np.array([10.0]),
+                "mass_g": np.array([50.0]),  # 50% off
+                "tri_idx": np.array([0]),
+                "n_cells": 10,
+            }
+        ]
+        result = compare_agents(hexsim_probe, snapshots, {0: "Chinook"})
+        mass_divs = [d for d in result if d.metric == "mean_mass"]
+        assert len(mass_divs) == 1
+        assert mass_divs[0].rel_error == pytest.approx(0.5)

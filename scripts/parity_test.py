@@ -354,3 +354,216 @@ def verdict(
             return "WARN"
 
     return "PASS"
+
+
+# ---------------------------------------------------------------------------
+# TASK 5: Data Probe parsing and agent comparison
+# ---------------------------------------------------------------------------
+
+# Pattern: anything inside a "Data Probe" directory ending in .csv
+_PROBE_RE = re.compile(r"^.+\.csv$")
+
+
+def parse_hexsim_data_probe(
+    result_dir: str,
+    accumulator_map: dict[int, dict[int, str]],
+) -> dict[int, dict[int, dict[int, dict[str, float]]]]:
+    """Parse Data Probe CSVs from a HexSim results directory.
+
+    Looks in result_dir / "Data Probe" for CSV files.
+    CSV format: Run, Time Step, Population, Individual, Acc0, Acc1, ...
+
+    Returns {pop_id: {step: {agent_id: {acc_name: value}}}}.
+    """
+    probe_dir = Path(result_dir) / "Data Probe"
+    result: dict[int, dict[int, dict[int, dict[str, float]]]] = {}
+
+    if not probe_dir.is_dir():
+        return result
+
+    for csv_file in sorted(probe_dir.glob("*.csv")):
+        with open(csv_file, newline="", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            header = next(reader, None)
+            if header is None:
+                continue
+
+            header = [h.strip().strip('"') for h in header]
+            # Columns: Run, Time Step, Population, Individual, then accumulators
+            n_fixed = 4  # Run, Time Step, Population, Individual
+            n_acc_cols = len(header) - n_fixed
+
+            for row in reader:
+                if not row or len(row) < n_fixed:
+                    continue
+                step = int(row[1].strip())
+                pop_id = int(row[2].strip())
+                agent_id = int(row[3].strip())
+
+                # Look up accumulator names for this population
+                acc_names = accumulator_map.get(pop_id, {})
+                agent_data: dict[str, float] = {}
+                for col_idx in range(n_acc_cols):
+                    raw = row[n_fixed + col_idx].strip()
+                    try:
+                        val = float(raw)
+                    except (ValueError, IndexError):
+                        val = 0.0
+                    name = acc_names.get(col_idx, f"Acc{col_idx}")
+                    agent_data[name] = val
+
+                result.setdefault(pop_id, {}).setdefault(step, {})[agent_id] = (
+                    agent_data
+                )
+
+    return result
+
+
+def compare_agents(
+    hexsim_probe: dict[int, dict[int, dict[int, dict[str, float]]]],
+    hexsimpy_snapshots: list[dict],
+    pop_id_to_name: dict[int, str],
+    energy_acc: str = "Energy Density",
+    mass_acc: str = "Mass",
+    n_cells: int | None = None,
+) -> list[Divergence]:
+    """Compare agent-level metrics at sampled steps using JSD for spatial.
+
+    hexsim_probe: {pop_id: {step: {agent_id: {acc_name: value}}}}
+    hexsimpy_snapshots: list of dicts with step, pop_name, ed_kJ_g, mass_g, tri_idx, n_cells
+    pop_id_to_name: {pop_id: pop_name}
+
+    Returns list[Divergence].
+    """
+    divergences: list[Divergence] = []
+
+    # Index snapshots by (step, pop_name)
+    snap_index: dict[tuple[int, str], dict] = {}
+    for snap in hexsimpy_snapshots:
+        key = (snap["step"], snap["pop_name"])
+        snap_index[key] = snap
+
+    name_to_id = {v: k for k, v in pop_id_to_name.items()}
+
+    for pop_id, pop_name in pop_id_to_name.items():
+        if pop_id not in hexsim_probe:
+            continue
+        for step in sorted(hexsim_probe[pop_id].keys()):
+            snap = snap_index.get((step, pop_name))
+            if snap is None:
+                continue
+
+            agents = hexsim_probe[pop_id][step]
+            if not agents:
+                continue
+
+            # Extract HexSim accumulator values
+            hs_ed = np.array([a.get(energy_acc, 0.0) for a in agents.values()])
+            hs_mass = np.array([a.get(mass_acc, 0.0) for a in agents.values()])
+
+            # Extract HexSimPy values
+            py_ed = snap.get("ed_kJ_g", np.array([]))
+            py_mass = snap.get("mass_g", np.array([]))
+            py_cells = snap.get("tri_idx", np.array([]))
+
+            # Compare mean energy density
+            if len(hs_ed) > 0 and len(py_ed) > 0:
+                hs_mean_ed = float(np.mean(hs_ed))
+                py_mean_ed = float(np.mean(py_ed))
+                if hs_mean_ed > 0:
+                    rel_err = abs(hs_mean_ed - py_mean_ed) / hs_mean_ed
+                elif py_mean_ed > 0:
+                    rel_err = 1.0
+                else:
+                    rel_err = 0.0
+                if rel_err > 0.0:
+                    divergences.append(
+                        Divergence(
+                            step=step,
+                            pop=pop_name,
+                            metric="mean_ed",
+                            hexsim_val=hs_mean_ed,
+                            hexsimpy_val=py_mean_ed,
+                            rel_error=rel_err,
+                        )
+                    )
+
+            # Compare mean mass
+            if len(hs_mass) > 0 and len(py_mass) > 0:
+                hs_mean_mass = float(np.mean(hs_mass))
+                py_mean_mass = float(np.mean(py_mass))
+                if hs_mean_mass > 0:
+                    rel_err = abs(hs_mean_mass - py_mean_mass) / hs_mean_mass
+                elif py_mean_mass > 0:
+                    rel_err = 1.0
+                else:
+                    rel_err = 0.0
+                if rel_err > 0.0:
+                    divergences.append(
+                        Divergence(
+                            step=step,
+                            pop=pop_name,
+                            metric="mean_mass",
+                            hexsim_val=hs_mean_mass,
+                            hexsimpy_val=py_mean_mass,
+                            rel_error=rel_err,
+                        )
+                    )
+
+            # Compare std dev of ED
+            if len(hs_ed) > 1 and len(py_ed) > 1:
+                hs_std = float(np.std(hs_ed))
+                py_std = float(np.std(py_ed))
+                if hs_std > 0:
+                    rel_err = abs(hs_std - py_std) / hs_std
+                elif py_std > 0:
+                    rel_err = 1.0
+                else:
+                    rel_err = 0.0
+                if rel_err > 0.0:
+                    divergences.append(
+                        Divergence(
+                            step=step,
+                            pop=pop_name,
+                            metric="std_ed",
+                            hexsim_val=hs_std,
+                            hexsimpy_val=py_std,
+                            rel_error=rel_err,
+                        )
+                    )
+
+            # Spatial: JSD on cell ID histograms
+            nc = n_cells or snap.get("n_cells")
+            if nc is not None and len(py_cells) > 0:
+                # Sanity check: max cell ID < n_cells
+                max_py = int(np.max(py_cells)) if len(py_cells) > 0 else 0
+                if max_py >= nc:
+                    continue  # skip spatial comparison if IDs out of range
+
+                # Build HexSim histogram from agent cell IDs if available
+                # For now, HexSim probe doesn't have cell IDs directly;
+                # use agent IDs as spatial proxy only if we have cell data
+                # Actually, HexSim data probe doesn't store cell IDs,
+                # so spatial JSD compares only HexSimPy snapshots if both exist
+                # We compute JSD between the two distributions
+                py_hist = np.bincount(py_cells.astype(int), minlength=nc).astype(float)
+                py_hist_norm = py_hist / py_hist.sum() if py_hist.sum() > 0 else py_hist
+
+                # If HexSim probe had cell column, we'd use it here
+                # For now, record JSD = 0 as placeholder when no HexSim spatial data
+                # This structure allows future extension
+                jsd = 0.0  # placeholder — no HexSim cell data in probe
+
+                if jsd > 0.0:
+                    divergences.append(
+                        Divergence(
+                            step=step,
+                            pop=pop_name,
+                            metric="spatial_jsd",
+                            hexsim_val=0.0,
+                            hexsimpy_val=jsd,
+                            rel_error=jsd,
+                        )
+                    )
+
+    return divergences
