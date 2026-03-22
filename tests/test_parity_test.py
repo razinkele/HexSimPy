@@ -246,3 +246,157 @@ class TestRunHexsimpy:
         _, _, snapshots = run_result
         # With 5 steps and probe_interval=3, expect snapshots at step 3
         assert len(snapshots) >= 1
+
+
+# ---------------------------------------------------------------------------
+# TASK 4 tests: Divergence, compare_census, verdict
+# ---------------------------------------------------------------------------
+
+
+class TestDivergence:
+    def test_dataclass_fields(self):
+        from parity_test import Divergence
+
+        d = Divergence(
+            step=0,
+            pop="Chinook",
+            metric="size",
+            hexsim_val=100.0,
+            hexsimpy_val=105.0,
+            rel_error=0.05,
+        )
+        assert d.step == 0
+        assert d.pop == "Chinook"
+        assert d.rel_error == pytest.approx(0.05)
+
+
+class TestCompareCensus:
+    def test_exact_match_returns_empty(self):
+        from parity_test import compare_census
+
+        # HexSim census: {pop_id: {step: {size, lambda, traits}}}
+        hexsim = {
+            0: {
+                0: {"size": 100, "lambda": 1.0, "traits": {}},
+                1: {"size": 110, "lambda": 1.1, "traits": {}},
+            }
+        }
+        # HexSimPy census: list of dicts with step, pop_name, n_alive
+        hexsimpy = [
+            {"step": 0, "pop_name": "Chinook", "n_alive": 100},
+            {"step": 1, "pop_name": "Chinook", "n_alive": 110},
+        ]
+        pop_id_to_name = {0: "Chinook"}
+        result = compare_census(hexsim, hexsimpy, pop_id_to_name)
+        assert result == []
+
+    def test_divergence_detected(self):
+        from parity_test import compare_census
+
+        hexsim = {
+            0: {
+                0: {"size": 100, "lambda": 1.0, "traits": {}},
+                1: {"size": 200, "lambda": 2.0, "traits": {}},
+            }
+        }
+        hexsimpy = [
+            {"step": 0, "pop_name": "Chinook", "n_alive": 100},
+            {"step": 1, "pop_name": "Chinook", "n_alive": 150},
+        ]
+        pop_id_to_name = {0: "Chinook"}
+        result = compare_census(hexsim, hexsimpy, pop_id_to_name)
+        assert len(result) > 0
+        # Should detect size divergence at step 1
+        size_divs = [d for d in result if d.metric == "size" and d.step == 1]
+        assert len(size_divs) == 1
+        assert size_divs[0].hexsim_val == 200.0
+        assert size_divs[0].hexsimpy_val == 150.0
+
+    def test_lambda_divergence(self):
+        from parity_test import compare_census
+
+        hexsim = {
+            0: {
+                0: {"size": 100, "lambda": 1.0, "traits": {}},
+                1: {"size": 100, "lambda": 1.0, "traits": {}},
+                2: {"size": 100, "lambda": 1.0, "traits": {}},
+            }
+        }
+        # HexSimPy: step 0 -> 100, step 1 -> 100 (lambda=1.0), step 2 -> 50 (lambda=0.5)
+        hexsimpy = [
+            {"step": 0, "pop_name": "Chinook", "n_alive": 100},
+            {"step": 1, "pop_name": "Chinook", "n_alive": 100},
+            {"step": 2, "pop_name": "Chinook", "n_alive": 50},
+        ]
+        pop_id_to_name = {0: "Chinook"}
+        result = compare_census(hexsim, hexsimpy, pop_id_to_name)
+        lambda_divs = [d for d in result if d.metric == "lambda"]
+        assert len(lambda_divs) > 0
+
+
+class TestVerdict:
+    def test_pass_no_divergences(self):
+        from parity_test import verdict
+
+        assert verdict([], []) == "PASS"
+
+    def test_fail_large_pop_divergence(self):
+        from parity_test import Divergence, verdict
+
+        divs = [
+            Divergence(
+                step=1,
+                pop="Chinook",
+                metric="size",
+                hexsim_val=200.0,
+                hexsimpy_val=150.0,
+                rel_error=0.25,
+            )
+        ]
+        assert verdict(divs, []) == "FAIL"
+
+    def test_warn_agent_metric(self):
+        from parity_test import Divergence, verdict
+
+        agent_divs = [
+            Divergence(
+                step=1,
+                pop="Chinook",
+                metric="ed_kJ_g",
+                hexsim_val=10.0,
+                hexsimpy_val=9.0,
+                rel_error=0.10,
+            )
+        ]
+        assert verdict([], agent_divs) == "WARN"
+
+    def test_fail_agent_metric_over_15pct(self):
+        from parity_test import Divergence, verdict
+
+        agent_divs = [
+            Divergence(
+                step=1,
+                pop="Chinook",
+                metric="ed_kJ_g",
+                hexsim_val=10.0,
+                hexsimpy_val=8.0,
+                rel_error=0.20,
+            )
+        ]
+        assert verdict([], agent_divs) == "FAIL"
+
+    def test_pass_small_pop_divergence_under_threshold(self):
+        """Pop size <5% relative error should pass even with >10 agent diff."""
+        from parity_test import Divergence, verdict
+
+        divs = [
+            Divergence(
+                step=1,
+                pop="Chinook",
+                metric="size",
+                hexsim_val=1000.0,
+                hexsimpy_val=980.0,
+                rel_error=0.02,
+            )
+        ]
+        assert verdict(divs, []) == "PASS"

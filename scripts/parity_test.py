@@ -215,3 +215,142 @@ def run_hexsimpy(
 
     elapsed = time.perf_counter() - t0
     return (elapsed, census_list, snapshots_list)
+
+
+# ---------------------------------------------------------------------------
+# TASK 4: Census comparison and verdict
+# ---------------------------------------------------------------------------
+
+from dataclasses import dataclass  # noqa: E402, F401
+
+
+@dataclass
+class Divergence:
+    """A single metric divergence between HexSim and HexSimPy."""
+
+    step: int
+    pop: str
+    metric: str
+    hexsim_val: float
+    hexsimpy_val: float
+    rel_error: float
+
+
+def compare_census(
+    hexsim_census: dict[int, dict[int, dict]],
+    hexsimpy_history: list[dict],
+    pop_id_to_name: dict[int, str],
+) -> list[Divergence]:
+    """Compare population sizes and lambda between HexSim and HexSimPy census data.
+
+    hexsim_census: {pop_id: {step: {size, lambda, traits}}}
+    hexsimpy_history: list of {step, pop_name, n_alive}
+    pop_id_to_name: {pop_id: pop_name}
+
+    Returns list of Divergence records where metrics differ.
+    """
+    divergences: list[Divergence] = []
+
+    # Index HexSimPy data by (pop_name, step)
+    py_index: dict[tuple[str, int], dict] = {}
+    for entry in hexsimpy_history:
+        key = (entry["pop_name"], entry["step"])
+        py_index[key] = entry
+
+    # Track previous sizes for lambda computation
+    prev_py_sizes: dict[str, int] = {}
+
+    for pop_id, pop_name in pop_id_to_name.items():
+        if pop_id not in hexsim_census:
+            continue
+        steps_data = hexsim_census[pop_id]
+
+        for step in sorted(steps_data.keys()):
+            hs_data = steps_data[step]
+            py_entry = py_index.get((pop_name, step))
+            if py_entry is None:
+                continue
+
+            hs_size = float(hs_data["size"])
+            py_size = float(py_entry["n_alive"])
+
+            # Compare population size
+            if hs_size > 0:
+                rel_err = abs(hs_size - py_size) / hs_size
+            elif py_size > 0:
+                rel_err = 1.0
+            else:
+                rel_err = 0.0
+
+            if rel_err > 0.0:
+                divergences.append(
+                    Divergence(
+                        step=step,
+                        pop=pop_name,
+                        metric="size",
+                        hexsim_val=hs_size,
+                        hexsimpy_val=py_size,
+                        rel_error=rel_err,
+                    )
+                )
+
+            # Compare lambda (growth rate)
+            hs_lambda = hs_data.get("lambda", 1.0)
+            prev_py = prev_py_sizes.get(pop_name)
+            if prev_py is not None and prev_py > 0:
+                py_lambda = py_size / prev_py
+            else:
+                py_lambda = 1.0  # default for first step
+
+            if hs_lambda > 0:
+                lam_err = abs(hs_lambda - py_lambda) / hs_lambda
+            elif py_lambda != 1.0:
+                lam_err = 1.0
+            else:
+                lam_err = 0.0
+
+            if lam_err > 0.0:
+                divergences.append(
+                    Divergence(
+                        step=step,
+                        pop=pop_name,
+                        metric="lambda",
+                        hexsim_val=float(hs_lambda),
+                        hexsimpy_val=py_lambda,
+                        rel_error=lam_err,
+                    )
+                )
+
+            prev_py_sizes[pop_name] = int(py_size)
+
+    return divergences
+
+
+def verdict(
+    census_divergences: list[Divergence],
+    agent_divergences: list[Divergence],
+) -> str:
+    """Determine overall parity verdict.
+
+    FAIL if pop_size > 5% AND > 10 agents difference.
+    FAIL if any agent metric > 15%.
+    WARN if any agent metric 5-15%.
+    PASS otherwise.
+    """
+    # Check census divergences
+    for d in census_divergences:
+        if d.metric == "size":
+            abs_diff = abs(d.hexsim_val - d.hexsimpy_val)
+            if d.rel_error > 0.05 and abs_diff > 10:
+                return "FAIL"
+
+    # Check agent divergences
+    for d in agent_divergences:
+        if d.rel_error > 0.15:
+            return "FAIL"
+
+    for d in agent_divergences:
+        if d.rel_error > 0.05:
+            return "WARN"
+
+    return "PASS"
