@@ -1,6 +1,6 @@
 # salmon_ibm API Reference
 
-This document covers the public API for each module in the `salmon_ibm` package. Private functions and methods (those starting with `_`) are omitted.
+This document covers the public API for each module in the `salmon_ibm` package (32 modules). Private functions and methods (those starting with `_`) are omitted.
 
 ---
 
@@ -22,6 +22,20 @@ This document covers the public API for each module in the `salmon_ibm` package.
 14. [`salmon_ibm.estuary`](#salmon_ibmestuary)
 15. [`salmon_ibm.ensemble`](#salmon_ibmensemble)
 16. [`salmon_ibm.output`](#salmon_ibmoutput)
+17. [`salmon_ibm.movement`](#salmon_ibmmovement)
+18. [`salmon_ibm.events_builtin`](#salmon_ibmevents_builtin)
+19. [`salmon_ibm.events_hexsim`](#salmon_ibmevents_hexsim)
+20. [`salmon_ibm.events_phase3`](#salmon_ibmevents_phase3)
+21. [`salmon_ibm.event_descriptors`](#salmon_ibmevent_descriptors)
+22. [`salmon_ibm.traits`](#salmon_ibmtraits)
+23. [`salmon_ibm.barriers`](#salmon_ibmbarriers)
+24. [`salmon_ibm.network`](#salmon_ibmnetwork)
+25. [`salmon_ibm.ranges`](#salmon_ibmranges)
+26. [`salmon_ibm.interactions`](#salmon_ibminteractions)
+27. [`salmon_ibm.reporting`](#salmon_ibmreporting)
+28. [`salmon_ibm.xml_parser`](#salmon_ibmxml_parser)
+29. [`salmon_ibm.scenario_loader`](#salmon_ibmscenario_loader)
+30. [`salmon_ibm.hexsim_expr`](#salmon_ibmhexsim_expr)
 
 ---
 
@@ -1225,3 +1239,942 @@ class OutputLogger:
 - **`to_dataframe()`** — Concatenate all logged steps into a `pd.DataFrame` with the columns above.
 - **`summary(t, pool)`** — Return a summary dict for timestep `t` (does not persist). Keys: `time`, `n_alive`, `n_arrived`, `mean_ed`, `behavior_counts`.
 - **`close()`** — Write all logged data to the CSV at `path` via `to_dataframe()`.
+
+---
+
+### `salmon_ibm.movement`
+
+> Movement kernels: random walk, directed (upstream/downstream), CWR-seeking, current advection, and barrier resolution.
+
+#### `execute_movement`
+
+```python
+def execute_movement(
+    pool,
+    mesh,
+    fields,
+    seed=None,
+    n_micro_steps=3,
+    cwr_threshold=16.0,
+    barrier_arrays=None,
+) -> None:
+```
+
+Execute one timestep of agent movement. Each timestep consists of `n_micro_steps` micro-steps. Each micro-step dispatches agents to the appropriate kernel based on their current `Behavior`:
+
+| Behavior | Kernel | Description |
+|----------|--------|-------------|
+| `HOLD` | (no movement) | Agent stays in place |
+| `RANDOM` | `_step_random_numba` | Move to a random water neighbor |
+| `UPSTREAM` | `_step_directed_numba` (descending SSH) | Move toward highest elevation |
+| `DOWNSTREAM` | `_step_directed_numba` (ascending SSH) | Move toward lowest elevation |
+| `TO_CWR` | `_step_to_cwr_numba` | Move toward coldest water below `cwr_threshold` |
+
+After behavioral movement, current advection is applied via `_advection_numba`. If `barrier_arrays` is provided, barrier resolution follows via `_resolve_barriers_numba`.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `pool` | `AgentPool` | — | Agent state |
+| `mesh` | `TriMesh` or `HexMesh` | — | Spatial mesh |
+| `fields` | `dict[str, np.ndarray]` | — | Environmental fields (`"temperature"`, `"ssh"`, `"u_current"`, `"v_current"`) |
+| `seed` | `int` or `None` | `None` | RNG seed for stochastic movement |
+| `n_micro_steps` | `int` | `3` | Number of sub-steps per timestep |
+| `cwr_threshold` | `float` | `16.0` | Temperature threshold (°C) defining cold-water refuge |
+| `barrier_arrays` | `tuple` or `None` | `None` | `(mortality, deflection, transmission)` arrays from `BarrierMap.to_arrays()` |
+
+All Numba kernels are compiled with `@njit(cache=True, parallel=True)` using `prange` for parallel execution.
+
+---
+
+### `salmon_ibm.events_builtin`
+
+> Built-in event types for the default salmon simulation pipeline.
+
+#### `MovementEvent`
+
+```python
+@register_event("movement")
+@dataclass
+class MovementEvent(Event):
+    n_micro_steps: int = 3
+    cwr_threshold: float = 16.0
+```
+
+Wraps `execute_movement()` as an event. Reads `barrier_arrays` from the landscape.
+
+---
+
+#### `SurvivalEvent`
+
+```python
+@register_event("survival")
+@dataclass
+class SurvivalEvent(Event):
+    bio_params: BioParams = field(default_factory=BioParams)
+    thermal: bool = True
+    starvation: bool = True
+```
+
+Applies the Wisconsin bioenergetics model (`update_energy`) plus optional thermal mortality (`T >= T_MAX`). Marks dead agents via `alive = False`.
+
+---
+
+#### `StageSpecificSurvivalEvent`
+
+```python
+@register_event("stage_survival")
+@dataclass
+class StageSpecificSurvivalEvent(Event):
+    trait_name: str = ""
+    mortality_rates: dict = field(default_factory=dict)
+    density_dependent: bool = False
+```
+
+Apply per-stage mortality rates based on a categorical trait. Optionally density-dependent.
+
+---
+
+#### `IntroductionEvent`
+
+```python
+@register_event("introduction")
+@dataclass
+class IntroductionEvent(Event):
+    n_agents: int = 0
+    positions: np.ndarray = field(default_factory=lambda: np.array([], dtype=int))
+    initial_mass_mean: float = 3500.0
+    initial_mass_std: float = 500.0
+    initial_ed: float = 6.5
+    initial_traits: dict = field(default_factory=dict)
+    initial_accumulators: dict = field(default_factory=dict)
+```
+
+Introduce new agents into the population at specified positions.
+
+---
+
+#### `ReproductionEvent`
+
+```python
+@register_event("reproduction")
+@dataclass
+class ReproductionEvent(Event):
+    offspring_per_pair: int = 2
+    mate_distance: int = 1
+```
+
+Pair adjacent agents and produce offspring with genetic recombination if a `GenomeManager` is present.
+
+---
+
+#### `CustomEvent`
+
+```python
+@register_event("custom")
+@dataclass
+class CustomEvent(Event):
+    callback: Callable = field(default_factory=lambda: lambda *a: None)
+```
+
+Wraps an arbitrary callable as an event.
+
+---
+
+### `salmon_ibm.events_hexsim`
+
+> HexSim-compatible events with Numba JIT kernels for performance-critical operations.
+
+#### `HexSimAccumulateEvent`
+
+```python
+@register_event("accumulate")
+@dataclass
+class HexSimAccumulateEvent(Event):
+    updater_functions: list = field(default_factory=list)
+```
+
+Run a sequence of accumulator updater functions. Each entry in `updater_functions` specifies the updater name and parameters.
+
+---
+
+#### `HexSimSurvivalEvent`
+
+```python
+@register_event("hexsim_survival")
+@dataclass
+class HexSimSurvivalEvent(Event):
+    survival_accumulator: str = ""
+```
+
+Kill agents whose survival accumulator value indicates death. Uses HexSim expression evaluation.
+
+---
+
+#### `HexSimMoveEvent`
+
+```python
+@register_event("move")
+@dataclass
+class HexSimMoveEvent(Event):
+    move_strategy: str = "onlyDisperse"
+    dispersal_spatial_data: str = ""
+    walk_up_gradient: bool = False
+    dispersal_accumulator: str = ""
+    distance_accumulator: str = ""
+    dispersal_use_affinity: object = None
+    dispersal_halt_target: float = 0.0
+    resource_threshold: float = 0.0
+```
+
+HexSim movement with gradient-following, affinity targets, and configurable dispersal strategies. Caches mesh/gradient references for performance. Uses Numba JIT kernels `_move_gradient_numba` and `_move_affinity_numba`.
+
+| Strategy | Description |
+|----------|-------------|
+| `"onlyDisperse"` | Random dispersal movement |
+| `"walkUpGradient"` | Follow ascending spatial data gradient |
+| `"walkDownGradient"` | Follow descending spatial data gradient |
+| `"moveToAffinityTarget"` | Move toward an affinity target cell |
+
+---
+
+#### `PatchIntroductionEvent`
+
+```python
+@register_event("patch_introduction")
+@dataclass
+class PatchIntroductionEvent(Event):
+    patch_spatial_data: str = ""
+```
+
+Introduce agents at cells selected by a spatial data layer.
+
+---
+
+#### `DataLookupEvent`
+
+```python
+@register_event("data_lookup")
+@dataclass
+class DataLookupEvent(Event):
+    file_name: str = ""
+    row_accumulator: str = ""
+    column_accumulator: str = ""
+    target_accumulator: str = ""
+    lookup_table: np.ndarray | None = field(default=None, repr=False)
+```
+
+Look up values in a 2D CSV table using two accumulator values as row/column keys, and write the result to a target accumulator.
+
+---
+
+#### `SetSpatialAffinityEvent`
+
+```python
+@register_event("set_spatial_affinity")
+@dataclass
+class SetSpatialAffinityEvent(Event):
+    affinity_name: str = ""
+    strategy: str = "better"
+    spatial_series: str = ""
+    error_accumulator: str = ""
+    min_accumulator: str = ""
+    max_accumulator: str = ""
+```
+
+Set per-agent spatial affinity targets by evaluating neighbor cells against a strategy. Uses Numba JIT kernel `_set_affinity_numba`.
+
+---
+
+#### `clear_combo_mask_cache`
+
+```python
+def clear_combo_mask_cache() -> None:
+```
+
+Clear the cached trait-combination masks. Should be called when trait values change between steps.
+
+---
+
+### `salmon_ibm.events_phase3`
+
+> Phase 3 event types: mutation, trait transition, generated hex maps, range dynamics.
+
+#### `MutationEvent`
+
+```python
+@register_event("mutation")
+@dataclass
+class MutationEvent(Event):
+    locus_name: str = ""
+    transition_matrix: np.ndarray = field(default_factory=lambda: np.array([]))
+```
+
+Apply allele mutations at a named locus using a row-stochastic transition matrix of shape `(n_alleles, n_alleles)`.
+
+---
+
+#### `TransitionEvent`
+
+```python
+@register_event("transition")
+@dataclass
+class TransitionEvent(Event):
+    trait_name: str = ""
+    transition_matrix: np.ndarray = field(default_factory=lambda: np.array([]))
+```
+
+Apply probabilistic state transitions on a categorical trait (e.g., SEIR disease states or life stages). Transition matrix shape: `(n_categories, n_categories)`.
+
+---
+
+#### `GeneratedHexmapEvent`
+
+```python
+@register_event("generated_hexmap")
+@dataclass
+class GeneratedHexmapEvent(Event):
+    expression: str = ""
+    output_name: str = ""
+```
+
+Create a per-cell spatial data layer by evaluating an algebraic expression referencing global variables, accumulators, and existing spatial data.
+
+---
+
+#### `RangeDynamicsEvent`
+
+```python
+@register_event("range_dynamics")
+@dataclass
+class RangeDynamicsEvent(Event):
+    mode: str = "expand"
+    resource_map_name: str = "resources"
+    resource_threshold: float = 0.0
+    max_range_size: int = 50
+```
+
+Expand or contract agent territories via BFS based on resource availability.
+
+| Mode | Description |
+|------|-------------|
+| `"expand"` | Add neighboring cells to territory (up to `max_range_size`) |
+| `"contract"` | Remove low-resource cells from territory |
+
+---
+
+#### `SetAffinityEvent`
+
+```python
+@register_event("set_affinity")
+@dataclass
+class SetAffinityEvent(Event):
+    affinity_type: str = "spatial"
+    affinity_map_name: str | None = None
+    strength: float = 1.0
+```
+
+Set spatial affinity targets for agents from a named spatial data layer.
+
+---
+
+#### `PlantDynamicsEvent`
+
+```python
+@register_event("plant_dynamics")
+@dataclass
+class PlantDynamicsEvent(Event):
+    seed_production_rate: float = 5.0
+    dispersal_radius: int = 3
+    establishment_threshold: float = 0.5
+```
+
+Simulate seed production, dispersal, and establishment for plant populations.
+
+---
+
+### `salmon_ibm.event_descriptors`
+
+> Typed descriptor dataclasses for XML event parameter extraction and registry-driven loading.
+
+#### `EventDescriptor`
+
+```python
+@dataclass
+class EventDescriptor:
+    name: str
+    event_type: str
+    timestep: int
+    population_name: str
+    enabled: bool = True
+    params: dict = field(default_factory=dict)
+```
+
+Base descriptor for all event types. Specialized subclasses extract type-specific parameters from XML.
+
+---
+
+#### Specialized Descriptors
+
+| Descriptor | Event Type | Key Fields |
+|-----------|------------|------------|
+| `MoveEventDescriptor` | `"move"` | `move_type`, `max_steps`, `affinity_name` |
+| `SurvivalEventDescriptor` | `"hexsim_survival"` | `survival_expression`, `accumulator_refs` |
+| `AccumulateEventDescriptor` | `"accumulate"` | `updater_functions` (list of dicts) |
+| `TransitionEventDescriptor` | `"transition"` | `trait_name`, `transition_matrix` |
+| `CensusEventDescriptor` | `"census"` | (no extra fields) |
+| `IntroductionEventDescriptor` | `"introduction"` | `n_agents`, `initialization_spatial_data` |
+| `PatchIntroductionEventDescriptor` | `"patch_introduction"` | `n_agents`, `spatial_data` |
+| `DataProbeEventDescriptor` | `"data_probe"` | (no extra fields) |
+| `DataLookupEventDescriptor` | `"data_lookup"` | `lookup_file`, `accumulator_name` |
+| `SetSpatialAffinityEventDescriptor` | `"set_spatial_affinity"` | `affinity_name`, `spatial_data` |
+| `InteractionEventDescriptor` | `"interaction"` | `interaction_type` |
+| `ReanimationEventDescriptor` | `"reanimation"` | (no extra fields) |
+
+---
+
+#### `DESCRIPTOR_REGISTRY`
+
+```python
+DESCRIPTOR_REGISTRY: dict[str, type[EventDescriptor]]
+```
+
+Maps event type names to their descriptor classes. Used by `from_descriptor()` for registry-driven event loading.
+
+---
+
+### `salmon_ibm.traits`
+
+> Categorical per-agent trait system with four derivation modes.
+
+#### `TraitType`
+
+```python
+class TraitType(Enum):
+    PROBABILISTIC = "probabilistic"
+    ACCUMULATED = "accumulated"
+    GENETIC = "genetic"
+    GENETIC_ACCUMULATED = "genetic_accumulated"
+```
+
+| Type | Description |
+|------|-------------|
+| `PROBABILISTIC` | Random categorical assignment |
+| `ACCUMULATED` | Binned from an accumulator value using thresholds |
+| `GENETIC` | Mapped from a single-locus diploid genotype via phenotype map |
+| `GENETIC_ACCUMULATED` | Weighted sum across multiple loci, then binned |
+
+---
+
+#### `TraitDefinition`
+
+```python
+@dataclass
+class TraitDefinition:
+    name: str
+    trait_type: TraitType
+    categories: list[str]
+    accumulator_name: str | None = None
+    thresholds: np.ndarray | None = None
+    locus_name: str | None = None
+    phenotype_map: np.ndarray | None = None
+    locus_names: list[str] | None = None
+    locus_weights: np.ndarray | None = None
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | `str` | Trait identifier |
+| `categories` | `list[str]` | Category names (e.g., `["juvenile", "adult"]`) |
+| `accumulator_name` | `str` or `None` | Source accumulator (for `ACCUMULATED` type) |
+| `thresholds` | `np.ndarray` or `None` | Ascending bin edges; length = `len(categories) - 1` |
+| `locus_name` | `str` or `None` | Genetic locus (for `GENETIC` type) |
+| `phenotype_map` | `np.ndarray` or `None` | `int[n_alleles, n_alleles]` -> category index |
+| `locus_names` | `list[str]` or `None` | Multiple loci (for `GENETIC_ACCUMULATED`) |
+| `locus_weights` | `np.ndarray` or `None` | Per-locus weights for weighted sum |
+
+---
+
+#### `TraitManager`
+
+```python
+class TraitManager:
+    def __init__(self, n_agents: int, definitions: list[TraitDefinition]): ...
+
+    def get(self, name: str) -> np.ndarray: ...
+    def set(self, name: str, values: np.ndarray, mask: np.ndarray | None = None) -> None: ...
+    def category_names(self, name: str) -> list[str]: ...
+    def evaluate_accumulated(self, name: str, acc_manager, mask: np.ndarray | None = None) -> None: ...
+    def evaluate_genetic(self, name: str, genome_manager, mask: np.ndarray | None = None) -> None: ...
+    def evaluate_genetic_accumulated(self, name: str, genome_manager, mask: np.ndarray | None = None) -> None: ...
+    def filter_by_traits(self, **criteria) -> np.ndarray: ...
+```
+
+**Methods**
+
+- **`get(name)`** — Return category indices for all agents; shape `(n_agents,)`.
+- **`set(name, values, mask=None)`** — Write category indices. If `mask` is given, only writes to masked rows.
+- **`category_names(name)`** — Return the list of category names for trait `name`.
+- **`evaluate_accumulated(name, acc_manager, mask=None)`** — Rebin agents into categories using accumulator values and thresholds.
+- **`evaluate_genetic(name, genome_manager, mask=None)`** — Map diploid genotype to category using the phenotype map.
+- **`evaluate_genetic_accumulated(name, genome_manager, mask=None)`** — Compute weighted multi-locus sum, then bin into categories.
+- **`filter_by_traits(**criteria)`** — Return a boolean mask of agents matching all trait criteria. Example: `filter_by_traits(stage=0, sex=1)`.
+
+---
+
+### `salmon_ibm.barriers`
+
+> Edge-based movement barriers with probabilistic outcomes.
+
+#### `BarrierOutcome`
+
+```python
+class BarrierOutcome(NamedTuple):
+    p_mortality: float
+    p_deflection: float
+    p_transmission: float
+```
+
+Probabilities for a single crossing attempt. Must satisfy `p_mortality + p_deflection + p_transmission = 1.0` (transmission is the implicit complement).
+
+**Static constructors**
+
+- **`BarrierOutcome.impassable()`** — Returns `(0.0, 1.0, 0.0)` — always deflected.
+- **`BarrierOutcome.lethal()`** — Returns `(1.0, 0.0, 0.0)` — always killed.
+
+---
+
+#### `BarrierClass`
+
+```python
+@dataclass
+class BarrierClass:
+    name: str
+    forward: BarrierOutcome
+    reverse: BarrierOutcome
+```
+
+Defines directional outcomes for a named barrier type (e.g., `"dam"`).
+
+---
+
+#### `BarrierMap`
+
+```python
+class BarrierMap:
+    def __init__(self): ...
+
+    def add_edge(self, from_cell: int, to_cell: int, outcome: BarrierOutcome) -> None: ...
+    def check(self, from_cell: int, to_cell: int) -> BarrierOutcome | None: ...
+    def has_barriers(self) -> bool: ...
+
+    @property
+    def n_edges(self) -> int: ...
+
+    @classmethod
+    def from_hbf(cls, path, mesh, class_config=None): ...
+
+    def to_arrays(self, mesh) -> tuple[np.ndarray, np.ndarray, np.ndarray]: ...
+```
+
+**Methods**
+
+- **`add_edge(from_cell, to_cell, outcome)`** — Register a barrier on the edge from `from_cell` to `to_cell`.
+- **`check(from_cell, to_cell)`** — Return the `BarrierOutcome` for this edge, or `None` if no barrier.
+- **`has_barriers()`** — True if any barriers are registered.
+- **`from_hbf(path, mesh, class_config=None)`** — Load barriers from a HexSim `.hbf` text file. Maps barrier classes to outcomes using `class_config`.
+- **`to_arrays(mesh)`** — Precompute `(mortality, deflection, transmission)` arrays of shape `(n_cells, max_neighbors)` for use in Numba movement kernels.
+
+---
+
+### `salmon_ibm.network`
+
+> 1D stream network topology with segment-based movement.
+
+#### `SegmentDefinition`
+
+```python
+@dataclass
+class SegmentDefinition:
+    id: int
+    length: float
+    upstream_ids: list[int] = field(default_factory=list)
+    downstream_ids: list[int] = field(default_factory=list)
+    order: int = 1
+```
+
+| Field | Description |
+|-------|-------------|
+| `id` | Unique segment identifier |
+| `length` | Segment length in metres |
+| `upstream_ids` | IDs of upstream-connected segments |
+| `downstream_ids` | IDs of downstream-connected segments |
+| `order` | Strahler stream order |
+
+---
+
+#### `StreamNetwork`
+
+```python
+class StreamNetwork:
+    def __init__(self, segments: list[SegmentDefinition]): ...
+
+    def segment_length(self, seg_id: int) -> float: ...
+    def upstream(self, seg_id: int) -> list[int]: ...
+    def downstream(self, seg_id: int) -> list[int]: ...
+    def is_headwater(self, seg_id: int) -> bool: ...
+    def is_outlet(self, seg_id: int) -> bool: ...
+    def all_upstream(self, seg_id: int) -> list[int]: ...
+    def all_downstream(self, seg_id: int) -> list[int]: ...
+```
+
+- **`all_upstream(seg_id)`** / **`all_downstream(seg_id)`** — BFS traversal returning all reachable segments in the specified direction.
+
+---
+
+#### `NetworkPosition`
+
+```python
+@dataclass
+class NetworkPosition:
+    segment_id: int
+    offset: float
+```
+
+Position within a segment: `offset` is the distance from the start of the segment.
+
+---
+
+#### `NetworkMovement`
+
+```python
+class NetworkMovement:
+    def __init__(self, network: StreamNetwork, rng_seed: int | None = None): ...
+
+    def move_upstream(self, positions: list[NetworkPosition],
+                      step_lengths: np.ndarray) -> list[NetworkPosition]: ...
+    def move_downstream(self, positions: list[NetworkPosition],
+                        step_lengths: np.ndarray) -> list[NetworkPosition]: ...
+```
+
+Handles segment boundary crossings when agents move beyond the end of a segment.
+
+---
+
+#### `SwitchPopulationEvent`
+
+```python
+@register_event("switch_population")
+@dataclass
+class SwitchPopulationEvent(Event):
+    source_pop: str = ""
+    target_pop: str = ""
+    transfer_probability: float = 0.1
+```
+
+Transfer agents between named populations with a given probability.
+
+---
+
+### `salmon_ibm.ranges`
+
+> Non-overlapping territorial range allocator.
+
+#### `AgentRange`
+
+```python
+@dataclass
+class AgentRange:
+    owner: int
+    cells: set[int] = field(default_factory=set)
+    resource_total: float = 0.0
+```
+
+A single agent's territory: the set of owned cells and total resources within them.
+
+---
+
+#### `RangeAllocator`
+
+```python
+class RangeAllocator:
+    def __init__(self, mesh): ...
+
+    @property
+    def n_occupied(self) -> int: ...
+
+    def get_range(self, agent_idx: int) -> AgentRange | None: ...
+    def owner_of(self, cell_id: int) -> int: ...
+    def is_available(self, cell_id: int) -> bool: ...
+    def allocate_cell(self, agent_idx: int, cell_id: int) -> bool: ...
+    def release_cell(self, agent_idx: int, cell_id: int) -> None: ...
+    def release_all(self, agent_idx: int) -> None: ...
+    def expand_range(self, agent_idx: int, resource_map: np.ndarray,
+                     resource_threshold: float = 0.0,
+                     max_cells: int = 50) -> int: ...
+    def contract_range(self, agent_idx: int, resource_map: np.ndarray,
+                       resource_threshold: float = 0.0) -> int: ...
+    def compute_resources(self, agent_idx: int, resource_map: np.ndarray) -> float: ...
+    def summary(self) -> dict: ...
+```
+
+**Methods**
+
+- **`allocate_cell(agent_idx, cell_id)`** — Claim a cell for an agent. Returns `False` if already owned.
+- **`expand_range(agent_idx, resource_map, threshold, max_cells)`** — BFS expansion adding available neighbor cells above `threshold`. Returns count of cells added.
+- **`contract_range(agent_idx, resource_map, threshold)`** — Release cells with resource below `threshold`. Returns count of cells released.
+- **`compute_resources(agent_idx, resource_map)`** — Sum resource values across the agent's territory.
+
+---
+
+### `salmon_ibm.interactions`
+
+> Multi-population manager and interaction events.
+
+#### `MultiPopulationManager`
+
+```python
+class MultiPopulationManager:
+    def __init__(self): ...
+
+    def register(self, name_or_population, population=None) -> None: ...
+    def get(self, name: str): ...
+    def build_cell_index(self, name: str) -> None: ...
+    def agents_at_cell(self, name: str, cell_id: int) -> np.ndarray: ...
+    def co_located_pairs(self, pop_a: str, pop_b: str) -> list[tuple[np.ndarray, np.ndarray]]: ...
+```
+
+- **`co_located_pairs(pop_a, pop_b)`** — Find all pairs of agents from two populations sharing the same cell. Returns list of `(indices_a, indices_b)` tuples per shared cell.
+
+---
+
+#### `InteractionOutcome`
+
+```python
+class InteractionOutcome(Enum):
+    PREDATION = "predation"
+    COMPETITION = "competition"
+    DISEASE = "disease"
+```
+
+---
+
+#### `InteractionEvent`
+
+```python
+@register_event("interaction")
+@dataclass
+class InteractionEvent(Event):
+    pop_a_name: str = ""
+    pop_b_name: str = ""
+    encounter_probability: float = 0.1
+    outcome: InteractionOutcome = InteractionOutcome.PREDATION
+    resource_gain_acc: str | None = None
+    resource_gain_amount: float = 0.0
+    penalty_acc: str | None = None
+    penalty_amount: float = 0.0
+```
+
+Probabilistic interaction between co-located agents from two populations. Depending on `outcome`, one agent may die (predation), lose resources (competition), or receive a penalty accumulator (disease).
+
+---
+
+### `salmon_ibm.reporting`
+
+> Report and tally framework for simulation output.
+
+#### `Report`
+
+```python
+@dataclass
+class Report:
+    name: str
+    records: list[dict] = field(default_factory=list)
+
+    def record(self, data: dict) -> None: ...
+    def to_csv(self, path: str | Path) -> None: ...
+    def clear(self) -> None: ...
+```
+
+Base class for time-series reports. Subclasses implement `update()` methods.
+
+---
+
+#### Report Subclasses
+
+| Class | Key Fields Recorded |
+|-------|-------------------|
+| `ProductivityReport` | `time`, `n_alive`, `n_births`, `n_deaths`, `lambda` |
+| `DemographicReport` | `time`, `n_alive`, `n_dead`, `mean_mass`, `mean_ed` |
+| `DispersalReport` | `time`, per-agent displacement from origin |
+| `GeneticReport` | `time`, allele frequencies, heterozygosity per locus |
+
+---
+
+#### `Tally`
+
+```python
+@dataclass
+class Tally:
+    name: str
+    n_cells: int
+    data: np.ndarray = field(init=False)
+
+    def reset(self) -> None: ...
+    def to_array(self) -> np.ndarray: ...
+```
+
+Base class for per-cell spatial tallies. Shape: `(n_cells,)`.
+
+---
+
+#### Tally Subclasses
+
+| Class | What It Tallies |
+|-------|----------------|
+| `OccupancyTally` | Count of timesteps each cell was occupied |
+| `DensityTally` | Cumulative agent count per cell |
+| `DispersalFluxTally` | Agent movement between cells |
+| `BarrierTally` | Barrier encounter outcomes per cell |
+
+---
+
+#### `ReportManager`
+
+```python
+class ReportManager:
+    def __init__(self): ...
+
+    def add_report(self, report: Report) -> None: ...
+    def add_tally(self, tally: Tally) -> None: ...
+    def get_report(self, name: str) -> Report | None: ...
+    def get_tally(self, name: str) -> Tally | None: ...
+    def save_all(self, output_dir: str | Path) -> None: ...
+    def summary(self) -> dict: ...
+```
+
+Collects reports and tallies. `save_all()` writes all reports as CSVs and tallies as NumPy arrays to the output directory.
+
+---
+
+### `salmon_ibm.xml_parser`
+
+> Parse real HexSim `.xml` scenario files into Python dicts.
+
+#### `load_scenario_xml`
+
+```python
+def load_scenario_xml(path: str | Path) -> dict:
+```
+
+Parse a HexSim scenario XML file and return a dict with these keys:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `simulation` | `dict` | `n_timesteps`, `n_replicates`, `start_log_step` |
+| `grid` | `dict` | `n_hexagons`, `rows`, `columns`, `narrow` (bool), `cell_width` |
+| `workspace` | `str` | Workspace directory path |
+| `global_variables` | `dict[str, float]` | Named global variables |
+| `spatial_data_series` | `dict[str, dict]` | Named spatial data with `datatype`, `time_series`, `cycle_length` |
+| `populations` | `list[dict]` | Population definitions with accumulators, traits, affinities, ranges |
+| `events` | `list[dict]` | Recursive event tree with triggers, filters, and parameters |
+
+---
+
+#### `build_events_from_xml`
+
+```python
+def build_events_from_xml(xml_config: dict, callback_registry: dict | None = None) -> list:
+```
+
+Convert the `events` list from `load_scenario_xml` output into a list of `Event` instances using `EVENT_REGISTRY` and `DESCRIPTOR_REGISTRY`.
+
+---
+
+### `salmon_ibm.scenario_loader`
+
+> End-to-end XML-driven simulation setup for real HexSim scenarios.
+
+#### `ScenarioLoader`
+
+```python
+class ScenarioLoader:
+    def load(
+        self, workspace_dir: str, scenario_xml: str, rng_seed: int | None = None
+    ) -> HexSimSimulation: ...
+```
+
+Orchestrates full scenario loading:
+1. Parse XML scenario via `load_scenario_xml`
+2. Create `HexMesh` from workspace
+3. Create `HexSimEnvironment`
+4. Build spatial data registry from workspace hex-maps
+5. Create multi-population setup from XML population definitions
+6. Build event tree from XML event definitions
+7. Load lookup tables from workspace CSVs
+8. Return fully configured `HexSimSimulation`
+
+---
+
+#### `HexSimSimulation`
+
+```python
+class HexSimSimulation:
+    def __init__(self, populations, sequencer, environment, landscape, n_timesteps): ...
+
+    def step(self) -> None: ...
+    def run(self, n_steps=None) -> None: ...
+```
+
+Top-level simulation runner for XML-loaded HexSim scenarios. Supports multiple named populations with a shared event sequencer.
+
+- **`step()`** — Advance environment by one timestep, then run the event sequencer.
+- **`run(n_steps=None)`** — Run for `n_steps` (or `n_timesteps` from XML if `None`).
+
+**Attributes**
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `populations` | `dict[str, Population]` | Named populations |
+| `environment` | `HexSimEnvironment` | Zone-based environment |
+| `landscape` | `Landscape` | Shared event context |
+| `history` | `list[dict]` | Per-step summary records |
+
+---
+
+### `salmon_ibm.hexsim_expr`
+
+> HexSim expression DSL translator and safe evaluator.
+
+#### `translate_hexsim_expr`
+
+```python
+def translate_hexsim_expr(expr: str) -> str:
+```
+
+Translate a HexSim DSL expression into safe Python. Transformations:
+
+| HexSim syntax | Python equivalent | Description |
+|--------------|------------------|-------------|
+| `'single quoted'` | `_g["single quoted"]` | Global variable reference |
+| `"double quoted"` | `_a["double quoted"]` | Accumulator reference |
+| `Cond(a, b)` | `_cond(a, b)` | Sign-of-difference |
+| `Floor(x)` | `floor(x)` | Floor function |
+| `Pow(a, b)` | `pow(a, b)` | Power |
+| `GasDev()` | `_gasdev()` | Standard normal random |
+| `Rand()` | `_rand()` | Uniform random [0, 1) |
+
+The result is AST-validated before use to prevent code injection.
+
+---
+
+#### `build_hexsim_namespace`
+
+```python
+def build_hexsim_namespace(globals_dict, acc_dict, rng, n_masked) -> dict:
+```
+
+Build a safe namespace for `eval()` with:
+- `_g`: global variables dict
+- `_a`: accumulator values dict
+- HexSim functions: `_cond`, `Floor`, `Pow`, `Exp`, `Max`, `Min`, `GasDev`, `Rand`
+- Math functions: `sqrt`, `abs`, `exp`, `log`, `sin`, `cos`, `tan`, `minimum`, `maximum`, `clip`, `where`, `pi`, `e`

@@ -9,16 +9,27 @@ A Python reimplementation of EPA HexSim for simulating Baltic salmon migration t
 - **Structure-of-Arrays (SoA) agent architecture** with Numba JIT acceleration
 - **Wisconsin bioenergetics model** for non-feeding migrants (proportional mass loss)
 - **Behavioral decision table** (Snyder et al. 2019) — temperature x urgency -> behavior probabilities
-- **Full HexSim event system compatibility** — accumulators, traits, genetics, barriers, network
+- **Full HexSim event system compatibility** — accumulators (24 updater functions), traits, genetics, barriers, network, ranges
 - **Dual grid backends** — NetCDF triangular mesh (scipy Delaunay) or HexSim hex grid (.hxn files)
-- **Ensemble runner** with multiprocessing
-- **557 tests passing**
+- **HexSim XML scenario loading** — parse real HexSim .xml scenarios with multi-population support
+- **Estuarine extensions** — salinity cost, dissolved oxygen avoidance, seiche pause
+- **Diploid genetics** — multi-locus genomes with crossover and mutation
+- **Stream network topology** — 1D segment-based movement with upstream/downstream navigation
+- **Edge-based barriers** — mortality, deflection, and transmission probabilities from .hbf files
+- **Territorial ranges** — non-overlapping cell ownership with BFS expansion/contraction
+- **Multi-population interactions** — predation, competition, and disease between co-located populations
+- **Reporting framework** — productivity, demographic, genetic, and dispersal reports with spatial tallies
+- **Ensemble runner** with multiprocessing for parallel replicates
+- **Shiny web UI** with deck.gl map, streaming charts, trail visualization, and live stats
+- **557 tests passing** (~4 minute runtime)
 
 ## Performance
 
 - 4,000+ agent-steps/ms at scale (50K agents)
-- Numba `@njit(parallel=True)` for movement, behavior, and barrier resolution
-- Pre-loaded environment data, columnar output logging
+- Numba `@njit(parallel=True)` for movement, behavior, barrier resolution, and affinity search
+- Pre-loaded environment data into NumPy arrays (no per-step xarray reads)
+- Columnar output logging with `np.bincount` aggregation
+- Cached trait-combo masks, alive masks, and expression compilation
 
 ---
 
@@ -29,13 +40,25 @@ conda env create -f environment.yml
 conda activate shiny
 ```
 
+### Dependencies
+
+- Python >= 3.10
+- NumPy, Pandas, SciPy, Matplotlib, Plotly
+- xarray (NetCDF grid mode)
+- PyYAML
+- Shiny for Python (web UI)
+- Numba (optional, for JIT acceleration)
+
 ---
 
 ## Quick Start
 
 ```bash
-# CLI
+# CLI — NetCDF grid mode (Curonian Lagoon)
 python run.py --config config_curonian_minimal.yaml --agents 100 --steps 24
+
+# CLI — HexSim grid mode (Columbia River)
+python run.py --config config_columbia.yaml --agents 500 --steps 720
 
 # Shiny web app
 python app.py
@@ -46,44 +69,61 @@ python app.py
 ## Project Structure
 
 ```
-salmon_ibm/          — Core simulation engine (32 modules)
-  agents.py          — AgentPool SoA + Behavior enum
-  simulation.py      — Simulation orchestrator + Landscape TypedDict
-  movement.py        — Numba movement kernels
-  behavior.py        — Behavioral decision table
-  bioenergetics.py   — Wisconsin energy model
-  events.py          — Event engine (ABC, triggers, sequencer)
-  events_builtin.py  — Movement, survival, reproduction events
-  events_hexsim.py   — HexSim-compatible events + Numba kernels
-  accumulators.py    — Per-agent floating-point state (24 updater functions)
-  population.py      — Population lifecycle (add/compact agents)
-  environment.py     — NetCDF environmental forcing
-  hexsim_env.py      — HexSim zone-based temperature
-  hexsim.py          — HexMesh from HexSim workspace
-  mesh.py            — TriMesh from NetCDF
-  config.py          — YAML configuration loader
-  genetics.py        — Diploid genome with crossover
-  barriers.py        — Edge-based movement barriers
-  estuary.py         — Salinity cost, DO avoidance, seiche pause
-  ...
-heximpy/             — HexSim binary file parser (.hxn, .hbf, .grid)
-hexsimlab/           — Prototype GPU/Numba grid tools (incomplete)
-tests/               — 557 pytest tests
-ui/                  — Shiny UI components
-www/                 — HTML assets
-scripts/             — Utility scripts
+salmon_ibm/              — Core simulation engine (32 modules)
+  simulation.py          — Simulation orchestrator + Landscape TypedDict
+  agents.py              — AgentPool SoA + Behavior enum + ARRAY_FIELDS
+  population.py          — Population lifecycle (add/compact/remove agents)
+  movement.py            — Numba movement kernels (random, directed, CWR, advection)
+  behavior.py            — Behavioral decision table (Snyder et al. 2019)
+  bioenergetics.py       — Wisconsin energy model (hourly respiration + mortality)
+  events.py              — Event engine (ABC, triggers, sequencer, event groups)
+  events_builtin.py      — Movement, survival, reproduction, introduction events
+  events_hexsim.py       — HexSim-compatible events + Numba kernels
+  events_phase3.py       — Mutation, transition, generated hexmap, range dynamics
+  event_descriptors.py   — Typed event descriptor dataclasses for XML loading
+  accumulators.py        — Per-agent floating-point state (24 updater functions)
+  traits.py              — Categorical trait system (probabilistic, genetic, accumulated)
+  genetics.py            — Diploid genome with crossover and mutation
+  barriers.py            — Edge-based movement barriers (.hbf format)
+  network.py             — Stream network topology + 1D segment movement
+  ranges.py              — Territorial range allocator (non-overlapping cells)
+  interactions.py        — Multi-population manager + interaction events
+  environment.py         — NetCDF environmental forcing (temperature, salinity, SSH, currents)
+  hexsim_env.py          — HexSim zone-based temperature lookup
+  hexsim.py              — HexMesh from HexSim workspace (.hxn files)
+  mesh.py                — TriMesh from NetCDF (Delaunay triangulation)
+  config.py              — YAML configuration loader + factory functions
+  xml_parser.py          — HexSim XML scenario parser
+  scenario_loader.py     — End-to-end XML-driven simulation setup
+  hexsim_expr.py         — HexSim expression DSL translator + evaluator
+  estuary.py             — Salinity cost, DO avoidance, seiche pause
+  output.py              — OutputLogger (columnar CSV logging)
+  reporting.py           — Reports (productivity, demographic, genetic, dispersal) + tallies
+  ensemble.py            — Multiprocessing ensemble runner
+  hexsim_viewer.py       — HexSim viewer integration
+heximpy/                 — HexSim binary file parser (.hxn, .hbf, .grid)
+hexsimlab/               — Prototype GPU/Numba grid tools (incomplete, guarded)
+tests/                   — 557 pytest tests
+ui/                      — Shiny UI components
+www/                     — HTML/CSS/JS assets (streaming charts, styling)
+scripts/                 — Utility and debug scripts
+docs/                    — Documentation, plans, and design specs
 ```
 
 ---
 
 ## Configuration
 
-Configuration is YAML-based. See `config_curonian_minimal.yaml` for a working example.
+Configuration is YAML-based. Two grid modes are supported:
 
-Two grid modes are supported:
+| Mode | Config key | Mesh class | Environment class | Data source |
+|------|-----------|------------|-------------------|-------------|
+| NetCDF | `grid.file: path.nc` | `TriMesh` | `Environment` | NetCDF forcing files |
+| HexSim | `grid.type: hexsim` | `HexMesh` | `HexSimEnvironment` | HexSim workspace + CSV |
 
-- `grid.type: netcdf` — uses `TriMesh` with xarray-based environmental forcing
-- `grid.type: hexsim` — uses `HexMesh` with a HexSim workspace directory
+See `config_curonian_minimal.yaml` (NetCDF) and `config_columbia.yaml` (HexSim) for working examples.
+
+For detailed data requirements and configuration schema, see **[docs/model-manual.md](docs/model-manual.md)**.
 
 ---
 
@@ -92,6 +132,21 @@ Two grid modes are supported:
 ```bash
 conda run -n shiny python -m pytest tests/ -v
 ```
+
+Test files mirror the source structure: `salmon_ibm/foo.py` -> `tests/test_foo.py`.
+
+---
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [docs/model-manual.md](docs/model-manual.md) | Data requirements, configuration schema, and model setup guide |
+| [docs/api-reference.md](docs/api-reference.md) | Public API reference for all 32 modules |
+| [CHANGELOG.md](CHANGELOG.md) | Version history organized by category |
+| [heximpy/README.md](heximpy/README.md) | HexSim binary file parser quick start |
+| [heximpy/API.md](heximpy/API.md) | heximpy API reference |
+| [heximpy/FILE_FORMATS.md](heximpy/FILE_FORMATS.md) | HexSim binary format specifications |
 
 ---
 
@@ -102,7 +157,40 @@ conda run -n shiny python -m pytest tests/ -v
 | `AgentPool.ARRAY_FIELDS` | Single source of truth for all pool array attributes |
 | `Landscape` TypedDict | Typed event context defined in `simulation.py` |
 | `BioParams` dataclass | All bioenergetics parameters, including `MASS_FLOOR_FRACTION` |
-| `@register_event("type_name")` | Decorator for registering custom event types |
+| `@register_event("type_name")` | Decorator for registering custom event types into `EVENT_REGISTRY` |
+| `_SAFE_MATH` / `_HEXSIM_FUNCTIONS` | Whitelisted functions for expression evaluation |
+| SoA architecture | Never iterate agents in Python — use vectorized NumPy or Numba kernels |
+
+---
+
+## Architecture
+
+```
+YAML Config ─────────┐
+HexSim XML Scenario ─┤
+                      ├──> Simulation / HexSimSimulation
+                      │       ├── Mesh (TriMesh | HexMesh)
+                      │       ├── Environment (Environment | HexSimEnvironment)
+                      │       ├── Population
+                      │       │     ├── AgentPool (SoA arrays)
+                      │       │     ├── AccumulatorManager
+                      │       │     ├── TraitManager
+                      │       │     ├── GenomeManager
+                      │       │     └── RangeAllocator
+                      │       ├── EventSequencer
+                      │       │     ├── MovementEvent
+                      │       │     ├── SurvivalEvent
+                      │       │     ├── HexSimMoveEvent
+                      │       │     ├── HexSimSurvivalEvent
+                      │       │     ├── InteractionEvent
+                      │       │     └── ... (20+ event types)
+                      │       ├── BarrierMap
+                      │       ├── StreamNetwork
+                      │       ├── MultiPopulationManager
+                      │       └── OutputLogger / ReportManager
+                      │
+                      └──> EnsembleRunner (multiprocessing)
+```
 
 ---
 
@@ -115,3 +203,4 @@ conda run -n shiny python -m pytest tests/ -v
 - Schumaker, N.H. (2024). HexSim. U.S. Environmental Protection Agency, Corvallis, Oregon.
 - Snyder, M.N., et al. (2019). A behavioral decision framework for modeling Atlantic salmon smolt migration. *Ecological Modelling*.
 - Forseth, T., et al. (2001). Bioenergetics of Atlantic salmon. *Canadian Journal of Fisheries and Aquatic Sciences*.
+- Hanson, P.C., et al. (1997). Fish Bioenergetics 3.0. *University of Wisconsin Sea Grant Institute*.
