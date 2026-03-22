@@ -31,6 +31,19 @@ A Python reimplementation of EPA HexSim for simulating Baltic salmon migration t
 - Columnar output logging with `np.bincount` aggregation
 - Cached trait-combo masks, alive masks, and expression compilation
 
+### Benchmark: HexSimPy vs HexSim 4.0.20 (C++)
+
+Tested on the Columbia River `snake_Columbia2017B.xml` scenario (16M-cell hex grid, 2000 Chinook agents, 2928 hourly timesteps). Hardware: Intel i7-11800H 8C/16T, 64GB RAM, Windows 11.
+
+| Metric | HexSim 4.0.20 (C++) | HexSimPy (Python+Numba) |
+|--------|---------------------|-------------------------|
+| Time per step | ~2.54s | ~1.20s |
+| Full run (2928 steps) | ~124 min (extrapolated) | 59 min |
+| Peak RAM | 7.6 GB | 380 MB |
+| **Speed** | **1.0x** | **2.1x faster** |
+
+HexSimPy achieves its speed advantage through water-cell compaction (storing ~40K water cells instead of 16M total), Numba-parallelized kernels across 16 threads, and SoA vectorized operations. Full results: [docs/benchmark_columbia_steelhead.md](docs/benchmark_columbia_steelhead.md).
+
 ---
 
 ## Installation

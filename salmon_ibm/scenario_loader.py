@@ -343,7 +343,10 @@ class ScenarioLoader:
                 and evt.file_name
                 and evt.lookup_table is None
             ):
-                csv_path = lookup_dir / evt.file_name
+                # Extract basename — XML may contain absolute paths from
+                # the original machine (e.g. F:\Marcia\...\file.csv)
+                csv_name = Path(evt.file_name).name
+                csv_path = lookup_dir / csv_name
                 if csv_path.exists():
                     evt.lookup_table = np.loadtxt(
                         csv_path, delimiter=",", dtype=np.float64
