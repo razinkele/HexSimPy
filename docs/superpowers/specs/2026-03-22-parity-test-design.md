@@ -1,7 +1,7 @@
 # Parity Test Skill Design Spec
 
 **Date**: 2026-03-22
-**Status**: Approved (4 review iterations)
+**Status**: Approved (6 review iterations)
 **Goal**: Create a Claude Code skill (`/parity-test`) and backing Python script that runs a HexSim XML scenario on both HexSim 4.0.20 (C++) and HexSimPy (Python), then compares census trajectories and per-agent data probe outputs to verify functional parity.
 
 ---
