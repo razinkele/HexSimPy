@@ -6,6 +6,8 @@
 #   - Passwordless SSH access as razinka@laguna.ku.lt
 #   - /srv/shiny-server/HexSimPy writable by razinka
 #   - micromamba 'shiny' env at /opt/micromamba/envs/shiny on server
+#
+# Uses tar+ssh pipe (avoids rsync DLL issues on Windows Git Bash)
 
 set -euo pipefail
 
@@ -16,61 +18,84 @@ REMOTE="${REMOTE_USER}@${REMOTE_HOST}"
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-DRY_RUN=""
+DRY_RUN=false
 if [[ "${1:-}" == "--dry-run" ]]; then
-    DRY_RUN="--dry-run"
-    echo "[DRY RUN] No files will be transferred."
+    DRY_RUN=true
 fi
 
 echo "=== Deploying HexSimPy to ${REMOTE}:${REMOTE_DIR} ==="
 echo "Source: ${PROJECT_ROOT}"
 
-# rsync app code, simulation engine, UI, static assets, configs, and data
-rsync -avz --delete $DRY_RUN \
-    --exclude '__pycache__' \
-    --exclude '*.pyc' \
-    --exclude '.git' \
-    --exclude '.gitignore' \
-    --exclude '.claude' \
-    --exclude '.superpowers' \
-    --exclude '.pytest_cache' \
-    --exclude 'tests/' \
-    --exclude 'scripts/' \
-    --exclude 'docs/' \
-    --exclude 'refs/' \
-    --exclude 'hexsimlab/' \
-    --exclude 'heximpy/tests/' \
-    --exclude 'HexSim 4.0.20/' \
-    --exclude 'HexSim Examples/' \
-    --exclude 'HexSim Examples [old]/' \
-    --exclude 'HexSimPLE/' \
-    --exclude 'HexSimPLE.zip' \
-    --exclude 'HexSimR-master.zip' \
-    --exclude 'HexSimR-manual.pdf' \
-    --exclude 'HexSim.zip' \
-    --exclude 'HexSim.py.txt' \
-    --exclude 'CaliforniaGnatcatcher/' \
-    --exclude 'NorthernSpottedOwl/' \
-    --exclude 'ManedWolf/' \
-    --exclude 'TestWorkspace/' \
-    --exclude 'migration_corridor_simulation_model-master*' \
-    --exclude 'Schumaker_2024*' \
-    --exclude 'Columbia River Migration Model.zip' \
-    --exclude 'river_extent.zip' \
-    --exclude '*.zip' \
-    --exclude '*.bmp.aux.xml' \
-    --exclude '*.bpw' \
-    --exclude '*.qgz' \
-    --exclude '*.c' \
-    --exclude 'README.pdf' \
-    --exclude 'docs/parity-report*.md' \
-    "${PROJECT_ROOT}/" \
-    "${REMOTE}:${REMOTE_DIR}/"
+# Files/dirs to deploy
+INCLUDE=(
+    app.py
+    run.py
+    environment.yml
+    CLAUDE.md
+    README.md
+    config_columbia.yaml
+    config_curonian_minimal.yaml
+    config_curonian_hexsim.yaml
+    salmon_ibm/
+    heximpy/
+    ui/
+    www/
+    "Columbia [small]/"
+    "Curonian Lagoon/"
+    Curonian/
+    rivers/
+)
+
+# Build tar exclusion flags
+EXCLUDES=(
+    --exclude='__pycache__'
+    --exclude='*.pyc'
+    --exclude='.git'
+    --exclude='.pytest_cache'
+    --exclude='heximpy/tests'
+)
+
+if $DRY_RUN; then
+    echo ""
+    echo "[DRY RUN] Would deploy these items:"
+    for item in "${INCLUDE[@]}"; do
+        if [ -e "${PROJECT_ROOT}/${item}" ]; then
+            size=$(du -sh "${PROJECT_ROOT}/${item}" 2>/dev/null | cut -f1)
+            echo "  ${item} (${size})"
+        else
+            echo "  ${item} (not found, skipped)"
+        fi
+    done
+    echo ""
+    echo "Target: ${REMOTE}:${REMOTE_DIR}"
+    exit 0
+fi
+
+# Clean remote directory
+echo "Cleaning remote directory..."
+ssh "${REMOTE}" "rm -rf ${REMOTE_DIR}/* ${REMOTE_DIR}/.[!.]* 2>/dev/null; true"
+
+# Build list of existing items to tar
+TAR_ARGS=()
+for item in "${INCLUDE[@]}"; do
+    if [ -e "${PROJECT_ROOT}/${item}" ]; then
+        TAR_ARGS+=("${item}")
+    else
+        echo "  [skip] ${item} (not found)"
+    fi
+done
+
+# Tar locally, pipe through SSH, extract on remote
+echo "Transferring files..."
+cd "${PROJECT_ROOT}"
+tar czf - "${EXCLUDES[@]}" "${TAR_ARGS[@]}" | \
+    ssh "${REMOTE}" "cd ${REMOTE_DIR} && tar xzf -"
 
 echo ""
 echo "=== Deployed successfully ==="
 echo "URL: https://laguna.ku.lt/HexSimPy/"
 echo ""
 
-# Verify the app entry point exists on server
+# Verify
 ssh "${REMOTE}" "test -f ${REMOTE_DIR}/app.py && echo 'app.py: OK' || echo 'ERROR: app.py not found!'"
+ssh "${REMOTE}" "ls ${REMOTE_DIR}/ | head -15"
