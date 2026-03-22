@@ -111,6 +111,55 @@ Both engines show identical population dynamics over the first 1,417 shared step
 
 ---
 
+## Expected Model Behavior (from Publications)
+
+The Columbia River migration corridor model was published and validated in Snyder et al. (2019, 2022). Key expected outputs for the `snake_Columbia2017B` scenario (2017 thermal conditions with CWRs available):
+
+### Population Parameters (Table 2, Snyder 2020 Technical Memo)
+
+| Population | Mean weight (g) | SD weight (g) | Median entry | SD entry (d) |
+|-----------|----------------|---------------|--------------|--------------|
+| Tucannon Summer Steelhead | 4,836 | 1,060 | July 17 | 15 |
+| Grande Ronde Summer Steelhead | 5,092 | 1,674 | August 5 | 15 |
+| Snake River Fall Chinook | 4,279 | 2,088 | September 3 | 6.5 |
+| Hanford Reach Fall Chinook | 5,320 | 2,720 | September 10 | 8 |
+
+### Expected Fitness Outcomes (Snyder et al. 2022, Table 2)
+
+| Metric | Chinook (current + CWR) | Steelhead (current + CWR) |
+|--------|------------------------|--------------------------|
+| Mean energy loss | 19.6% | 28.8% |
+| Acute thermal mortality | 0.0–0.5% | 0.2–0.5% |
+| Future (+1°C) energy loss | 21.6% | 31.2% |
+| Future acute mortality | 1.1–1.9% | 1.1–1.9% |
+
+### Key Biological Processes
+
+1. **Movement**: 5-state probabilistic decision table (HOLD, RANDOM, TO_CWR, UPSTREAM, DOWNSTREAM) indexed by 3-hour mean temperature and spawn urgency (Snyder 2019, Table 1)
+2. **Bioenergetics**: Wisconsin model, hourly respiration from `R = RA × mass^RB × exp(RQ × T) × ACT`, non-feeding migrants (energy density can only decrease)
+3. **CWR behavior**: Fish begin using cold-water refuges when mainstem temperatures exceed ~18°C (around day 40+ of migration). Refuge hold fraction: 0.08 (Chinook) vs 0.9 (steelhead)
+4. **Mortality**: Energy density below 4 kJ/g (starvation); acute thermal stress via `S = (30-T)^α` for T > 20°C
+5. **Migration duration**: July 1 to October 31 (2,928 hourly timesteps)
+6. **Trait transitions**: Fish cycle between behavioral states as they encounter CWRs, with increasing trait diversity after day 40 when summer temperatures peak
+
+### Parity Assessment
+
+Both HexSimPy and HexSim 4.0.20 show:
+- Stable population at 2,000 through the first 1,417 shared steps (expected: low mortality under current conditions)
+- Trait transitions beginning around step 998-1098 (~day 41-46) as fish encounter CWRs (consistent with July-August thermal peak)
+- Refuge population at 3,217 (matching the 9 CWR locations loaded from spatial data)
+- Correct initialization: 2,000 Chinook at "Special Sites [ initialization ]" cells
+
+---
+
+## References
+
+- Snyder, M.N., Schumaker, N.H., Ebersole, J.L., et al. (2019). Individual based modeling of fish migration in a 2-D river system: model description and case study. *Landscape Ecology* 34:737–754.
+- Snyder, M.N., Schumaker, N.H., Dunham, J.B., et al. (2022). Tough places and safe spaces: Can refuges save salmon from a warming climate? *Ecosphere* 13(11):e4265.
+- Snyder, M.N., Schumaker, N.H., & Ebersole, J.L. (2020). HexSim migration corridor simulation model results. EPA Technical Memorandum (Appendix 21).
+
+---
+
 ## How to Reproduce
 
 ```bash
