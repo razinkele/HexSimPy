@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import csv  # noqa: F401
+import re  # noqa: F401
 import xml.etree.ElementTree as ET
 
 from pathlib import Path
@@ -72,3 +74,63 @@ def build_accumulator_map(scenario_xml: str) -> dict[int, dict[int, str]]:
             result[pop_idx] = col_map
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# TASK 2: HexSim census CSV parsing
+# ---------------------------------------------------------------------------
+
+# Pattern: scenario_name.POPID.csv
+_CENSUS_RE = re.compile(r"^.+\.(\d+)\.csv$")
+
+
+def parse_hexsim_census(result_dir: str) -> dict[int, dict[int, dict]]:
+    """Parse HexSim census CSV files from a results directory.
+
+    Population ID is extracted from filename suffix: scenario.N.csv -> pop_id=N.
+
+    Returns {pop_id: {step: {size, traits, lambda}}}.
+    """
+    result_path = Path(result_dir)
+    census: dict[int, dict[int, dict]] = {}
+
+    for csv_file in sorted(result_path.glob("*.csv")):
+        m = _CENSUS_RE.match(csv_file.name)
+        if m is None:
+            continue
+        pop_id = int(m.group(1))
+        pop_data: dict[int, dict] = {}
+
+        with open(csv_file, newline="", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            header = next(reader, None)
+            if header is None:
+                continue
+
+            # Clean whitespace from header fields
+            header = [h.strip().strip('"') for h in header]
+
+            # Find trait columns
+            trait_cols: dict[int, int] = {}  # col_idx -> trait_index
+            for ci, col_name in enumerate(header):
+                tm = re.match(r"Trait Index\s+(\d+)", col_name)
+                if tm:
+                    trait_cols[ci] = int(tm.group(1))
+
+            for row in reader:
+                if not row:
+                    continue
+                step = int(row[1].strip())
+                size = int(row[2].strip())
+                lam = float(row[5].strip())
+
+                traits: dict[int, int] = {}
+                for ci, ti in trait_cols.items():
+                    traits[ti] = int(row[ci].strip())
+
+                pop_data[step] = {"size": size, "lambda": lam, "traits": traits}
+
+        if pop_data:
+            census[pop_id] = pop_data
+
+    return census
