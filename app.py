@@ -409,7 +409,7 @@ WWW_DIR = Path(__file__).parent / "www"
 
 # Max hex background points for deck.gl (200K → ~5.5 MB HTML, less banding)
 MAX_DECK_POINTS = 200_000
-MAX_HEX_POINTS = 20_000  # SolidPolygonLayer: 20K hexes ≈ 1MB binary, safe for all GPUs
+MAX_HEX_POINTS = 200_000  # ScatterplotLayer: 200K points ≈ 2MB binary, handles easily
 
 # --- shiny-deckgl map widget (shared by both landscapes) ---
 TOOLTIP_STYLE = {
@@ -1190,12 +1190,15 @@ def server(input, output, session):
 
         is_hexsim = hasattr(sim.mesh, "n_cells")
         if is_hexsim:
-            # SolidPolygonLayer with pre-computed hex vertices
+            # ScatterplotLayer for hex grid — avoids SolidPolygonLayer WebGL
+            # buffer issues with large polygon counts + startIndices
             mesh = sim.mesh
-            cx = mesh.centroids[idx, 1] * _cached_scale
-            cy = -mesh.centroids[idx, 0] * _cached_scale
-            edge_s = mesh._edge * _cached_scale
-            verts, start_idx = _build_hex_polygons(cx, cy, edge_s)
+            positions = np.column_stack(
+                [
+                    mesh.centroids[idx, 1] * _cached_scale,
+                    -mesh.centroids[idx, 0] * _cached_scale,
+                ]
+            ).astype(np.float32)
             rgb = _colorscale_rgb(z, cscale)
             colors = np.column_stack(
                 [
@@ -1206,13 +1209,14 @@ def server(input, output, session):
                 ]
             ).astype(np.uint8)
             water = layer(
-                "SolidPolygonLayer",
+                "ScatterplotLayer",
                 "water",
-                data={"length": n, "startIndices": start_idx},
-                getPolygon=encode_binary_attribute(verts),
+                data={"length": n},
+                getPosition=encode_binary_attribute(positions),
                 getFillColor=encode_binary_attribute(colors),
-                filled=True,
-                extruded=False,
+                getRadius=0.0001,
+                radiusMinPixels=3,
+                radiusMaxPixels=8,
                 pickable=False,
             )
         else:
@@ -1246,10 +1250,12 @@ def server(input, output, session):
         if is_hexsim:
             mesh = sim.mesh
             scale = _cached_scale
-            cx = mesh.centroids[idx, 1] * scale
-            cy = -mesh.centroids[idx, 0] * scale
-            edge_s = mesh._edge * scale
-            verts, start_idx = _build_hex_polygons(cx, cy, edge_s)
+            positions = np.column_stack(
+                [
+                    mesh.centroids[idx, 1] * scale,
+                    -mesh.centroids[idx, 0] * scale,
+                ]
+            ).astype(np.float32)
             rgb = _colorscale_rgb(z, cscale)
             colors = np.column_stack(
                 [
@@ -1260,13 +1266,14 @@ def server(input, output, session):
                 ]
             ).astype(np.uint8)
             water = layer(
-                "SolidPolygonLayer",
+                "ScatterplotLayer",
                 "water",
-                data={"length": n, "startIndices": start_idx},
-                getPolygon=encode_binary_attribute(verts),
+                data={"length": n},
+                getPosition=encode_binary_attribute(positions),
                 getFillColor=encode_binary_attribute(colors),
-                filled=True,
-                extruded=False,
+                getRadius=0.0001,
+                radiusMinPixels=3,
+                radiusMaxPixels=8,
                 pickable=False,
             )
             _cached_water_layer = water
