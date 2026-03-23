@@ -1,0 +1,18 @@
+grid:
+  type: hexsim
+
+hexsim:
+  workspace: "Columbia [small]"
+  species: chinook
+  temperature_csv: River Temperature.csv
+
+estuary:
+  salinity_cost:
+    S_opt: 0.5
+    S_tol: 999
+    k: 0.0
+  do_avoidance:
+    lethal: 0.0
+    high: 0.0
+  seiche_pause:
+    dSSHdt_thresh_m_per_15min: 999
