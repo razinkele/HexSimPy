@@ -332,23 +332,24 @@ def _build_agent_binary(sim, mesh, scale=1.0):
     return encode_binary_attribute(positions), encode_binary_attribute(colors), n
 
 
-class TrailBuffer:
-    """NumPy rolling buffer for agent movement trails."""
+class TripBuffer:
+    """Accumulates agent positions as [lon, lat, timestamp] paths for TripsLayer."""
 
     MAX_AGENTS = 2000
-    TRAIL_LEN = 10
+    TRAIL_LEN = 40  # max waypoints kept per agent
 
     def __init__(self):
-        self._buf = np.zeros((self.MAX_AGENTS, self.TRAIL_LEN, 2), dtype=np.float32)
-        self._ptr = 0
-        self._fill = 0
-        self._tracked = None
+        # (MAX_AGENTS, TRAIL_LEN, 3) — lon, lat, timestamp
+        self._buf = np.zeros((self.MAX_AGENTS, self.TRAIL_LEN, 3), dtype=np.float32)
+        self._ptr = 0  # next write slot (ring buffer)
+        self._fill = 0  # how many slots have been written
+        self._tracked = None  # global agent indices we track
+        self._time = 0  # simulation timestamp counter
 
     def update(self, alive_mask, all_positions_xy):
-        """Update trail buffer with positions indexed by global agent ID.
+        """Append current positions as a new timestep.
 
-        all_positions_xy: (n_total, 2) array — positions for ALL agents,
-        indexed by agent index (not just alive ones).
+        all_positions_xy: (n_total, 2) array — [lon, lat] for ALL agents.
         """
         alive_idx = np.where(alive_mask)[0]
         n = len(alive_idx)
@@ -364,36 +365,49 @@ class TrailBuffer:
             self._ptr = 0
         nt = min(len(self._tracked), self.MAX_AGENTS)
         valid = self._tracked[:nt]
-        # Filter to tracked agents that are still alive
         still_alive = alive_mask[valid]
         alive_tracked = valid[still_alive]
         if len(alive_tracked) > 0 and len(all_positions_xy) > 0:
-            # Index into full position array by global agent ID
             m = min(len(alive_tracked), nt)
-            self._buf[:m, self._ptr, :] = all_positions_xy[alive_tracked[:m]]
+            self._buf[:m, self._ptr, 0] = all_positions_xy[alive_tracked[:m], 0]  # lon
+            self._buf[:m, self._ptr, 1] = all_positions_xy[alive_tracked[:m], 1]  # lat
+            self._buf[:m, self._ptr, 2] = self._time  # timestamp
         self._ptr = (self._ptr + 1) % self.TRAIL_LEN
         self._fill = min(self._fill + 1, self.TRAIL_LEN)
+        self._time += 1
 
     def clear(self):
         self._buf[:] = 0
         self._fill = 0
         self._ptr = 0
         self._tracked = None
+        self._time = 0
 
-    def build_paths(self):
+    @property
+    def current_time(self):
+        return self._time
+
+    def build_trips(self):
+        """Build TripsLayer-compatible data: list of {path, timestamps, color}."""
         if self._fill < 2 or self._tracked is None:
-            return []
+            return [], 0, 0
         nt = min(len(self._tracked), self.MAX_AGENTS)
-        order = [
-            (self._ptr - self._fill + i) % self.TRAIL_LEN for i in range(self._fill)
-        ]
-        paths = []
+        order = np.array(
+            [(self._ptr - self._fill + i) % self.TRAIL_LEN for i in range(self._fill)]
+        )
+        trips = []
         for i in range(nt):
-            trail = self._buf[i, order, :].tolist()
-            if trail[0] == trail[-1]:
+            waypoints = self._buf[i, order, :]  # (fill, 3)
+            if np.all(waypoints[:, :2] == waypoints[0, :2]):
                 continue
-            paths.append({"path": trail, "color": [100, 180, 160, 100]})
-        return paths
+            trips.append({
+                "path": waypoints[:, :2].tolist(),         # [[lon, lat], ...]
+                "timestamps": waypoints[:, 2].tolist(),    # [t0, t1, ...]
+                "color": [255, 200, 60, 240],
+            })
+        t_min = float(self._buf[0, order[0], 2])
+        t_max = float(self._time - 1)
+        return trips, t_min, t_max
 
 
 # Blank map style for non-geographic (orthographic) rendering
@@ -600,7 +614,7 @@ def server(input, output, session):
     step_stats = reactive.Value(
         {"t": 0, "alive": 0, "dead": 0, "arrived": 0, "behaviors": {}}
     )
-    trail_buffer = TrailBuffer()
+    trip_buffer = TripBuffer()
 
     @reactive.effect
     @reactive.event(input.btn_reset, input.landscape, ignore_none=False)
@@ -708,7 +722,7 @@ def server(input, output, session):
             pass  # Session not ready yet on first load
 
         running.set(False)
-        trail_buffer.clear()
+        trip_buffer.clear()
 
         # Update field selector: HexSim meshes have spatial data layers
         is_hexsim = hasattr(sim.mesh, "n_cells")
@@ -808,7 +822,7 @@ def server(input, output, session):
                     all_xy = np.column_stack(
                         [mesh.centroids[all_tris, 1], mesh.centroids[all_tris, 0]]
                     ).astype(np.float32)
-                trail_buffer.update(sim.pool.alive, all_xy)
+                trip_buffer.update(sim.pool.alive, all_xy)
             pool = sim.pool
             alive_mask = pool.alive.astype(bool)
             n_alive = int(alive_mask.sum())
@@ -871,7 +885,7 @@ def server(input, output, session):
                         all_xy = np.column_stack(
                             [mesh.centroids[all_tris, 1], mesh.centroids[all_tris, 0]]
                         ).astype(np.float32)
-                    trail_buffer.update(sim.pool.alive, all_xy)
+                    trip_buffer.update(sim.pool.alive, all_xy)
                 pool = sim.pool
                 alive_mask = pool.alive.astype(bool)
                 n_alive = int(alive_mask.sum())
@@ -1153,13 +1167,17 @@ def server(input, output, session):
         pos_bin, col_bin, n = _build_agent_binary(sim, sim.mesh, scale=scale)
         is_hex = hasattr(sim.mesh, "_edge")
         if n == 0:
+            # Use 1-element invisible placeholder — 0-length binary buffers
+            # cause glMapBufferRange errors on some WebGL drivers.
             return scatterplot_layer(
                 "agents",
-                {"length": 0},
-                getPosition=encode_binary_attribute(np.zeros((0, 2), dtype=np.float32)),
-                getFillColor=encode_binary_attribute(np.zeros((0, 4), dtype=np.uint8)),
+                {"length": 1},
+                getPosition=encode_binary_attribute(np.zeros((1, 2), dtype=np.float32)),
+                getFillColor=encode_binary_attribute(np.zeros((1, 4), dtype=np.uint8)),
             )
-        props = dict(
+        return scatterplot_layer(
+            "agents",
+            {"length": n},
             getPosition=pos_bin,
             getFillColor=col_bin,
             getRadius=150 if not is_hex else 0.0001,
@@ -1170,8 +1188,24 @@ def server(input, output, session):
             lineWidthMinPixels=1,
             pickable=True,
         )
-        props["transitions"] = {"getPosition": {"duration": 250, "type": "spring"}}
-        return scatterplot_layer("agents", {"length": n}, **props)
+
+    def _build_trails_layer():
+        """Build a PathLayer from the trip buffer for agent trails."""
+        trips, t_min, t_max = trip_buffer.build_trips()
+        if not trips:
+            return None
+        return layer(
+            "PathLayer",
+            "trails",
+            data=trips,
+            getPath="@@d.path",
+            getColor="@@d.color",
+            widthMinPixels=3,
+            widthMaxPixels=6,
+            jointRounded=True,
+            capRounded=True,
+            pickable=False,
+        )
 
     async def _full_update(sim, landscape=None):
         """Send everything: positions + colors + agents (~3 MB)."""
@@ -1288,53 +1322,21 @@ def server(input, output, session):
             _cached_water_layer = water
             layers = [water]
 
-        # Also send agents + trails to avoid stale state
+        # Also send agents + trips to avoid stale state
         layers.append(_agent_layer_binary(sim, scale=_cached_scale))
         if input.show_trails():
-            trail_data = trail_buffer.build_paths()
-            if trail_data:
-                layers.insert(
-                    0,
-                    layer(
-                        "PathLayer",
-                        "trails",
-                        data=trail_data,
-                        getPath="@@d.path",
-                        getColor="@@d.color",
-                        widthMinPixels=1,
-                        widthMaxPixels=3,
-                        jointRounded=True,
-                        capRounded=True,
-                    ),
-                )
-        # Don't send untyped trail hide dict — omit to preserve JS state
+            trips_lyr = _build_trails_layer()
+            if trips_lyr:
+                layers.insert(0, trips_lyr)
         await map_widget.partial_update(session, layers)
 
     async def _agent_trail_update(sim, landscape=None):
-        """Patch agents + trails only — water layer preserved in JS cache.
-
-        Uses partial_update() which merges patches into the cached layer stack.
-        The water layer (sent by _full_update) is preserved without re-sending.
-        Fixed in shiny_deckgl v1.9.0: cloneLayersData now deep-clones @@binary
-        markers so they survive multiple buildDeckLayers calls.
-        """
+        """Patch agents + trails only."""
         layers = [_agent_layer_binary(sim, scale=_cached_scale)]
         if input.show_trails():
-            trail_data = trail_buffer.build_paths()
-            if trail_data:
-                layers.append(
-                    layer(
-                        "PathLayer",
-                        "trails",
-                        data=trail_data,
-                        getPath="@@d.path",
-                        getColor="@@d.color",
-                        widthMinPixels=1,
-                        widthMaxPixels=3,
-                        jointRounded=True,
-                        capRounded=True,
-                    ),
-                )
+            trips_lyr = _build_trails_layer()
+            if trips_lyr:
+                layers.append(trips_lyr)
         await map_widget.partial_update(session, layers)
 
     @reactive.effect
@@ -1383,6 +1385,15 @@ def server(input, output, session):
             # Step only — agents + trails, hex grid untouched
             _cached_scale = scale
             await _agent_trail_update(sim, landscape=landscape)
+
+    @reactive.effect
+    @reactive.event(input.show_trails)
+    async def _toggle_trails():
+        """Re-render agents + trails when the Trails toggle changes."""
+        sim = sim_state.get()
+        if sim is None:
+            return
+        await _agent_trail_update(sim)
 
     # --- Chart helper: Plotly → HTML file + iframe (no widget/comm layer) ---
     def _plotly_iframe(fig, name, height="280px"):
