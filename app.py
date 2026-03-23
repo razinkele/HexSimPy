@@ -409,7 +409,7 @@ WWW_DIR = Path(__file__).parent / "www"
 
 # Max hex background points for deck.gl (200K → ~5.5 MB HTML, less banding)
 MAX_DECK_POINTS = 200_000
-MAX_HEX_POINTS = 500_000  # SolidPolygonLayer is more GPU-efficient
+MAX_HEX_POINTS = 100_000  # SolidPolygonLayer: 100K hexes ≈ 5MB binary, safe for WebGL
 
 # --- shiny-deckgl map widget (shared by both landscapes) ---
 TOOLTIP_STYLE = {
