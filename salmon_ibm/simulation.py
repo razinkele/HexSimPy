@@ -216,7 +216,7 @@ class Simulation:
     def _event_bioenergetics(self, population, landscape, t, mask):
         fields = landscape["fields"]
         temps_at_agents = fields["temperature"][population.tri_idx]
-        activity = self._activity_lut[population.behavior]
+        activity = np.take(self._activity_lut, population.behavior, mode="clip")
         sal = fields.get("salinity", np.zeros(self.mesh.n_triangles))
         sal_at_agents = sal[population.tri_idx]
         s_cfg = self.est_cfg.get("salinity_cost", {})

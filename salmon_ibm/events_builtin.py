@@ -92,7 +92,7 @@ class SurvivalEvent(Event):
         if self.thermal:
             # Recompute alive mask after starvation kills
             current_alive = population.alive & ~getattr(
-                population, "arrived", np.zeros(0, dtype=bool)
+                population, "arrived", np.zeros(population.n, dtype=bool)
             )
             thermal_kill = current_alive & (temps >= self.bio_params.T_MAX)
             population.alive[thermal_kill] = False

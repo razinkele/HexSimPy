@@ -123,6 +123,8 @@ def parse_hexsim_census(result_dir: str) -> dict[int, dict[int, dict]]:
             for row in reader:
                 if not row:
                     continue
+                if len(row) < 6:
+                    continue
                 step = int(row[1].strip())
                 size = int(row[2].strip())
                 lam = float(row[5].strip())
@@ -604,7 +606,7 @@ def run_hexsim_engine(
         shutil.rmtree(result_dir)
 
     # Run engine
-    cmd = [str(exe_path), str(xml_path), str(seed)]
+    cmd = [str(exe_path), "-r", str(seed), str(xml_path)]
     print(f"Running HexSim engine: {' '.join(cmd)}")
 
     t0 = time.perf_counter()

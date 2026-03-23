@@ -593,6 +593,8 @@ class HexSimMoveEvent(Event):
     _cached_gradient: np.ndarray = field(init=False, default=None, repr=False)
     _cached_nbrs: np.ndarray = field(init=False, default=None, repr=False)
     _cached_nbr_count: np.ndarray = field(init=False, default=None, repr=False)
+    _cached_cx: np.ndarray = field(init=False, default=None, repr=False)
+    _cached_cy: np.ndarray = field(init=False, default=None, repr=False)
 
     def execute(self, population, landscape, t, mask):
         if not mask.any():
@@ -607,6 +609,8 @@ class HexSimMoveEvent(Event):
             self._cached_mesh = mesh
             self._cached_nbrs = mesh._water_nbrs
             self._cached_nbr_count = mesh._water_nbr_count
+            self._cached_cx = np.ascontiguousarray(mesh.centroids[:, 0])
+            self._cached_cy = np.ascontiguousarray(mesh.centroids[:, 1])
             spatial_data = landscape.get("spatial_data", {})
             gradient = spatial_data.get(self.dispersal_spatial_data)
             if gradient is None:
@@ -654,14 +658,12 @@ class HexSimMoveEvent(Event):
 
             if len(aff_mask) > 0 and HAS_NUMBA:
                 aff_pos = positions[aff_mask].copy()
-                cx = np.ascontiguousarray(mesh.centroids[:, 0])
-                cy = np.ascontiguousarray(mesh.centroids[:, 1])
                 aff_pos, aff_dist = _move_affinity_numba(
                     aff_pos,
                     water_nbrs,
                     water_nbr_count,
-                    cx,
-                    cy,
+                    self._cached_cx,
+                    self._cached_cy,
                     affinity_targets[aff_mask],
                     n_steps,
                     halt_dist,

@@ -1,4 +1,5 @@
 """Phase 3 event types: genetics, interactions, network, and remaining events."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -11,16 +12,15 @@ from salmon_ibm.events import Event, register_event
 @dataclass
 class MutationEvent(Event):
     """Apply allele mutations at specified loci each timestep."""
+
     locus_name: str = ""
     transition_matrix: np.ndarray = field(default_factory=lambda: np.array([]))
 
     def execute(self, population, landscape, t: int, mask: np.ndarray) -> None:
-        genome = getattr(population, 'genome', None)
+        genome = getattr(population, "genome", None)
         if genome is None:
             return
-        genome.mutate(
-            self.locus_name, self.transition_matrix, mask=mask
-        )
+        genome.mutate(self.locus_name, self.transition_matrix, mask=mask)
 
 
 @register_event("transition")
@@ -31,6 +31,7 @@ class TransitionEvent(Event):
     transition_matrix[i, j] = P(category i -> category j) per timestep.
     Rows must sum to 1.0. Used for SEIR disease states, life stages, etc.
     """
+
     trait_name: str = ""
     transition_matrix: np.ndarray = field(default_factory=lambda: np.array([]))
 
@@ -39,7 +40,9 @@ class TransitionEvent(Event):
             return
         if self.transition_matrix.size == 0:
             return
-        traits = getattr(population, 'trait_mgr', None) or getattr(population, 'traits', None)
+        traits = getattr(population, "trait_mgr", None) or getattr(
+            population, "traits", None
+        )
         if traits is None:
             return
         if self.trait_name not in traits.definitions:
@@ -74,23 +77,36 @@ class TransitionEvent(Event):
 @dataclass
 class GeneratedHexmapEvent(Event):
     """Create or update a hex map using an algebraic expression."""
+
     expression: str = ""
     output_name: str = ""
 
     def execute(self, population, landscape, t, mask):
         from salmon_ibm.accumulators import _validate_expression, _SAFE_MATH
+
         _validate_expression(self.expression)
         namespace = dict(_SAFE_MATH)
         namespace["t"] = t
         if "density" in self.expression:
             n_cells = landscape.get("n_cells", 0)
             if n_cells > 0:
-                alive = population.alive if hasattr(population, 'alive') else mask
+                alive = population.alive if hasattr(population, "alive") else mask
                 positions = population.tri_idx[alive & mask]
                 density = np.bincount(positions, minlength=n_cells).astype(np.float64)
                 namespace["density"] = density
-        for key, value in landscape.items():
+        # Inject spatial_data arrays referenced by the expression
+        spatial_data = landscape.get("spatial_data", {})
+        for key, value in spatial_data.items():
             if isinstance(value, np.ndarray) and key not in namespace:
+                namespace[key] = value
+        # Also inject top-level landscape ndarrays that appear in the expression
+        # (e.g. base_temp passed directly), but only if explicitly referenced
+        for key, value in landscape.items():
+            if (
+                isinstance(value, np.ndarray)
+                and key not in namespace
+                and key in self.expression
+            ):
                 namespace[key] = value
         result = eval(self.expression, {"__builtins__": {}}, namespace)
         landscape[self.output_name] = np.asarray(result, dtype=np.float64)
@@ -100,13 +116,14 @@ class GeneratedHexmapEvent(Event):
 @dataclass
 class RangeDynamicsEvent(Event):
     """Adjust agent territories based on resource availability."""
+
     mode: str = "expand"
     resource_map_name: str = "resources"
     resource_threshold: float = 0.0
     max_range_size: int = 50
 
     def execute(self, population, landscape, t, mask):
-        range_alloc = getattr(population, 'ranges', None)
+        range_alloc = getattr(population, "ranges", None)
         if range_alloc is None:
             return
         resource_map = landscape.get(self.resource_map_name)
@@ -136,7 +153,10 @@ class RangeDynamicsEvent(Event):
             count = mesh._water_nbr_count[cell]
             neighbors = mesh._water_nbrs[cell, :count]
             for nb in neighbors:
-                if nb not in current_cells and resource_map[nb] >= self.resource_threshold:
+                if (
+                    nb not in current_cells
+                    and resource_map[nb] >= self.resource_threshold
+                ):
                     if range_alloc.try_add_cell(agent_idx, nb):
                         current_cells.add(nb)
                         if len(current_cells) >= self.max_range_size:
@@ -152,6 +172,7 @@ class RangeDynamicsEvent(Event):
 @dataclass
 class SetAffinityEvent(Event):
     """Set movement affinity for agents."""
+
     affinity_type: str = "spatial"
     affinity_map_name: str | None = None
     strength: float = 1.0
@@ -161,7 +182,7 @@ class SetAffinityEvent(Event):
         if len(indices) == 0:
             return
         if self.affinity_type == "spatial" and self.affinity_map_name:
-            if not hasattr(population, 'spatial_affinity'):
+            if not hasattr(population, "spatial_affinity"):
                 return
             affinity_map = landscape.get(self.affinity_map_name)
             if affinity_map is None:
@@ -169,7 +190,7 @@ class SetAffinityEvent(Event):
             population.spatial_affinity[indices] = self.strength
             population.spatial_affinity_map_name = self.affinity_map_name
         elif self.affinity_type == "group":
-            if not hasattr(population, 'group_affinity'):
+            if not hasattr(population, "group_affinity"):
                 return
             population.group_affinity[indices] = self.strength
 
@@ -188,6 +209,7 @@ class PlantDynamicsEvent(Event):
     dispersal_radius: max cells for seed travel
     establishment_threshold: min resource for seedling survival
     """
+
     seed_production_rate: float = 5.0
     dispersal_radius: int = 3
     establishment_threshold: float = 0.5
@@ -237,9 +259,10 @@ class PlantDynamicsEvent(Event):
             return
 
         # Create new agents (seedlings) at viable positions
-        if hasattr(population, 'add_agents'):
+        if hasattr(population, "add_agents"):
             population.add_agents(
-                len(seed_positions), seed_positions,
+                len(seed_positions),
+                seed_positions,
                 mass_g=np.full(len(seed_positions), 1.0),
                 ed_kJ_g=1.0,
             )

@@ -345,7 +345,9 @@ class ScenarioLoader:
             ):
                 # Extract basename — XML may contain absolute paths from
                 # the original machine (e.g. F:\Marcia\...\file.csv)
-                csv_name = Path(evt.file_name).name
+                from pathlib import PureWindowsPath as _PWP
+
+                csv_name = _PWP(evt.file_name).name
                 csv_path = lookup_dir / csv_name
                 if csv_path.exists():
                     # Some CSVs have headers (quoted strings), skip them

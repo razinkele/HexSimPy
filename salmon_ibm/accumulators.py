@@ -143,7 +143,7 @@ _ALLOWED_NODE_TYPES = (
     ast.USub,
     ast.UAdd,
     ast.Subscript,
-    ast.Attribute,  # needed for _g["name"], _rng.random
+    ast.Attribute,  # validated: only _rng.random allowed (see _validate_expression)
 )
 
 # Functions available in the HexSim DSL namespace (produced by translate_hexsim_expr)
@@ -183,11 +183,18 @@ def _validate_expression(expr, extra_names=None):
             raise ValueError(
                 f"Disallowed construct in expression: {type(node).__name__}"
             )
+        if isinstance(node, ast.Attribute):
+            # Only allow attribute access on _rng (e.g., _rng.random)
+            if not (isinstance(node.value, ast.Name) and node.value.id == "_rng"):
+                raise ValueError(
+                    f"Disallowed attribute access in expression: "
+                    f"only '_rng.<attr>' is permitted, got "
+                    f"'{ast.dump(node.value)}.{node.attr}'"
+                )
         if isinstance(node, ast.Call):
             if isinstance(node.func, ast.Name):
                 if node.func.id not in allowed_names:
                     raise ValueError(f"Unknown function in expression: {node.func.id}")
-            # ast.Attribute calls (e.g., _rng.random) are allowed in HexSim mode
 
 
 class _LazyAccDict:
@@ -252,6 +259,8 @@ def updater_expression(
             rng = np.random.default_rng()
         namespace = build_hexsim_namespace(globals_dict, acc_dict, rng, n_masked)
         if translated not in _compiled_expr_cache:
+            if len(_compiled_expr_cache) > 10000:
+                _compiled_expr_cache.clear()
             _compiled_expr_cache[translated] = compile(
                 translated, "<hexsim-expr>", "eval"
             )

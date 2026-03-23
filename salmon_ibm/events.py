@@ -36,6 +36,12 @@ class Periodic(EventTrigger):
     interval: int
     offset: int = 0
 
+    def __post_init__(self):
+        if self.interval <= 0:
+            raise ValueError(
+                f"Periodic trigger interval must be > 0, got {self.interval}"
+            )
+
     def should_fire(self, t: int) -> bool:
         return (t - self.offset) % self.interval == 0 and t >= self.offset
 
