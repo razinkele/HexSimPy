@@ -523,6 +523,7 @@ app_ui = ui.page_sidebar(
         ui.tags.script(THEME_JS),
         ui.tags.link(rel="stylesheet", href="style.css"),
         ui.tags.meta(name="viewport", content="width=device-width, initial-scale=1"),
+        ui.tags.script(src="trips_animation.js", defer=True),
     ),
     head_includes(),
     run_controls_panel(),
@@ -1189,23 +1190,19 @@ def server(input, output, session):
             pickable=True,
         )
 
-    def _build_trails_layer():
-        """Build a PathLayer from the trip buffer for agent trails."""
+    async def _send_trips_animation():
+        """Send trip data to the JS-side TripsLayer animation handler."""
         trips, t_min, t_max = trip_buffer.build_trips()
         if not trips:
-            return None
-        return layer(
-            "PathLayer",
-            "trails",
-            data=trips,
-            getPath="@@d.path",
-            getColor="@@d.color",
-            widthMinPixels=3,
-            widthMaxPixels=6,
-            jointRounded=True,
-            capRounded=True,
-            pickable=False,
-        )
+            await session.send_custom_message("deck_trips_stop", {})
+            return
+        loop_len = max(t_max - t_min, 1)
+        await session.send_custom_message("deck_trips_data", {
+            "data": trips,
+            "loopLength": loop_len,
+            "trailLength": min(loop_len * 0.5, 15),
+            "speed": 3,
+        })
 
     async def _full_update(sim, landscape=None):
         """Send everything: positions + colors + agents (~3 MB)."""
@@ -1322,22 +1319,18 @@ def server(input, output, session):
             _cached_water_layer = water
             layers = [water]
 
-        # Also send agents + trips to avoid stale state
+        # Also send agents to avoid stale state
         layers.append(_agent_layer_binary(sim, scale=_cached_scale))
-        if input.show_trails():
-            trips_lyr = _build_trails_layer()
-            if trips_lyr:
-                layers.insert(0, trips_lyr)
         await map_widget.partial_update(session, layers)
+        if input.show_trails():
+            await _send_trips_animation()
 
     async def _agent_trail_update(sim, landscape=None):
-        """Patch agents + trails only."""
+        """Patch agents only; trips animation runs independently in JS."""
         layers = [_agent_layer_binary(sim, scale=_cached_scale)]
-        if input.show_trails():
-            trips_lyr = _build_trails_layer()
-            if trips_lyr:
-                layers.append(trips_lyr)
         await map_widget.partial_update(session, layers)
+        if input.show_trails():
+            await _send_trips_animation()
 
     @reactive.effect
     async def _update_map():
@@ -1389,11 +1382,11 @@ def server(input, output, session):
     @reactive.effect
     @reactive.event(input.show_trails)
     async def _toggle_trails():
-        """Re-render agents + trails when the Trails toggle changes."""
-        sim = sim_state.get()
-        if sim is None:
-            return
-        await _agent_trail_update(sim)
+        """Start/stop trips animation when the Trails toggle changes."""
+        if input.show_trails():
+            await _send_trips_animation()
+        else:
+            await session.send_custom_message("deck_trips_stop", {})
 
     # --- Chart helper: Plotly → HTML file + iframe (no widget/comm layer) ---
     def _plotly_iframe(fig, name, height="280px"):
