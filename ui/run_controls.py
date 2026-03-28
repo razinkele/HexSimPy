@@ -1,4 +1,5 @@
 """Run control bar — Lagoon Field Station theme."""
+
 from shiny import ui
 
 
@@ -18,18 +19,20 @@ def run_controls_panel():
             class_="speed-control",
         ),
         ui.div(
-            ui.input_switch("show_trails", "Trails", value=False),
+            ui.input_switch("show_trails", "Trails", value=True),
             class_="trail-toggle",
         ),
         ui.div(
             ui.input_select(
-                "map_field", None,
+                "map_field",
+                None,
                 choices={
+                    "depth": "Bathymetry",
                     "temperature": "Temperature",
                     "salinity": "Salinity",
                     "ssh": "SSH",
-                    "depth": "Bathymetry",
                 },
+                selected="depth",
                 width="140px",
             ),
             class_="field-selector",

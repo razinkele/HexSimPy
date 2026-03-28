@@ -19,7 +19,7 @@ from shiny_deckgl import (
     head_includes,
     layer,
     map_view,
-    scatterplot_layer,
+    trips_layer,
 )
 
 from salmon_ibm.config import load_config
@@ -27,7 +27,6 @@ from salmon_ibm.bioenergetics import BioParams
 from salmon_ibm.simulation import Simulation
 from heximpy.hxnparser import HexMap as HxnHexMap, GridMeta
 from ui.sidebar import sidebar_panel
-from ui.run_controls import run_controls_panel
 from ui.science_tab import science_panel
 from ui.viewer_tab import viewer_panel
 from ui.charts_panel import charts_panel
@@ -56,12 +55,12 @@ BEH_COLORS = ["#7a8b7a", "#4a8fa8", "#3d9b8f", "#d4826a", "#b8963e"]
 
 # Bathymetric colorscale
 BATHY_COLORSCALE = [
-    [0.0, "#1a3d50"],
-    [0.2, "#2a6070"],
-    [0.4, "#3a9090"],
-    [0.6, "#50b8a8"],
-    [0.8, "#7ac4a5"],
-    [1.0, "#c8e6c9"],
+    [0.0, "#c8e6c9"],
+    [0.2, "#7ac4a5"],
+    [0.4, "#50b8a8"],
+    [0.6, "#3a9090"],
+    [0.8, "#2a6070"],
+    [1.0, "#1a3d50"],
 ]
 
 TEMP_COLORSCALE = [
@@ -131,11 +130,6 @@ def _colorscale_rgb(z: np.ndarray, colorscale: list) -> np.ndarray:
     b = np.interp(z_norm, stops, colors[:, 2]).astype(np.uint8)
     return np.column_stack([r, g, b])
 
-
-BEH_COLORS_RGB = [_hex_to_rgb(c) for c in BEH_COLORS]
-BEH_COLORS_ARRAY = np.array(
-    [list(_hex_to_rgb(c)) + [240] for c in BEH_COLORS], dtype=np.uint8
-)
 
 # Hex vertex offsets — pointy-top (vertex at top/bottom, matching HexSim display)
 # Vertices at 30°,90°,...,330°
@@ -272,66 +266,6 @@ def _build_color_binary(mesh, z, cscale, idx):
     return encode_binary_attribute(colors)
 
 
-def _build_agent_data(sim, mesh, scale=1.0, landscape=None):
-    """Build agent layer data: list of dicts with position, color, info."""
-    alive = sim.pool.alive
-    if not alive.any():
-        return []
-
-    tris = sim.pool.tri_idx[alive]
-    behaviors = sim.pool.behavior[alive]
-    energies = sim.pool.ed_kJ_g[alive]
-    agent_ids = np.where(alive)[0]
-    is_hexsim = hasattr(mesh, "_edge")
-
-    pts = []
-    for tri, beh, ed, aid in zip(tris, behaviors, energies, agent_ids):
-        beh_int = int(beh)
-        rc, gc, bc = BEH_COLORS_RGB[beh_int]
-        if is_hexsim:
-            # Scaled grid coordinates; negate Y to flip
-            x = float(mesh.centroids[tri, 1] * scale)
-            y = float(-mesh.centroids[tri, 0] * scale)
-        else:
-            x = float(mesh.centroids[tri, 1] * scale)
-            y = float(mesh.centroids[tri, 0] * scale)
-        pts.append(
-            {
-                "position": [round(x, 2), round(y, 2)],
-                "color": [rc, gc, bc, 240],
-                "info": f"#{aid} {BEH_NAMES[beh_int]} | {ed:.1f} kJ/g",
-            }
-        )
-    return pts
-
-
-def _build_agent_binary(sim, mesh, scale=1.0):
-    """Build binary-encoded agent position + color arrays for deck.gl."""
-    alive = sim.pool.alive
-    if not alive.any():
-        return None, None, 0
-    tris = sim.pool.tri_idx[alive]
-    behaviors = sim.pool.behavior[alive]
-    is_hexsim = hasattr(mesh, "_edge")
-    if is_hexsim:
-        positions = np.column_stack(
-            [
-                mesh.centroids[tris, 1] * scale,
-                -mesh.centroids[tris, 0] * scale,
-            ]
-        ).astype(np.float32)
-    else:
-        positions = np.column_stack(
-            [
-                mesh.centroids[tris, 1] * scale,
-                mesh.centroids[tris, 0] * scale,
-            ]
-        ).astype(np.float32)
-    colors = BEH_COLORS_ARRAY[behaviors]
-    n = int(alive.sum())
-    return encode_binary_attribute(positions), encode_binary_attribute(colors), n
-
-
 class TripBuffer:
     """Accumulates agent positions as [lon, lat, timestamp] paths for TripsLayer."""
 
@@ -341,15 +275,17 @@ class TripBuffer:
     def __init__(self):
         # (MAX_AGENTS, TRAIL_LEN, 3) — lon, lat, timestamp
         self._buf = np.zeros((self.MAX_AGENTS, self.TRAIL_LEN, 3), dtype=np.float32)
+        self._beh = np.zeros(self.MAX_AGENTS, dtype=np.int8)  # latest behavior per slot
         self._ptr = 0  # next write slot (ring buffer)
         self._fill = 0  # how many slots have been written
         self._tracked = None  # global agent indices we track
         self._time = 0  # simulation timestamp counter
 
-    def update(self, alive_mask, all_positions_xy):
+    def update(self, alive_mask, all_positions_xy, behaviors=None):
         """Append current positions as a new timestep.
 
         all_positions_xy: (n_total, 2) array — [lon, lat] for ALL agents.
+        behaviors: (n_total,) int array — behavior index per agent (optional).
         """
         alive_idx = np.where(alive_mask)[0]
         n = len(alive_idx)
@@ -366,18 +302,27 @@ class TripBuffer:
         nt = min(len(self._tracked), self.MAX_AGENTS)
         valid = self._tracked[:nt]
         still_alive = alive_mask[valid]
-        alive_tracked = valid[still_alive]
-        if len(alive_tracked) > 0 and len(all_positions_xy) > 0:
-            m = min(len(alive_tracked), nt)
-            self._buf[:m, self._ptr, 0] = all_positions_xy[alive_tracked[:m], 0]  # lon
-            self._buf[:m, self._ptr, 1] = all_positions_xy[alive_tracked[:m], 1]  # lat
-            self._buf[:m, self._ptr, 2] = self._time  # timestamp
+        # Write into correct buffer slots using the original slot indices
+        # (not a compact 0..m range, which would misalign after deaths)
+        alive_slots = np.where(still_alive)[0]
+        dead_slots = np.where(~still_alive)[0]
+        alive_agents = valid[alive_slots]
+        # Mark dead agent slots with NaN so build_trips can filter them
+        if len(dead_slots) > 0:
+            self._buf[dead_slots, self._ptr, :] = np.nan
+        if len(alive_agents) > 0 and len(all_positions_xy) > 0:
+            self._buf[alive_slots, self._ptr, 0] = all_positions_xy[alive_agents, 0]
+            self._buf[alive_slots, self._ptr, 1] = all_positions_xy[alive_agents, 1]
+            self._buf[alive_slots, self._ptr, 2] = self._time
+            if behaviors is not None:
+                self._beh[alive_slots] = behaviors[alive_agents]
         self._ptr = (self._ptr + 1) % self.TRAIL_LEN
         self._fill = min(self._fill + 1, self.TRAIL_LEN)
         self._time += 1
 
     def clear(self):
         self._buf[:] = 0
+        self._beh[:] = 0
         self._fill = 0
         self._ptr = 0
         self._tracked = None
@@ -388,32 +333,52 @@ class TripBuffer:
         return self._time
 
     def build_trips(self):
-        """Build TripsLayer-compatible data: list of {path, timestamps, color}."""
+        """Build TripsLayer-compatible data: list of {path, timestamps, color}.
+
+        Path contains ``[lon, lat, time]`` triplets (matching the format that
+        ``shiny_deckgl.format_trips()`` produces).  Timestamps are normalized
+        to start from 0 so they align with the JS ``currentTime`` range.
+        """
         if self._fill < 2 or self._tracked is None:
             return [], 0, 0
         nt = min(len(self._tracked), self.MAX_AGENTS)
         order = np.array(
             [(self._ptr - self._fill + i) % self.TRAIL_LEN for i in range(self._fill)]
         )
+        # Compute t_min from the step counter (not from a buffer slot that
+        # may be stale if agent 0 died).
+        t_min = float(self._time - self._fill)
+        t_max = float(self._time - 1)
         trips = []
         for i in range(nt):
-            waypoints = self._buf[i, order, :]  # (fill, 3)
-            if np.all(waypoints[:, :2] == waypoints[0, :2]):
+            waypoints = self._buf[i, order, :]  # (fill, 3) — [lon, lat, raw_time]
+            # Skip agents with any NaN (dead agents) or no movement
+            valid_mask = ~np.any(np.isnan(waypoints), axis=1)
+            valid_wp = waypoints[valid_mask]
+            if len(valid_wp) < 2:
                 continue
-            trips.append({
-                "path": waypoints[:, :2].tolist(),         # [[lon, lat], ...]
-                "timestamps": waypoints[:, 2].tolist(),    # [t0, t1, ...]
-                "color": [255, 200, 60, 240],
-            })
-        t_min = float(self._buf[0, order[0], 2])
-        t_max = float(self._time - 1)
+            if np.all(valid_wp[:, :2] == valid_wp[0, :2]):
+                continue
+            # Normalize timestamps to 0-based
+            norm_ts = valid_wp[:, 2] - t_min
+            path_3d = np.column_stack([valid_wp[:, :2], norm_ts])
+            # Color from agent's current behavior
+            beh_idx = int(self._beh[i]) if self._beh[i] < len(BEH_COLORS) else 0
+            r, g, b = _hex_to_rgb(BEH_COLORS[beh_idx])
+            trips.append(
+                {
+                    "path": path_3d.tolist(),  # [[lon, lat, time], ...]
+                    "timestamps": norm_ts.tolist(),
+                    "color": [r, g, b, 240],
+                }
+            )
         return trips, t_min, t_max
 
 
 # Blank map style for non-geographic (orthographic) rendering
 import base64 as _b64
 
-_blank_json = '{"version":8,"sources":{},"layers":[{"id":"background","type":"background","paint":{"background-color":"#020a10"}}]}'
+_blank_json = '{"version":8,"sources":{},"layers":[{"id":"background","type":"background","paint":{"background-color":"#f0f0f0"}}]}'
 BLANK_STYLE = (
     "data:application/json;base64," + _b64.b64encode(_blank_json.encode()).decode()
 )
@@ -442,7 +407,7 @@ map_widget = MapWidget(
     style=BLANK_STYLE,
     tooltip={"html": "{info}", "style": TOOLTIP_STYLE},
     controller=True,
-    parameters={"clearColor": [11 / 255, 31 / 255, 44 / 255, 1]},
+    parameters={"clearColor": [240 / 255, 240 / 255, 240 / 255, 1]},
 )
 
 viewer_map_widget = MapWidget(
@@ -519,20 +484,77 @@ document.addEventListener('shiny:connected', function() {
 # --- App UI ---
 app_ui = ui.page_sidebar(
     sidebar_panel(),
+    ui.busy_indicators.use(spinners=False),
     ui.head_content(
         ui.tags.script(THEME_JS),
         ui.tags.link(rel="stylesheet", href="style.css"),
         ui.tags.meta(name="viewport", content="width=device-width, initial-scale=1"),
-        ui.tags.script(src="trips_animation.js", defer=True),
+        # Disable MapLibre world tiling for the orthographic hex grid
+        ui.tags.script("""
+            (function() {
+                var _check = setInterval(function() {
+                    var inst = window.__deckgl_instances && window.__deckgl_instances['map'];
+                    if (inst && inst.map) {
+                        inst.map.setRenderWorldCopies(false);
+                        clearInterval(_check);
+                    }
+                }, 500);
+                // Map loading overlay
+                var _loaderTimeout = null;
+                function _waitShiny(cb) {
+                    if (typeof Shiny !== 'undefined' && Shiny.addCustomMessageHandler) cb();
+                    else setTimeout(function(){ _waitShiny(cb); }, 200);
+                }
+                _waitShiny(function() {
+                    Shiny.addCustomMessageHandler('map_loader_show', function(msg) {
+                        var el = document.getElementById('map-loader-overlay');
+                        var txt = document.getElementById('map-loader-text');
+                        if (el) { el.style.display = 'flex'; }
+                        if (txt) { txt.textContent = msg.text || 'Loading grid...'; }
+                        // Auto-hide when deck.gl gets layers (map rendered)
+                        if (_loaderTimeout) clearTimeout(_loaderTimeout);
+                        var _poll = setInterval(function() {
+                            var inst = window.__deckgl_instances && window.__deckgl_instances['map'];
+                            if (inst && inst.lastLayers && inst.lastLayers.length > 0) {
+                                var water = inst.lastLayers.find(function(l) { return l.id === 'water'; });
+                                if (water && water.data && (water.data.length > 0 || water.data.attributes)) {
+                                    if (el) el.style.display = 'none';
+                                    clearInterval(_poll);
+                                }
+                            }
+                        }, 500);
+                        // Fallback: auto-hide after 30s
+                        _loaderTimeout = setTimeout(function() {
+                            if (el) el.style.display = 'none';
+                            clearInterval(_poll);
+                        }, 30000);
+                    });
+                    Shiny.addCustomMessageHandler('map_loader_hide', function() {
+                        var el = document.getElementById('map-loader-overlay');
+                        if (el) { el.style.display = 'none'; }
+                        if (_loaderTimeout) { clearTimeout(_loaderTimeout); _loaderTimeout = null; }
+                    });
+                });
+            })();
+        """),
     ),
     head_includes(),
-    run_controls_panel(),
     ui.navset_tab(
         ui.nav_panel(
             "Map",
             ui.div(
                 ui.div(
                     map_widget.ui(height="520px"),
+                    ui.div(
+                        ui.div(
+                            ui.tags.div(class_="map-loader-spinner"),
+                            ui.tags.div("Loading grid...", id="map-loader-text"),
+                            class_="map-loader-content",
+                        ),
+                        id="map-loader-overlay",
+                        class_="map-loader-overlay",
+                        style="display: none;",
+                    ),
                     ui.output_ui("map_legend"),
                     style="position: relative;",
                 ),
@@ -622,6 +644,17 @@ def server(input, output, session):
     async def _init_sim():
         landscape = input.landscape()
 
+        # Show loading overlay on the map
+        try:
+            grid_name = (
+                "Columbia River" if landscape == "columbia" else "Curonian Lagoon"
+            )
+            await session.send_custom_message(
+                "map_loader_show", {"text": f"Loading {grid_name} grid..."}
+            )
+        except Exception:
+            pass
+
         if landscape == "columbia":
             cfg = load_config("config_columbia.yaml")
         else:
@@ -690,6 +723,19 @@ def server(input, output, session):
         sim.pool.ed_kJ_g[:] = ed_init
         sim_state.set(sim)
 
+        # Update loader with cell count, then hide after a short delay
+        try:
+            is_hex = hasattr(sim.mesh, "n_cells")
+            n_cells = (
+                sim.mesh.n_cells if is_hex else getattr(sim.mesh, "n_triangles", 0)
+            )
+            await session.send_custom_message(
+                "map_loader_show",
+                {"text": f"Rendering {n_cells:,} cells..."},
+            )
+        except Exception:
+            pass
+
         # ── Initialize streaming chart bins ──
         ws = sim.mesh._workspace
         if ws and "Gradient [ upstream ]" in ws.hexmaps:
@@ -732,24 +778,25 @@ def server(input, output, session):
             choices = {name: name for name in sorted(sd.keys())}
             if not choices:
                 choices = {"depth": "Grid Values"}
-            ui.update_select("map_field", choices=choices)
+            ui.update_select("map_field", choices=choices, selected="depth")
         elif is_hexsim:
             # HexSim without scenario loader — use environment fields
             choices = {}
+            choices["depth"] = "Bathymetry"
             if hasattr(sim.env, "fields"):
                 for k in sim.env.fields:
                     choices[k] = k.replace("_", " ").title()
-            choices["depth"] = "Bathymetry"
-            ui.update_select("map_field", choices=choices)
+            ui.update_select("map_field", choices=choices, selected="depth")
         else:
             ui.update_select(
                 "map_field",
                 choices={
+                    "depth": "Bathymetry",
                     "temperature": "Temperature",
                     "salinity": "Salinity",
                     "ssh": "Sea Surface Height",
-                    "depth": "Bathymetry",
                 },
+                selected="depth",
             )
 
     async def _push_chart_data(sim):
@@ -796,6 +843,7 @@ def server(input, output, session):
     @reactive.effect
     @reactive.event(input.btn_step)
     async def _step():
+        nonlocal _cached_scale
         try:
             sim = sim_state.get()
             if sim is None:
@@ -812,6 +860,7 @@ def server(input, output, session):
                     if _cached_scale not in (0, 1.0) and is_hex
                     else (80.0 / max(abs(mesh.centroids).max(), 1) if is_hex else 1.0)
                 )
+                _cached_scale = scale
                 if is_hex:
                     all_xy = np.column_stack(
                         [
@@ -823,7 +872,7 @@ def server(input, output, session):
                     all_xy = np.column_stack(
                         [mesh.centroids[all_tris, 1], mesh.centroids[all_tris, 0]]
                     ).astype(np.float32)
-                trip_buffer.update(sim.pool.alive, all_xy)
+                trip_buffer.update(sim.pool.alive, all_xy, sim.pool.behavior)
             pool = sim.pool
             alive_mask = pool.alive.astype(bool)
             n_alive = int(alive_mask.sum())
@@ -844,57 +893,80 @@ def server(input, output, session):
 
     @reactive.effect
     @reactive.event(input.btn_run)
-    async def _run():
+    async def _start_run():
         running.set(True)
+        sim = sim_state.get()
+        if sim is None:
+            await _init_sim()
+
+    @reactive.effect
+    async def _run_tick():
+        nonlocal _cached_scale
+        """Self-scheduling run loop using invalidate_later.
+
+        Each invocation does one batch, sets reactive values, then returns.
+        Shiny flushes outputs between invocations so the UI stays live.
+        """
+        if not running.get():
+            return
+        sim = sim_state.get()
+        if sim is None:
+            running.set(False)
+            return
+        steps = input.n_steps()
+        if sim.current_t >= steps or not sim.pool.alive.any():
+            running.set(False)
+            return
+
+        speed = input.speed()
+
+        def _batch():
+            for _ in range(speed):
+                if sim.current_t >= steps:
+                    break
+                sim.step()
+
         try:
-            sim = sim_state.get()
-            if sim is None:
-                await _init_sim()
-                sim = sim_state.get()
-            steps = input.n_steps()
-            while running.get() and sim.current_t < steps:
-                speed = input.speed()
-
-                def _batch():
-                    for _ in range(speed):
-                        if sim.current_t >= steps:
-                            break
-                        sim.step()
-
-                t_batch = time.perf_counter()
-                await asyncio.to_thread(_batch)
-                elapsed = time.perf_counter() - t_batch
-                if sim.pool.alive.any():
-                    mesh = sim.mesh
-                    all_tris = sim.pool.tri_idx
-                    is_hex = hasattr(mesh, "_edge")
-                    scale = (
-                        _cached_scale
-                        if _cached_scale not in (0, 1.0) and is_hex
-                        else (
-                            80.0 / max(abs(mesh.centroids).max(), 1) if is_hex else 1.0
-                        )
-                    )
-                    if is_hex:
-                        all_xy = np.column_stack(
-                            [
-                                mesh.centroids[all_tris, 1] * scale,
-                                -mesh.centroids[all_tris, 0] * scale,
-                            ]
-                        ).astype(np.float32)
-                    else:
-                        all_xy = np.column_stack(
-                            [mesh.centroids[all_tris, 1], mesh.centroids[all_tris, 0]]
-                        ).astype(np.float32)
-                    trip_buffer.update(sim.pool.alive, all_xy)
-                pool = sim.pool
-                alive_mask = pool.alive.astype(bool)
-                n_alive = int(alive_mask.sum())
-                beh = (
-                    pool.behavior[alive_mask]
-                    if n_alive > 0
-                    else np.array([], dtype=int)
+            t_batch = time.perf_counter()
+            await asyncio.to_thread(_batch)
+            elapsed = time.perf_counter() - t_batch
+            if sim.pool.alive.any():
+                mesh = sim.mesh
+                all_tris = sim.pool.tri_idx
+                is_hex = hasattr(mesh, "_edge")
+                scale = (
+                    _cached_scale
+                    if _cached_scale not in (0, 1.0) and is_hex
+                    else (80.0 / max(abs(mesh.centroids).max(), 1) if is_hex else 1.0)
                 )
+                _cached_scale = scale
+                if is_hex:
+                    all_xy = np.column_stack(
+                        [
+                            mesh.centroids[all_tris, 1] * scale,
+                            -mesh.centroids[all_tris, 0] * scale,
+                        ]
+                    ).astype(np.float32)
+                else:
+                    all_xy = np.column_stack(
+                        [mesh.centroids[all_tris, 1], mesh.centroids[all_tris, 0]]
+                    ).astype(np.float32)
+                trip_buffer.update(sim.pool.alive, all_xy, sim.pool.behavior)
+            pool = sim.pool
+            alive_mask = pool.alive.astype(bool)
+            n_alive = int(alive_mask.sum())
+            beh = pool.behavior[alive_mask] if n_alive > 0 else np.array([], dtype=int)
+            history.set(sim.history.copy())
+            # During Run: only update trips layer — water grid stays static.
+            await _trips_update(is_live=True)
+            speed_val = speed
+            is_final = sim.current_t >= steps or not sim.pool.alive.any()
+            # Throttle UI updates: stats + charts only every Nth tick
+            # to avoid spinners from constant reactive invalidation
+            should_update_ui = (
+                is_final or speed_val <= 2 or sim.current_t % max(1, speed_val) == 0
+            )
+            if should_update_ui:
                 step_stats.set(
                     {
                         "t": sim.current_t,
@@ -904,20 +976,15 @@ def server(input, output, session):
                         "behaviors": {i: int((beh == i).sum()) for i in range(5)},
                     }
                 )
-                history.set(sim.history.copy())
-                speed_val = speed
-                is_final = sim.current_t >= steps or not sim.pool.alive.any()
-                if (
-                    is_final
-                    or speed_val <= 5
-                    or sim.current_t % max(1, speed_val // 2) == 0
-                ):
-                    await _push_chart_data(sim)
-                await asyncio.sleep(max(0.05, 0.25 - elapsed))
+                await _push_chart_data(sim)
         except Exception as e:
             ui.notification_show(f"Simulation error: {e}", type="error", duration=10)
-        finally:
             running.set(False)
+            return
+
+        # Schedule next tick after a short delay — Shiny flushes outputs in between
+        delay_ms = int(max(50, 250 - elapsed * 1000))
+        reactive.invalidate_later(delay_ms / 1000)
 
     @reactive.effect
     @reactive.event(input.btn_pause)
@@ -995,7 +1062,6 @@ def server(input, output, session):
     @render.ui
     def map_legend():
         sim = sim_state.get()
-        _ = history.get()
         if sim is None:
             return ui.HTML("")
 
@@ -1030,25 +1096,18 @@ def server(input, output, session):
             else "Triangular Mesh"
         )
 
-        # Behavior chips + agent count (only if agents alive)
-        beh_html = ""
-        n_alive = int(sim.pool.alive.sum())
-        if n_alive > 0:
-            chips = []
-            beh_counts = {}
-            for b in range(5):
-                beh_counts[b] = int((sim.pool.behavior[sim.pool.alive] == b).sum())
-            for i, (name, color) in enumerate(zip(BEH_NAMES, BEH_COLORS)):
-                count = beh_counts.get(i, 0)
-                chips.append(
-                    f'<span class="map-legend-beh-item">'
-                    f'<span class="map-legend-beh-dot" style="background:{color}"></span>'
-                    f"{name} ({count})</span>"
-                )
-            beh_html = (
-                f'<div class="map-legend-section">Agents ({n_alive:,})</div>'
-                f'<div class="map-legend-behaviors">{"".join(chips)}</div>'
+        # Behavior chips (no counts — those update in the status bar)
+        chips = []
+        for name, color in zip(BEH_NAMES, BEH_COLORS):
+            chips.append(
+                f'<span class="map-legend-beh-item">'
+                f'<span class="map-legend-beh-dot" style="background:{color}"></span>'
+                f"{name}</span>"
             )
+        beh_html = (
+            f'<div class="map-legend-section">Behaviors</div>'
+            f'<div class="map-legend-behaviors">{"".join(chips)}</div>'
+        )
 
         return ui.HTML(
             f'<div class="map-legend">'
@@ -1145,64 +1204,58 @@ def server(input, output, session):
             return {"longitude": lon, "latitude": lat, "zoom": zoom}
         return {"longitude": 21.07, "latitude": 55.31, "zoom": 10}
 
-    def _agent_layer(sim, landscape=None):
-        """Build the complete agent ScatterplotLayer dict."""
-        agent_data = _build_agent_data(
-            sim, sim.mesh, scale=_cached_scale, landscape=landscape
-        )
-        return scatterplot_layer(
-            "agents",
-            agent_data,
-            getPosition="@@d.position",
-            getFillColor="@@d.color",
-            getRadius=150,
-            radiusMinPixels=5,
-            radiusMaxPixels=12,
-            stroked=True,
-            getLineColor=[0, 0, 0, 140],
-            lineWidthMinPixels=1,
-            pickable=True,
-        )
+    def _build_trips_layer(is_live: bool = False):
+        """Build a shiny_deckgl ``trips_layer`` dict for partial_update.
 
-    def _agent_layer_binary(sim, scale=1.0):
-        pos_bin, col_bin, n = _build_agent_binary(sim, sim.mesh, scale=scale)
-        is_hex = hasattr(sim.mesh, "_edge")
-        if n == 0:
-            # Use 1-element invisible placeholder — 0-length binary buffers
-            # cause glMapBufferRange errors on some WebGL drivers.
-            return scatterplot_layer(
-                "agents",
-                {"length": 1},
-                getPosition=encode_binary_attribute(np.zeros((1, 2), dtype=np.float32)),
-                getFillColor=encode_binary_attribute(np.zeros((1, 4), dtype=np.uint8)),
+        Uses ``_tripsAnimation`` so the built-in RAF loop in deckgl-init.js
+        handles animation — no custom JS needed, no competing setProps.
+
+        In *live* mode (during Run), ``currentTime`` is pinned to the end of
+        the trail and speed=0 so the head is always visible.
+        In *replay* mode (paused), speed>0 so the animation loops.
+        """
+        # Empty / hidden layer when trails toggle is off or no data
+        if not input.show_trails():
+            return trips_layer(
+                "anim-trails",
+                [],
+                currentTime=0,
+                trailLength=0,
+                visible=False,
             )
-        return scatterplot_layer(
-            "agents",
-            {"length": n},
-            getPosition=pos_bin,
-            getFillColor=col_bin,
-            getRadius=150 if not is_hex else 0.0001,
-            radiusMinPixels=5,
-            radiusMaxPixels=12,
-            stroked=True,
-            getLineColor=[0, 0, 0, 140],
-            lineWidthMinPixels=1,
-            pickable=True,
-        )
 
-    async def _send_trips_animation():
-        """Send trip data to the JS-side TripsLayer animation handler."""
-        trips, t_min, t_max = trip_buffer.build_trips()
-        if not trips:
-            await session.send_custom_message("deck_trips_stop", {})
-            return
+        trips_data, t_min, t_max = trip_buffer.build_trips()
+        if not trips_data:
+            return trips_layer(
+                "anim-trails",
+                [],
+                currentTime=0,
+                trailLength=0,
+                visible=False,
+            )
+
         loop_len = max(t_max - t_min, 1)
-        await session.send_custom_message("deck_trips_data", {
-            "data": trips,
-            "loopLength": loop_len,
-            "trailLength": min(loop_len * 0.5, 15),
-            "speed": 3,
-        })
+        trail_len = max(1.0, min(loop_len * 0.5, 15))
+
+        return trips_layer(
+            "anim-trails",
+            trips_data,
+            visible=True,  # must be explicit — partial_update merges, so
+            # a prior visible=False would stick otherwise
+            getPath="@@d.path",
+            getTimestamps="@@d.timestamps",
+            getColor="@@d.color",
+            widthMinPixels=5,
+            widthMaxPixels=10,
+            jointRounded=True,
+            capRounded=True,
+            trailLength=trail_len,
+            currentTime=loop_len if is_live else 0,
+            _tripsAnimation={
+                "loopLength": loop_len,
+                "speed": 0 if is_live else 3,
+            },
+        )
 
     async def _full_update(sim, landscape=None):
         """Send everything: positions + colors + agents (~3 MB)."""
@@ -1263,9 +1316,10 @@ def server(input, output, session):
                 pickable=False,
             )
         _cached_water_layer = water
+        update_layers = [water, _build_trips_layer()]
         await map_widget.update(
             session,
-            layers=[water, _agent_layer_binary(sim, scale=_cached_scale)],
+            layers=update_layers,
             view_state=_view_state(sim, landscape=landscape),
             views=[map_view(controller=True)],
         )
@@ -1319,18 +1373,12 @@ def server(input, output, session):
             _cached_water_layer = water
             layers = [water]
 
-        # Also send agents to avoid stale state
-        layers.append(_agent_layer_binary(sim, scale=_cached_scale))
+        layers.append(_build_trips_layer())
         await map_widget.partial_update(session, layers)
-        if input.show_trails():
-            await _send_trips_animation()
 
-    async def _agent_trail_update(sim, landscape=None):
-        """Patch agents only; trips animation runs independently in JS."""
-        layers = [_agent_layer_binary(sim, scale=_cached_scale)]
-        await map_widget.partial_update(session, layers)
-        if input.show_trails():
-            await _send_trips_animation()
+    async def _trips_update(is_live: bool = False):
+        """Push only the trips layer — water grid stays untouched."""
+        await map_widget.partial_update(session, [_build_trips_layer(is_live)])
 
     @reactive.effect
     async def _update_map():
@@ -1341,25 +1389,29 @@ def server(input, output, session):
         _ = history.get()
         if sim is None:
             return
+        # During Run, _run_tick handles trips updates directly.
+        # Skip all map work here to avoid competing partial_updates.
+        if running.get():
+            return
 
         landscape = input.landscape()
         field_name = input.map_field()
-        is_hexsim = hasattr(sim.mesh, "n_cells")
-        if is_hexsim:
-            # Compute scale to keep pseudo-lat/lon within ±80 degrees
-            max_coord = max(
-                abs(sim.mesh.centroids[:, 0]).max(), abs(sim.mesh.centroids[:, 1]).max()
-            )
-            scale = 80.0 / max(max_coord, 1)
-        else:
-            scale = 1.0
 
-        # Detect what changed
+        # Detect what changed — only landscape or field changes trigger
+        # a full/partial map rebuild.  Steps and Run only update trips.
         landscape_changed = landscape != _cached_landscape
         field_changed = field_name != _cached_field
 
         if landscape_changed:
-            # Reset cache for new landscape
+            is_hexsim = hasattr(sim.mesh, "n_cells")
+            if is_hexsim:
+                max_coord = max(
+                    abs(sim.mesh.centroids[:, 0]).max(),
+                    abs(sim.mesh.centroids[:, 1]).max(),
+                )
+                scale = 80.0 / max(max_coord, 1)
+            else:
+                scale = 1.0
             _cached_landscape = landscape
             _cached_field = field_name
             _cached_subsample_idx = None
@@ -1370,23 +1422,24 @@ def server(input, output, session):
                 style = CARTO_POSITRON if _cached_theme == "light" else CARTO_DARK
                 await map_widget.set_style(session, style)
             await _full_update(sim, landscape=landscape)
+            try:
+                await session.send_custom_message("map_loader_hide", {})
+            except Exception:
+                pass
         elif field_changed:
             _cached_field = field_name
-            _cached_scale = scale
             await _hex_color_update(sim, landscape=landscape)
         else:
-            # Step only — agents + trails, hex grid untouched
-            _cached_scale = scale
-            await _agent_trail_update(sim, landscape=landscape)
+            # Step completed — only update trips layer, water stays static
+            await _trips_update()
 
     @reactive.effect
     @reactive.event(input.show_trails)
     async def _toggle_trails():
-        """Start/stop trips animation when the Trails toggle changes."""
-        if input.show_trails():
-            await _send_trips_animation()
-        else:
-            await session.send_custom_message("deck_trips_stop", {})
+        """Refresh trips layer when the Trails toggle changes."""
+        if sim_state.get() is None:
+            return
+        await _trips_update()
 
     # --- Chart helper: Plotly → HTML file + iframe (no widget/comm layer) ---
     def _plotly_iframe(fig, name, height="280px"):

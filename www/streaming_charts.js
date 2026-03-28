@@ -11,11 +11,11 @@
     alive:      "#6bcb77",
     dead:       "#ff6b6b",
     arrived:    "#ffd93d",
-    upstream:   "#2d8cf0",
-    hold:       "#6bcb77",
-    random:     "#ffd93d",
-    cwr:        "#ff6b6b",
-    downstream: "#a855f7",
+    hold:       "#7a8b7a",
+    random:     "#4a8fa8",
+    cwr:        "#3d9b8f",
+    upstream:   "#d4826a",
+    downstream: "#b8963e",
     migration:  "#ffd93d",
   };
 
@@ -82,8 +82,8 @@
   function initBehavior(msg) {
     var el = document.getElementById("chart-behavior");
     if (!el) return;
-    var names  = ["Upstream", "Hold", "Random", "CWR", "Downstream"];
-    var colors = [COLORS.upstream, COLORS.hold, COLORS.random, COLORS.cwr, COLORS.downstream];
+    var names  = ["Hold", "Random", "CWR", "Upstream", "Downstream"];
+    var colors = [COLORS.hold, COLORS.random, COLORS.cwr, COLORS.upstream, COLORS.downstream];
     var traces = names.map(function(name, i) {
       return {
         x: [], y: [], mode: "lines", name: name,
