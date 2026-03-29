@@ -604,7 +604,11 @@ def server(input, output, session):
                 "map_loader_show", {"text": f"Loading {grid_name} grid..."}
             )
         except Exception:
-            pass
+            import logging
+
+            logging.getLogger(__name__).debug(
+                "Message send failed (session may not be ready)"
+            )
 
         if landscape == "columbia":
             cfg = load_config("config_columbia.yaml")
@@ -685,7 +689,11 @@ def server(input, output, session):
                 {"text": f"Rendering {n_cells:,} cells..."},
             )
         except Exception:
-            pass
+            import logging
+
+            logging.getLogger(__name__).debug(
+                "Message send failed (session may not be ready)"
+            )
 
         # ── Initialize streaming chart bins ──
         ws = sim.mesh._workspace
@@ -717,7 +725,11 @@ def server(input, output, session):
                 },
             )
         except Exception:
-            pass  # Session not ready yet on first load
+            import logging
+
+            logging.getLogger(__name__).debug(
+                "Message send failed (session may not be ready)"
+            )  # Session not ready yet on first load
 
         running.set(False)
         trip_buffer.clear()
@@ -795,13 +807,22 @@ def server(input, output, session):
     @reactive.event(input.btn_step)
     async def _step():
         nonlocal _cached_scale
+        # Simulation step — fatal on error
         try:
             sim = sim_state.get()
             if sim is None:
                 await _init_sim()
                 sim = sim_state.get()
             await asyncio.to_thread(sim.step)
-            # Update trail buffer with full-population position array
+        except Exception as e:
+            import logging
+
+            logging.getLogger(__name__).exception("Simulation step failed")
+            ui.notification_show(f"Simulation error: {e}", type="error", duration=10)
+            return
+
+        # UI updates — non-fatal
+        try:
             if sim.pool.alive.any():
                 mesh = sim.mesh
                 all_tris = sim.pool.tri_idx
@@ -839,8 +860,12 @@ def server(input, output, session):
             )
             history.set(sim.history.copy())
             await _push_chart_data(sim)
-        except Exception as e:
-            ui.notification_show(f"Step error: {e}", type="error", duration=10)
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).exception(
+                "UI update failed at t=%d", sim.current_t
+            )
 
     @reactive.effect
     @reactive.event(input.btn_run)
@@ -884,10 +909,21 @@ def server(input, output, session):
                     break
                 sim.step()
 
+        # Simulation batch — fatal on error
         try:
             t_batch = time.perf_counter()
             await asyncio.to_thread(_batch)
             elapsed = time.perf_counter() - t_batch
+        except Exception as e:
+            import logging
+
+            logging.getLogger(__name__).exception("Simulation batch failed")
+            ui.notification_show(f"Simulation error: {e}", type="error", duration=10)
+            running.set(False)
+            return
+
+        # Visualization updates — non-fatal
+        try:
             if sim.pool.alive.any():
                 mesh = sim.mesh
                 all_tris = sim.pool.tri_idx
@@ -915,12 +951,9 @@ def server(input, output, session):
             n_alive = int(alive_mask.sum())
             beh = pool.behavior[alive_mask] if n_alive > 0 else np.array([], dtype=int)
             history.set(sim.history.copy())
-            # During Run: only update trips layer — water grid stays static.
             await _trips_update(is_live=True)
             speed_val = speed
             is_final = sim.current_t >= steps or not sim.pool.alive.any()
-            # Throttle UI updates: stats + charts only every Nth tick
-            # to avoid spinners from constant reactive invalidation
             should_update_ui = (
                 is_final or speed_val <= 2 or sim.current_t % max(1, speed_val) == 0
             )
@@ -935,10 +968,12 @@ def server(input, output, session):
                     }
                 )
                 await _push_chart_data(sim)
-        except Exception as e:
-            ui.notification_show(f"Simulation error: {e}", type="error", duration=10)
-            running.set(False)
-            return
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).exception(
+                "Visualization failed at t=%d", sim.current_t
+            )
 
         # Schedule next tick after a short delay — Shiny flushes outputs in between
         delay_ms = int(max(50, 250 - elapsed * 1000))
@@ -1352,44 +1387,47 @@ def server(input, output, session):
         if running.get():
             return
 
-        landscape = input.landscape()
-        field_name = input.map_field()
+        try:
+            landscape = input.landscape()
+            field_name = input.map_field()
 
-        # Detect what changed — only landscape or field changes trigger
-        # a full/partial map rebuild.  Steps and Run only update trips.
-        landscape_changed = landscape != _cached_landscape
-        field_changed = field_name != _cached_field
+            landscape_changed = landscape != _cached_landscape
+            field_changed = field_name != _cached_field
 
-        if landscape_changed:
-            is_hexsim = hasattr(sim.mesh, "n_cells")
-            if is_hexsim:
-                max_coord = max(
-                    abs(sim.mesh.centroids[:, 0]).max(),
-                    abs(sim.mesh.centroids[:, 1]).max(),
-                )
-                scale = 80.0 / max(max_coord, 1)
+            if landscape_changed:
+                is_hexsim = hasattr(sim.mesh, "n_cells")
+                if is_hexsim:
+                    max_coord = max(
+                        abs(sim.mesh.centroids[:, 0]).max(),
+                        abs(sim.mesh.centroids[:, 1]).max(),
+                    )
+                    scale = 80.0 / max(max_coord, 1)
+                else:
+                    scale = 1.0
+                _cached_landscape = landscape
+                _cached_field = field_name
+                _cached_subsample_idx = None
+                _cached_scale = scale
+                if is_hexsim:
+                    await map_widget.set_style(session, BLANK_STYLE)
+                else:
+                    style = CARTO_POSITRON if _cached_theme == "light" else CARTO_DARK
+                    await map_widget.set_style(session, style)
+                await _full_update(sim, landscape=landscape)
+                try:
+                    await session.send_custom_message("map_loader_hide", {})
+                except Exception:
+                    pass
+            elif field_changed:
+                _cached_field = field_name
+                await _hex_color_update(sim, landscape=landscape)
             else:
-                scale = 1.0
-            _cached_landscape = landscape
-            _cached_field = field_name
-            _cached_subsample_idx = None
-            _cached_scale = scale
-            if is_hexsim:
-                await map_widget.set_style(session, BLANK_STYLE)
-            else:
-                style = CARTO_POSITRON if _cached_theme == "light" else CARTO_DARK
-                await map_widget.set_style(session, style)
-            await _full_update(sim, landscape=landscape)
-            try:
-                await session.send_custom_message("map_loader_hide", {})
-            except Exception:
-                pass
-        elif field_changed:
-            _cached_field = field_name
-            await _hex_color_update(sim, landscape=landscape)
-        else:
-            # Step completed — only update trips layer, water stays static
-            await _trips_update()
+                await _trips_update()
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).exception("Map update failed")
+            ui.notification_show("Map update failed", type="warning", duration=5)
 
     @reactive.effect
     @reactive.event(input.show_trails)
@@ -1397,7 +1435,12 @@ def server(input, output, session):
         """Refresh trips layer when the Trails toggle changes."""
         if sim_state.get() is None:
             return
-        await _trips_update()
+        try:
+            await _trips_update()
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).exception("Failed to toggle trails")
 
     # --- Chart helper: Plotly → HTML file + iframe (no widget/comm layer) ---
     def _plotly_iframe(fig, name, height="280px"):
