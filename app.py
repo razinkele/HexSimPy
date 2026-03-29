@@ -1431,7 +1431,9 @@ def server(input, output, session):
                 try:
                     await session.send_custom_message("map_loader_hide", {})
                 except Exception:
-                    pass
+                    import logging
+
+                    logging.getLogger(__name__).debug("map_loader_hide send failed")
             elif field_changed:
                 _cached_field = field_name
                 await _hex_color_update(sim, landscape=landscape)
