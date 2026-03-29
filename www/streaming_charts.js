@@ -30,6 +30,7 @@
   };
 
   function initPopulation(msg) {
+    if (typeof Plotly === 'undefined') return;
     var el = document.getElementById("chart-population");
     if (!el) return;
     var traces = [
@@ -54,6 +55,7 @@
   }
 
   function initMigration(msg) {
+    if (typeof Plotly === 'undefined') return;
     var el = document.getElementById("chart-migration");
     if (!el) return;
     var nBins = msg.n_bins || 50;
@@ -80,6 +82,7 @@
   }
 
   function initBehavior(msg) {
+    if (typeof Plotly === 'undefined') return;
     var el = document.getElementById("chart-behavior");
     if (!el) return;
     var names  = ["Hold", "Random", "CWR", "Upstream", "Downstream"];
@@ -152,21 +155,34 @@
     });
   }
 
-  if (window.Shiny) {
-    Shiny.addCustomMessageHandler("chart_reset", function(msg) {
-      initPopulation(msg);
-      initMigration(msg);
-      initBehavior(msg);
-      initialized = true;
-    });
+  function _waitForShiny() {
+    if (window.Shiny && Shiny.addCustomMessageHandler) {
+      Shiny.addCustomMessageHandler("chart_reset", function(msg) {
+        try {
+          initPopulation(msg);
+          initMigration(msg);
+          initBehavior(msg);
+          initialized = true;
+        } catch(e) {
+          console.warn('[charts] reset failed:', e);
+        }
+      });
 
-    Shiny.addCustomMessageHandler("chart_update", function(msg) {
-      if (!initialized) return;
-      updatePopulation(msg);
-      updateMigration(msg);
-      updateBehavior(msg);
-    });
+      Shiny.addCustomMessageHandler("chart_update", function(msg) {
+        try {
+          if (!initialized) return;
+          updatePopulation(msg);
+          updateMigration(msg);
+          updateBehavior(msg);
+        } catch(e) {
+          console.warn('[charts] update failed:', e);
+        }
+      });
+    } else {
+      setTimeout(_waitForShiny, 200);
+    }
   }
+  _waitForShiny();
 
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", setupPanel);
