@@ -363,7 +363,7 @@ class TripBuffer:
             norm_ts = valid_wp[:, 2] - t_min
             path_3d = np.column_stack([valid_wp[:, :2], norm_ts])
             # Color from agent's current behavior
-            beh_idx = int(self._beh[i]) if self._beh[i] < len(BEH_COLORS) else 0
+            beh_idx = int(self._beh[i]) if 0 <= self._beh[i] < len(BEH_COLORS) else 0
             r, g, b = _hex_to_rgb(BEH_COLORS[beh_idx])
             trips.append(
                 {

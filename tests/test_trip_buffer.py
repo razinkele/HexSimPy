@@ -412,6 +412,43 @@ class TestClear:
 # ---------------------------------------------------------------------------
 
 
+class TestBehaviorColors:
+    def test_valid_behavior_produces_colored_trail(self, buf):
+        """Valid behavior indices produce colored trails with proper RGBA."""
+        alive = np.ones(3, dtype=bool)
+        behaviors = np.array([0, 3, 4], dtype=np.int8)
+        for step in range(3):
+            pos = np.array(
+                [[step * 0.1, 0], [step * 0.1 + 1, 1], [step * 0.1 + 2, 2]],
+                dtype=np.float32,
+            )
+            buf.update(alive, pos, behaviors)
+        trips, _, _ = buf.build_trips()
+        assert len(trips) > 0
+        for trip in trips:
+            assert len(trip["color"]) == 4
+
+    def test_negative_behavior_uses_default_color(self, buf):
+        """Negative behavior indices should use default color (index 0)."""
+        alive = np.ones(2, dtype=bool)
+        behaviors = np.array([-1, 0], dtype=np.int8)
+        for step in range(3):
+            pos = np.array([[step * 0.1, 0], [step * 0.1 + 1, 1]], dtype=np.float32)
+            buf.update(alive, pos, behaviors)
+        trips, _, _ = buf.build_trips()
+        assert len(trips) > 0
+
+    def test_out_of_range_behavior_uses_default(self, buf):
+        """Behavior indices >= len(BEH_COLORS) should use default color (index 0)."""
+        alive = np.ones(2, dtype=bool)
+        behaviors = np.array([99, 0], dtype=np.int8)
+        for step in range(3):
+            pos = np.array([[step * 0.1, 0], [step * 0.1 + 1, 1]], dtype=np.float32)
+            buf.update(alive, pos, behaviors)
+        trips, _, _ = buf.build_trips()
+        assert len(trips) > 0
+
+
 class TestEdgeCases:
     def test_empty_alive_mask(self, buf):
         """update() with no alive agents is a no-op."""
