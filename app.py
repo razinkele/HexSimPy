@@ -607,6 +607,9 @@ def server(input, output, session):
     @reactive.effect
     @reactive.event(input.btn_reset, input.landscape, ignore_none=False)
     async def _init_sim():
+        await _do_init_sim()
+
+    async def _do_init_sim():
         landscape = input.landscape()
 
         # Show loading overlay on the map
@@ -825,7 +828,7 @@ def server(input, output, session):
         try:
             sim = sim_state.get()
             if sim is None:
-                await _init_sim()
+                await _do_init_sim()
                 sim = sim_state.get()
             await asyncio.to_thread(sim.step)
         except Exception as e:
@@ -887,7 +890,7 @@ def server(input, output, session):
         sim = sim_state.get()
         if sim is None:
             try:
-                await _init_sim()
+                await _do_init_sim()
             except Exception as e:
                 import logging
 
@@ -1055,7 +1058,7 @@ def server(input, output, session):
             ui.span(f"{n_arrived:,} arrived", class_="stat-val"),
             ui.span("|", class_="stat-sep"),
             ui.span(
-                f"\u2191{beh.get(3, 0)} \u2193{beh.get(1, 0)} \u2192{beh.get(0, 0)} \u25cb{beh.get(4, 0)}",
+                f"\u2191{beh.get(3, 0)} \u2193{beh.get(4, 0)} \u25a0{beh.get(0, 0)} \u25cb{beh.get(1, 0)} \u2736{beh.get(2, 0)}",
                 class_="stat-val stat-behaviors",
             ),
             class_="live-stats-bar",
@@ -1086,10 +1089,18 @@ def server(input, output, session):
                 "ssh": "SSH (m)",
             }
             cbar_title = field_labels.get(field_name, field_name)
+        elif (
+            hasattr(sim, "landscape")
+            and "spatial_data" in sim.landscape
+            and field_name in sim.landscape["spatial_data"]
+        ):
+            z = sim.landscape["spatial_data"][field_name]
+            cscale = TEMP_COLORSCALE
+            cbar_title = field_name
         else:
             cscale = BATHY_COLORSCALE
             cbar_title = "Depth (m)"
-            z = sim.mesh.depth
+            z = sim.mesh.depth if hasattr(sim.mesh, "depth") else np.zeros(1)
 
         z_min = f"{float(np.nanmin(z)):.1f}"
         z_max = f"{float(np.nanmax(z)):.1f}"
