@@ -300,25 +300,39 @@ class TripBuffer:
         # may be stale if agent 0 died).
         t_min = float(self._time - self._fill)
         t_max = float(self._time - 1)
+
+        # Bulk extract: (nt, fill, 3) — vectorized NaN/stationarity check
+        all_wp = self._buf[:nt, order, :]
+        has_nan = np.any(np.isnan(all_wp), axis=2)  # (nt, fill)
+        valid_counts = (~has_nan).sum(axis=1)  # (nt,)
+
+        # Stationarity: compare all positions to first valid position
+        first_valid = np.argmax(~has_nan, axis=1)  # (nt,)
+        ref = all_wp[np.arange(nt), first_valid, :2]  # (nt, 2)
+        same_pos = np.where(
+            has_nan,
+            True,
+            (all_wp[:, :, 0] == ref[:, 0:1]) & (all_wp[:, :, 1] == ref[:, 1:2]),
+        )
+        stationary = np.all(same_pos, axis=1)
+
+        # Filter: >= 2 valid waypoints AND not stationary
+        keep_idx = np.where((valid_counts >= 2) & ~stationary)[0]
+
+        # Pre-compute colors (clamp behavior index)
+        beh_indices = np.clip(self._beh[:nt], 0, len(BEH_COLORS) - 1)
+        # Cache RGB tuples to avoid re-parsing hex strings
+        _color_cache = [_hex_to_rgb(c) for c in BEH_COLORS]
+
         trips = []
-        for i in range(nt):
-            waypoints = self._buf[i, order, :]  # (fill, 3) — [lon, lat, raw_time]
-            # Skip agents with any NaN (dead agents) or no movement
-            valid_mask = ~np.any(np.isnan(waypoints), axis=1)
-            valid_wp = waypoints[valid_mask]
-            if len(valid_wp) < 2:
-                continue
-            if np.all(valid_wp[:, :2] == valid_wp[0, :2]):
-                continue
-            # Normalize timestamps to 0-based
+        for i in keep_idx:
+            valid_wp = all_wp[i, ~has_nan[i]]
             norm_ts = valid_wp[:, 2] - t_min
             path_3d = np.column_stack([valid_wp[:, :2], norm_ts])
-            # Color from agent's current behavior
-            beh_idx = int(self._beh[i]) if 0 <= self._beh[i] < len(BEH_COLORS) else 0
-            r, g, b = _hex_to_rgb(BEH_COLORS[beh_idx])
+            r, g, b = _color_cache[int(beh_indices[i])]
             trips.append(
                 {
-                    "path": path_3d.tolist(),  # [[lon, lat, time], ...]
+                    "path": path_3d.tolist(),
                     "timestamps": norm_ts.tolist(),
                     "color": [r, g, b, 240],
                 }
