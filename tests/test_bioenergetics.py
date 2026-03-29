@@ -148,3 +148,25 @@ def test_energy_density_decreases_monotonically():
         )
         ed = new_ed
         mass = new_mass
+
+
+class TestBioParamsValidation:
+    def test_negative_ra_raises(self):
+        with pytest.raises(ValueError, match="RA"):
+            BioParams(RA=-0.001)
+
+    def test_negative_rq_raises(self):
+        with pytest.raises(ValueError, match="RQ"):
+            BioParams(RQ=-0.01)
+
+    def test_t_max_below_t_opt_raises(self):
+        with pytest.raises(ValueError, match="T_MAX.*T_OPT"):
+            BioParams(T_OPT=20.0, T_MAX=15.0)
+
+    def test_mass_floor_out_of_range_raises(self):
+        with pytest.raises(ValueError, match="MASS_FLOOR"):
+            BioParams(MASS_FLOOR_FRACTION=1.5)
+
+    def test_valid_params_no_error(self):
+        bp = BioParams()
+        assert bp.RA > 0

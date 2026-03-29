@@ -29,6 +29,22 @@ class BioParams:
         }
     )
 
+    def __post_init__(self):
+        if self.RA <= 0:
+            raise ValueError("RA must be > 0")
+        if self.RQ <= 0:
+            raise ValueError("RQ must be > 0")
+        if self.T_MAX <= self.T_OPT:
+            raise ValueError(f"T_MAX ({self.T_MAX}) must be > T_OPT ({self.T_OPT})")
+        if not (0 < self.MASS_FLOOR_FRACTION <= 1):
+            raise ValueError(
+                f"MASS_FLOOR_FRACTION must be in (0, 1], got {self.MASS_FLOOR_FRACTION}"
+            )
+        if self.ED_MORTAL <= 0:
+            raise ValueError("ED_MORTAL must be > 0")
+        if self.ED_TISSUE <= 0:
+            raise ValueError("ED_TISSUE must be > 0")
+
 
 def hourly_respiration(
     mass_g: np.ndarray,
