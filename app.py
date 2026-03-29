@@ -922,7 +922,7 @@ def server(input, output, session):
 
         def _batch():
             for _ in range(speed):
-                if sim.current_t >= steps:
+                if sim.current_t >= steps or not sim.pool.alive.any():
                     break
                 sim.step()
 
@@ -991,6 +991,11 @@ def server(input, output, session):
             logging.getLogger(__name__).exception(
                 "Visualization failed at t=%d", sim.current_t
             )
+
+        # Check if run completed during this batch
+        if sim.current_t >= steps or not sim.pool.alive.any():
+            running.set(False)
+            return
 
         # Schedule next tick after a short delay — Shiny flushes outputs in between
         delay_ms = int(max(50, 250 - elapsed * 1000))
