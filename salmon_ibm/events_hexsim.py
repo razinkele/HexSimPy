@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 from dataclasses import dataclass, field
+import logging
 import numpy as np
 from salmon_ibm.events import Event, register_event
 
@@ -173,13 +174,9 @@ def _apply_trait_combo_mask(base_mask, uf, population):
         return base_mask
     trait_mgr = getattr(population, "trait_mgr", None)
     if trait_mgr is None:
-        import warnings
-
-        warnings.warn(
+        logging.getLogger(__name__).warning(
             "Trait-combo filter requested but population has no trait_mgr. "
-            "Event will fire for ALL agents.",
-            RuntimeWarning,
-            stacklevel=2,
+            "Event will fire for ALL agents."
         )
         return base_mask
 
@@ -203,14 +200,10 @@ def _apply_trait_combo_mask(base_mask, uf, population):
     stride = 1
     for tname in reversed(stratified):
         if tname not in trait_mgr.definitions:
-            import warnings
-
-            warnings.warn(
+            logging.getLogger(__name__).warning(
                 f"Trait '{tname}' not found in trait_mgr. "
                 f"Available: {list(trait_mgr.definitions.keys())}. "
-                f"Event will fire for ALL agents.",
-                RuntimeWarning,
-                stacklevel=2,
+                f"Event will fire for ALL agents."
             )
             return base_mask
         defn = trait_mgr.definitions[tname]
@@ -219,13 +212,9 @@ def _apply_trait_combo_mask(base_mask, uf, population):
         stride *= n_cat
 
     if len(combo_flags) != stride:
-        import warnings
-
-        warnings.warn(
+        logging.getLogger(__name__).warning(
             f"Trait combo flags length ({len(combo_flags)}) doesn't match "
-            f"expected stride ({stride}). Event will fire for ALL agents.",
-            RuntimeWarning,
-            stacklevel=2,
+            f"expected stride ({stride}). Event will fire for ALL agents."
         )
         return base_mask
 
@@ -297,13 +286,9 @@ class HexSimAccumulateEvent(Event):
             if not acc_name:
                 continue
             if acc_name not in acc_mgr._name_to_idx:
-                import warnings
-
-                warnings.warn(
+                logging.getLogger(__name__).warning(
                     f"Updater '{func_name}' references unknown accumulator '{acc_name}'. "
-                    f"Available: {list(acc_mgr._name_to_idx.keys())}",
-                    RuntimeWarning,
-                    stacklevel=2,
+                    f"Available: {list(acc_mgr._name_to_idx.keys())}"
                 )
                 continue
 
@@ -315,13 +300,9 @@ class HexSimAccumulateEvent(Event):
             try:
                 handler = self._dispatch.get(func_name)
                 if handler is None:
-                    import warnings
-
-                    warnings.warn(
+                    logging.getLogger(__name__).warning(
                         f"Unknown updater function '{func_name}' for accumulator "
-                        f"'{acc_name}' — skipped. Known: {list(self._dispatch.keys())}",
-                        RuntimeWarning,
-                        stacklevel=2,
+                        f"'{acc_name}' — skipped. Known: {list(self._dispatch.keys())}"
                     )
                     continue
 
@@ -382,12 +363,8 @@ class HexSimAccumulateEvent(Event):
                         )
 
             except (KeyError, ValueError, IndexError) as e:
-                import warnings
-
-                warnings.warn(
-                    f"Updater {func_name} for '{acc_name}' failed: {e}",
-                    RuntimeWarning,
-                    stacklevel=2,
+                logging.getLogger(__name__).warning(
+                    f"Updater {func_name} for '{acc_name}' failed: {e}"
                 )
 
 
@@ -428,15 +405,11 @@ class PatchIntroductionEvent(Event):
         spatial_registry = landscape.get("spatial_data", {})
         layer = spatial_registry.get(self.patch_spatial_data)
         if layer is None:
-            import warnings
-
             available = list(spatial_registry.keys()) if spatial_registry else []
-            warnings.warn(
+            logging.getLogger(__name__).warning(
                 f"PatchIntroductionEvent '{self.name}': spatial data layer "
                 f"'{self.patch_spatial_data}' not found. Available: {available}. "
-                f"No agents will be introduced.",
-                UserWarning,
-                stacklevel=2,
+                f"No agents will be introduced."
             )
             return
         # HexSim hex-maps store integer-valued floats (0.0 = no-data, nonzero = water).
@@ -614,16 +587,12 @@ class HexSimMoveEvent(Event):
             spatial_data = landscape.get("spatial_data", {})
             gradient = spatial_data.get(self.dispersal_spatial_data)
             if gradient is None:
-                import warnings
-
                 available = list(spatial_data.keys()) if spatial_data else []
-                warnings.warn(
+                logging.getLogger(__name__).warning(
                     f"HexSimMoveEvent '{self.name}': spatial data layer "
                     f"'{self.dispersal_spatial_data}' not found. "
                     f"Available layers: {available}. "
-                    f"Falling back to uniform gradient (no directed movement).",
-                    UserWarning,
-                    stacklevel=2,
+                    f"Falling back to uniform gradient (no directed movement)."
                 )
                 gradient = np.ones(mesh.n_cells)
             self._cached_gradient = gradient
