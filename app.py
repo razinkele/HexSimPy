@@ -165,55 +165,6 @@ def _subsample_indices(n, max_pts):
 
 
 # Geo-anchor profiles for meter→lat/lon conversion.
-# Each profile defines two endpoints along the long axis (data_cols)
-# and a meters-per-degree-latitude for cross-axis offset.
-_GEO_ANCHORS = {
-    "columbia": {
-        # Mouth (Astoria, low data_cols) → Bonneville Dam (upstream, high data_cols)
-        "start_lon": -123.83,
-        "start_lat": 46.19,
-        "end_lon": -121.94,
-        "end_lat": 45.64,
-        "m_per_deg_lat": 111_000.0,
-    },
-    "curonian": {
-        # South end (Nemunas delta, low data_cols) → North end (Klaipėda strait, high data_cols)
-        "start_lon": 21.20,
-        "start_lat": 55.26,
-        "end_lon": 21.08,
-        "end_lat": 55.72,
-        "m_per_deg_lat": 111_000.0,
-    },
-}
-_DEFAULT_ANCHOR = "columbia"
-
-
-def _detect_landscape(workspace_path: str | None = None) -> str:
-    """Detect landscape from workspace path name."""
-    if workspace_path:
-        lc = str(workspace_path).lower()
-        if "curonian" in lc or "lagoon" in lc:
-            return "curonian"
-    return "columbia"
-
-
-def _hexsim_to_lonlat(cx, cy, landscape=None):
-    """Convert HexSim meter coordinates to approximate lon/lat.
-
-    cx is the long axis (data_cols direction).
-    cy is the short axis (data_rows direction, cross-axis).
-    Maps linearly between two anchor points defined per landscape,
-    with cy adding a cross-axis latitude offset.
-    """
-    key = landscape or _DEFAULT_ANCHOR
-    a = _GEO_ANCHORS.get(key, _GEO_ANCHORS[_DEFAULT_ANCHOR])
-    cx_max = cx.max() if len(cx) > 0 else 1.0
-    t = cx / cx_max  # 0 = start, 1 = end
-    lon = a["start_lon"] + t * (a["end_lon"] - a["start_lon"])
-    lat = a["start_lat"] + t * (a["end_lat"] - a["start_lat"]) + cy / a["m_per_deg_lat"]
-    return lon, lat
-
-
 def _build_water_binary(mesh, z, cscale, idx, scale=1.0, landscape=None):
     """Build binary-encoded position and color arrays for the water layer.
 
@@ -857,7 +808,7 @@ def server(input, output, session):
                 is_hex = hasattr(mesh, "_edge")
                 scale = (
                     _cached_scale
-                    if _cached_scale not in (0, 1.0) and is_hex
+                    if _cached_scale is not None and is_hex
                     else (80.0 / max(abs(mesh.centroids).max(), 1) if is_hex else 1.0)
                 )
                 _cached_scale = scale
@@ -894,19 +845,26 @@ def server(input, output, session):
     @reactive.effect
     @reactive.event(input.btn_run)
     async def _start_run():
-        running.set(True)
         sim = sim_state.get()
         if sim is None:
-            await _init_sim()
+            try:
+                await _init_sim()
+            except Exception as e:
+                import logging
+
+                logging.getLogger(__name__).exception("Init failed")
+                ui.notification_show(f"Init failed: {e}", type="error", duration=10)
+                return
+        running.set(True)
 
     @reactive.effect
     async def _run_tick():
-        nonlocal _cached_scale
         """Self-scheduling run loop using invalidate_later.
 
         Each invocation does one batch, sets reactive values, then returns.
         Shiny flushes outputs between invocations so the UI stays live.
         """
+        nonlocal _cached_scale
         if not running.get():
             return
         sim = sim_state.get()
@@ -936,7 +894,7 @@ def server(input, output, session):
                 is_hex = hasattr(mesh, "_edge")
                 scale = (
                     _cached_scale
-                    if _cached_scale not in (0, 1.0) and is_hex
+                    if _cached_scale is not None and is_hex
                     else (80.0 / max(abs(mesh.centroids).max(), 1) if is_hex else 1.0)
                 )
                 _cached_scale = scale
@@ -1126,7 +1084,7 @@ def server(input, output, session):
     _cached_subsample_idx = (
         None  # Columbia subsample / Curonian water indices (computed once)
     )
-    _cached_scale = 1.0
+    _cached_scale = None
     _cached_water_n = 0
     _cached_water_layer = None  # Preserved across steps to prevent grid disappearance
 
