@@ -713,7 +713,7 @@ def server(input, output, session):
             )
 
         # ── Initialize streaming chart bins ──
-        ws = sim.mesh._workspace
+        ws = getattr(sim.mesh, "_workspace", None)
         if ws and "Gradient [ upstream ]" in ws.hexmaps:
             up_hm = ws.hexmaps["Gradient [ upstream ]"]
             up_vals = up_hm.values[up_hm.values > 0]
@@ -1807,6 +1807,26 @@ def server(input, output, session):
                 views=[map_view(controller=True)],
             )
             _viewer_initialized = True
+            # Store metadata only on success (map and legend stay in sync)
+            _viewer_meta.set(
+                {
+                    "format": hm.format,
+                    "version": hm.version,
+                    "ncols": hm.height,
+                    "nrows": hm.width,
+                    "total_cells": hm.n_hexagons,
+                    "water_cells": n_water,
+                    "cell_size": hm.cell_size if hm.cell_size > 0 else None,
+                    "edge": edge,
+                    "origin": hm.origin,
+                    "nodata": hm.nodata,
+                    "vmin": float(np.nanmin(water_values)),
+                    "vmax": float(np.nanmax(water_values)),
+                    "vmean": float(np.nanmean(water_values)),
+                    "n_unique": int(len(np.unique(water_values))),
+                    "layer_name": Path(hxn_path).parent.name,
+                }
+            )
             ui.notification_show(
                 f"Loaded {n_pts:,} hexagons (zoom={zoom:.1f})",
                 type="message",
@@ -1814,30 +1834,9 @@ def server(input, output, session):
             )
         except Exception as e:
             ui.notification_show(f"Map update failed: {e}", type="error", duration=10)
-            import traceback
+            import logging
 
-            traceback.print_exc()
-
-        # Store metadata for display
-        _viewer_meta.set(
-            {
-                "format": hm.format,
-                "version": hm.version,
-                "ncols": hm.height,  # data rows = grid ncols (short axis)
-                "nrows": hm.width,  # data stride = grid nrows (long axis)
-                "total_cells": hm.n_hexagons,
-                "water_cells": n_water,
-                "cell_size": hm.cell_size if hm.cell_size > 0 else None,
-                "edge": edge,
-                "origin": hm.origin,
-                "nodata": hm.nodata,
-                "vmin": float(np.nanmin(water_values)),
-                "vmax": float(np.nanmax(water_values)),
-                "vmean": float(np.nanmean(water_values)),
-                "n_unique": int(len(np.unique(water_values))),
-                "layer_name": Path(hxn_path).parent.name,
-            }
-        )
+            logging.getLogger(__name__).exception("Viewer map update failed")
 
     _viewer_meta = reactive.Value({})
 
