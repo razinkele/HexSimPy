@@ -356,7 +356,7 @@ def _apply_current_advection_vec(pool, mesh, fields, alive_mask, rng):
             tris,
             mesh._water_nbrs,
             mesh._water_nbr_count,
-            np.ascontiguousarray(mesh.centroids),
+            mesh.centroids_c,
             u,
             v,
             speeds,

@@ -1,6 +1,8 @@
 """Triangular mesh constructed from a regular lat/lon grid."""
 from __future__ import annotations
 
+from functools import cached_property
+
 import numpy as np
 from scipy.spatial import Delaunay
 import xarray as xr
@@ -97,6 +99,11 @@ class TriMesh:
                     self._water_nbrs[i, k] = nb
                     k += 1
             self._water_nbr_count[i] = k
+
+    @cached_property
+    def centroids_c(self) -> np.ndarray:
+        """Contiguous view of centroids for Numba kernels. Computed once per mesh."""
+        return np.ascontiguousarray(self.centroids)
 
     def water_neighbors(self, tri_idx):
         cnt = self._water_nbr_count[tri_idx]
