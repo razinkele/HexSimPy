@@ -13,6 +13,7 @@ GridMeta — ``hm.width`` is the data stride (= grid nrows), and
 
 from __future__ import annotations
 
+from functools import cached_property
 from pathlib import Path
 
 import numpy as np
@@ -114,6 +115,15 @@ class HexMesh:
         # Precompute padded water-neighbor arrays for vectorized movement
         self._water_nbrs = neighbors.copy()
         self._water_nbr_count = np.sum(neighbors >= 0, axis=1).astype(np.intp)
+
+    @cached_property
+    def centroids_c(self) -> np.ndarray:
+        """Contiguous view of centroids for Numba kernels. Computed once per mesh.
+
+        Duck-types TriMesh.centroids_c so salmon_ibm.movement can use either
+        mesh type via the same attribute.
+        """
+        return np.ascontiguousarray(self.centroids)
 
     @property
     def n_triangles(self) -> int:
