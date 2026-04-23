@@ -10,10 +10,14 @@ Only import: re, numpy, ast.
 from __future__ import annotations
 
 import re
+from collections import OrderedDict
+
 import numpy as np
 
 
-_translate_cache: dict[str, str] = {}
+# LRU-bounded cache: prevents scenario-authored expression flooding.
+_TRANSLATE_CACHE_MAX = 256
+_translate_cache: "OrderedDict[str, str]" = OrderedDict()
 
 
 def translate_hexsim_expr(expr: str) -> str:
@@ -30,6 +34,7 @@ def translate_hexsim_expr(expr: str) -> str:
     """
     cached = _translate_cache.get(expr)
     if cached is not None:
+        _translate_cache.move_to_end(expr)  # mark as recently used
         return cached
 
     def _replace_quotes(m: re.Match) -> str:
@@ -44,8 +49,8 @@ def translate_hexsim_expr(expr: str) -> str:
     result = re.sub(r"'([^']+)'|\"([^\"]+)\"", _replace_quotes, expr)
     # Rename Cond to _cond (sign-of-difference semantics: test > 0 = true)
     result = re.sub(r"\bCond\b", "_cond", result)
-    if len(_translate_cache) > 10000:
-        _translate_cache.clear()  # prevent unbounded growth
+    if len(_translate_cache) >= _TRANSLATE_CACHE_MAX:
+        _translate_cache.popitem(last=False)  # LRU eviction
     _translate_cache[expr] = result
     return result
 

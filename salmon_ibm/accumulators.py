@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import ast
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Union
 import numpy as np
 
-_compiled_expr_cache: dict[str, object] = {}
+# LRU-bounded cache: prevents scenario-authored expression flooding
+# (attacker could submit 9999 distinct expressions to keep cache pegged
+# at near-capacity forever under the old "bulk clear at 10000" approach).
+_EXPR_CACHE_MAX = 256
+_compiled_expr_cache: "OrderedDict[str, object]" = OrderedDict()
 
 
 @dataclass
@@ -143,8 +148,18 @@ _ALLOWED_NODE_TYPES = (
     ast.USub,
     ast.UAdd,
     ast.Subscript,
-    ast.Attribute,  # validated: only _rng.random allowed (see _validate_expression)
+    ast.Attribute,  # validated: only _rng.<allowlisted method> (see _validate_expression)
 )
+
+# Methods on _rng that scenario expressions may call (numpy.random.Generator).
+# Extend only if a real HexSim scenario uses it AND the method is non-mutating
+# (i.e., does NOT include seed, bytes, or any method with side effects).
+_ALLOWED_RNG_METHODS = frozenset({"random", "uniform", "normal", "integers"})
+
+# DoS guard: reject _rng.<method>(N) when N exceeds this bound.
+# Prevents scenario XML from allocating GB-scale arrays via e.g. _rng.random(10**9).
+# 1M floats = 8 MB; typical legitimate usage is <= n_agents (<100k).
+_RNG_ARG_MAX = 1_000_000
 
 # Functions available in the HexSim DSL namespace (produced by translate_hexsim_expr)
 _HEXSIM_FUNCTIONS = frozenset(
@@ -184,17 +199,39 @@ def _validate_expression(expr, extra_names=None):
                 f"Disallowed construct in expression: {type(node).__name__}"
             )
         if isinstance(node, ast.Attribute):
-            # Only allow attribute access on _rng (e.g., _rng.random)
+            # Only allow attribute access on _rng, and only for allowlisted methods.
             if not (isinstance(node.value, ast.Name) and node.value.id == "_rng"):
                 raise ValueError(
                     f"Disallowed attribute access in expression: "
-                    f"only '_rng.<attr>' is permitted, got "
+                    f"only '_rng.<method>' is permitted, got "
                     f"'{ast.dump(node.value)}.{node.attr}'"
+                )
+            if node.attr not in _ALLOWED_RNG_METHODS:
+                raise ValueError(
+                    f"Disallowed _rng method '{node.attr}'. "
+                    f"Allowed: {sorted(_ALLOWED_RNG_METHODS)}"
                 )
         if isinstance(node, ast.Call):
             if isinstance(node.func, ast.Name):
                 if node.func.id not in allowed_names:
                     raise ValueError(f"Unknown function in expression: {node.func.id}")
+            elif isinstance(node.func, ast.Attribute):
+                # Attribute-form calls were already validated by the ast.Attribute
+                # branch above. Add a DoS guard on literal numeric args to prevent
+                # e.g. _rng.random(10**9).
+                for arg in node.args:
+                    if isinstance(arg, ast.Constant) and isinstance(
+                        arg.value, (int, float)
+                    ):
+                        if arg.value > _RNG_ARG_MAX:
+                            raise ValueError(
+                                f"Argument {arg.value} too large in _rng call "
+                                f"(exceeds _RNG_ARG_MAX={_RNG_ARG_MAX})"
+                            )
+            else:
+                raise ValueError(
+                    f"Disallowed call target: {type(node.func).__name__}"
+                )
 
 
 class _LazyAccDict:
@@ -259,11 +296,13 @@ def updater_expression(
             rng = np.random.default_rng()
         namespace = build_hexsim_namespace(globals_dict, acc_dict, rng, n_masked)
         if translated not in _compiled_expr_cache:
-            if len(_compiled_expr_cache) > 10000:
-                _compiled_expr_cache.clear()
+            if len(_compiled_expr_cache) >= _EXPR_CACHE_MAX:
+                _compiled_expr_cache.popitem(last=False)  # LRU eviction (oldest)
             _compiled_expr_cache[translated] = compile(
                 translated, "<hexsim-expr>", "eval"
             )
+        else:
+            _compiled_expr_cache.move_to_end(translated)  # mark as recently used
         result = eval(_compiled_expr_cache[translated], {"__builtins__": {}}, namespace)
     else:
         # Legacy mode: bare accumulator names in namespace

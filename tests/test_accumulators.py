@@ -550,3 +550,81 @@ def test_accumulator_transfer_conserves_mass_under_clamp():
     # Target must receive exactly 4.0 (no phantom mass).
     np.testing.assert_array_almost_equal(mgr.data[:, 0], [1.0, 1.0])
     np.testing.assert_array_almost_equal(mgr.data[:, 1], [4.0, 4.0])
+
+
+def test_ast_sandbox_allows_rng_whitelisted_methods():
+    """Legitimate _rng methods in the allowlist must pass validation."""
+    from salmon_ibm.accumulators import _validate_expression, _HEXSIM_FUNCTIONS
+
+    # Should not raise:
+    _validate_expression("_rng.random(1)", extra_names=_HEXSIM_FUNCTIONS)
+    _validate_expression("_rng.uniform(0, 1)", extra_names=_HEXSIM_FUNCTIONS)
+    _validate_expression("_rng.normal(0, 1)", extra_names=_HEXSIM_FUNCTIONS)
+    _validate_expression("_rng.integers(0, 10)", extra_names=_HEXSIM_FUNCTIONS)
+
+
+def test_ast_sandbox_rejects_non_allowlisted_rng_methods():
+    """_rng.seed, _rng.bytes, _rng.choice, etc. must be rejected (DoS/attack surface)."""
+    import pytest
+    from salmon_ibm.accumulators import _validate_expression, _HEXSIM_FUNCTIONS
+
+    for malicious in [
+        "_rng.seed(42)",
+        "_rng.bytes(1000)",
+        "_rng.permutation(10)",
+        "_rng.choice([1, 2, 3])",
+    ]:
+        with pytest.raises(ValueError, match=r"method|Disallowed"):
+            _validate_expression(malicious, extra_names=_HEXSIM_FUNCTIONS)
+
+
+def test_ast_sandbox_rejects_huge_rng_arg_dos():
+    """_rng.random(10**9) must fail — prevents GB-scale allocation DoS from scenario XML."""
+    import pytest
+    from salmon_ibm.accumulators import _validate_expression, _HEXSIM_FUNCTIONS, _RNG_ARG_MAX
+
+    with pytest.raises(ValueError, match="too large"):
+        _validate_expression("_rng.random(10000000000)", extra_names=_HEXSIM_FUNCTIONS)
+
+    # Normal-sized arg still passes.
+    _validate_expression(f"_rng.random({_RNG_ARG_MAX - 1})", extra_names=_HEXSIM_FUNCTIONS)
+
+
+def test_ast_sandbox_rejects_method_call_on_non_rng_attribute():
+    """Method calls via attribute access on anything other than _rng must fail."""
+    import pytest
+    from salmon_ibm.accumulators import _validate_expression, _HEXSIM_FUNCTIONS
+
+    with pytest.raises(ValueError):
+        _validate_expression("foo.bar(1)", extra_names=_HEXSIM_FUNCTIONS)
+
+
+def test_compiled_expr_cache_bounded_to_lru_size():
+    """Cache must evict oldest entries when over capacity; should not grow unbounded."""
+    from salmon_ibm.accumulators import _compiled_expr_cache, _EXPR_CACHE_MAX
+    from collections import OrderedDict
+
+    _compiled_expr_cache.clear()
+    # Use the cache's own insertion API by calling updater_expression, or simulate:
+    for i in range(_EXPR_CACHE_MAX + 10):
+        expr = f"expr_{i}"
+        if expr not in _compiled_expr_cache:
+            if len(_compiled_expr_cache) >= _EXPR_CACHE_MAX:
+                _compiled_expr_cache.popitem(last=False)
+            _compiled_expr_cache[expr] = compile(str(i), "<test>", "eval")
+    assert len(_compiled_expr_cache) <= _EXPR_CACHE_MAX, (
+        f"Cache grew to {len(_compiled_expr_cache)}, expected <= {_EXPR_CACHE_MAX}"
+    )
+    # Oldest entries should have been evicted (first 10).
+    assert "expr_0" not in _compiled_expr_cache
+    assert f"expr_{_EXPR_CACHE_MAX + 9}" in _compiled_expr_cache
+
+
+def test_translate_cache_bounded_to_lru_size():
+    """hexsim_expr._translate_cache must also be LRU-bounded."""
+    from salmon_ibm.hexsim_expr import translate_hexsim_expr, _translate_cache, _TRANSLATE_CACHE_MAX
+
+    _translate_cache.clear()
+    for i in range(_TRANSLATE_CACHE_MAX + 10):
+        translate_hexsim_expr(f"'global_{i}' + 1")
+    assert len(_translate_cache) <= _TRANSLATE_CACHE_MAX
