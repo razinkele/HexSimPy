@@ -70,6 +70,17 @@ class AgentPool:
         self.accumulators = None  # AccumulatorManager | None
         self.traits = None  # TraitManager | None
 
+        # Invariant: every declared array field must be initialized as an ndarray.
+        # Guards against adding a field to ARRAY_FIELDS but forgetting to init it.
+        missing = [
+            f for f in self.ARRAY_FIELDS
+            if not isinstance(getattr(self, f, None), np.ndarray)
+        ]
+        assert not missing, (
+            f"AgentPool.__init__ missed ARRAY_FIELDS: {missing}. "
+            f"Add initialization or update ARRAY_FIELDS."
+        )
+
     def get_agent(self, idx: int) -> "FishAgent":
         return FishAgent(self, idx)
 

@@ -75,3 +75,22 @@ def test_push_temperature_and_t3h_mean():
     means = pool.t3h_mean()
     assert means[0] == pytest.approx(12.0)
     assert means[1] == pytest.approx(22.0)
+
+
+def test_agent_pool_init_covers_all_array_fields():
+    """Every field in ARRAY_FIELDS must be set to an ndarray by __init__.
+
+    Guards against adding a field to ARRAY_FIELDS but forgetting to initialize it.
+    """
+    import numpy as np
+    from salmon_ibm.agents import AgentPool
+
+    pool = AgentPool(n=3, start_tri=0, rng_seed=0)
+    missing = []
+    for field in AgentPool.ARRAY_FIELDS:
+        attr = getattr(pool, field, None)
+        if not isinstance(attr, np.ndarray):
+            missing.append(field)
+    assert not missing, (
+        f"AgentPool.__init__ did not initialize these ARRAY_FIELDS as ndarrays: {missing}"
+    )
