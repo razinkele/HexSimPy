@@ -15,6 +15,7 @@ class TestGeneratedHexmapEvent:
             name="stress",
             expression="maximum(temperature - 18.0, 0.0)",
             output_name="stress_map",
+            allowed_landscape_keys=("temperature",),
         )
         mask = np.ones(5, dtype=bool)
         event.execute(pop, landscape, t=0, mask=mask)
@@ -32,11 +33,74 @@ class TestGeneratedHexmapEvent:
             name="seasonal",
             expression="base_temp + 5.0 * sin(t * pi / 180)",
             output_name="current_temp",
+            allowed_landscape_keys=("base_temp",),
         )
         mask = np.ones(5, dtype=bool)
         event.execute(pop, landscape, t=90, mask=mask)
         expected = base + 5.0
         np.testing.assert_array_almost_equal(landscape["current_temp"], expected)
+
+    def test_landscape_key_not_injected_without_allowlist(self):
+        """Top-level landscape ndarrays must NOT be auto-injected by substring match."""
+        import pytest
+        from salmon_ibm.events_phase3 import GeneratedHexmapEvent
+
+        pop = MockPopulation(5)
+        landscape = {
+            "temperature": np.array([10.0, 15.0, 20.0, 25.0]),
+            "n_cells": 4,
+        }
+        # Expression references 'temperature' but event does NOT list it in allowlist.
+        event = GeneratedHexmapEvent(
+            name="stress",
+            expression="maximum(temperature - 18.0, 0.0)",
+            output_name="stress_map",
+            # allowed_landscape_keys defaults to ()
+        )
+        mask = np.ones(5, dtype=bool)
+        # eval will fail because 'temperature' is not in the namespace.
+        with pytest.raises(NameError):
+            event.execute(pop, landscape, t=0, mask=mask)
+
+    def test_spatial_data_key_cannot_shadow_safe_math(self):
+        """A malicious spatial layer named 'sqrt' must NOT overwrite np.sqrt."""
+        from salmon_ibm.events_phase3 import GeneratedHexmapEvent
+
+        pop = MockPopulation(5)
+        landscape = {
+            "n_cells": 4,
+            "spatial_data": {
+                "sqrt": np.array([999.0, 999.0, 999.0, 999.0]),  # attempt to shadow
+                "depth": np.array([1.0, 4.0, 9.0, 16.0]),
+            },
+        }
+        event = GeneratedHexmapEvent(
+            name="rooted",
+            expression="sqrt(depth)",
+            output_name="rooted_depth",
+        )
+        mask = np.ones(5, dtype=bool)
+        event.execute(pop, landscape, t=0, mask=mask)
+        # np.sqrt should have been used, not the spatial_data "sqrt" array.
+        np.testing.assert_array_almost_equal(
+            landscape["rooted_depth"], [1.0, 2.0, 3.0, 4.0]
+        )
+
+    def test_output_name_rejected_for_protected_landscape_key(self):
+        """output_name='fields' or 'mesh' must raise ValueError."""
+        import pytest
+        from salmon_ibm.events_phase3 import GeneratedHexmapEvent
+
+        pop = MockPopulation(5)
+        landscape = {"n_cells": 4}
+        event = GeneratedHexmapEvent(
+            name="oops",
+            expression="t + 1",
+            output_name="fields",  # protected
+        )
+        mask = np.ones(5, dtype=bool)
+        with pytest.raises(ValueError, match="protected"):
+            event.execute(pop, landscape, t=0, mask=mask)
 
 
 class TestRangeDynamicsEvent:

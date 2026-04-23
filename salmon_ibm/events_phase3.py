@@ -73,18 +73,48 @@ class TransitionEvent(Event):
         traits.set(self.trait_name, new_cats, mask=mask)
 
 
+# Landscape keys that must NEVER be overwritten by GeneratedHexmapEvent output.
+# These are structural/infrastructure entries used by the event engine.
+_PROTECTED_LANDSCAPE_KEYS = frozenset({
+    "fields", "mesh", "spatial_data", "n_cells", "multi_pop_mgr",
+    "step_alive_mask", "rng", "global_variables",
+})
+
+
 @register_event("generated_hexmap")
 @dataclass
 class GeneratedHexmapEvent(Event):
-    """Create or update a hex map using an algebraic expression."""
+    """Create or update a hex map using an algebraic expression.
+
+    Expression namespace:
+      - _SAFE_MATH (math functions)
+      - t (current timestep)
+      - density (if 'density' appears literally in the expression)
+      - All keys from landscape['spatial_data'] that are ndarrays, EXCEPT
+        keys that would shadow _SAFE_MATH functions.
+      - Any key listed in `allowed_landscape_keys` that resolves to an
+        ndarray in landscape (e.g. 'temperature'), EXCEPT _SAFE_MATH keys.
+
+    Note: landscape keys are NOT injected by substring-match on the
+    expression any more; that behaviour was ambiguous and exploitable.
+    Use `allowed_landscape_keys` to opt a specific landscape variable into scope.
+    """
 
     expression: str = ""
     output_name: str = ""
+    allowed_landscape_keys: tuple[str, ...] = ()
 
     def execute(self, population, landscape, t, mask):
         from salmon_ibm.accumulators import _validate_expression, _SAFE_MATH
 
         _validate_expression(self.expression)
+
+        if self.output_name in _PROTECTED_LANDSCAPE_KEYS:
+            raise ValueError(
+                f"GeneratedHexmapEvent.output_name={self.output_name!r} would "
+                f"overwrite a protected landscape key."
+            )
+
         namespace = dict(_SAFE_MATH)
         namespace["t"] = t
         if "density" in self.expression:
@@ -94,19 +124,21 @@ class GeneratedHexmapEvent(Event):
                 positions = population.tri_idx[alive & mask]
                 density = np.bincount(positions, minlength=n_cells).astype(np.float64)
                 namespace["density"] = density
-        # Inject spatial_data arrays referenced by the expression
+        # Inject spatial_data arrays (scenario-declared spatial layers).
+        # Reject keys that would shadow _SAFE_MATH names (e.g. 'sqrt', 'clip')
+        # — a scenario could otherwise corrupt safe-math functions silently.
         spatial_data = landscape.get("spatial_data", {})
         for key, value in spatial_data.items():
+            if key in _SAFE_MATH:
+                continue  # never let a spatial layer shadow a math function
             if isinstance(value, np.ndarray) and key not in namespace:
                 namespace[key] = value
-        # Also inject top-level landscape ndarrays that appear in the expression
-        # (e.g. base_temp passed directly), but only if explicitly referenced
-        for key, value in landscape.items():
-            if (
-                isinstance(value, np.ndarray)
-                and key not in namespace
-                and key in self.expression
-            ):
+        # Explicit allowlist for non-spatial_data landscape ndarrays.
+        for key in self.allowed_landscape_keys:
+            if key in _SAFE_MATH:
+                continue
+            value = landscape.get(key)
+            if isinstance(value, np.ndarray) and key not in namespace:
                 namespace[key] = value
         result = eval(self.expression, {"__builtins__": {}}, namespace)
         landscape[self.output_name] = np.asarray(result, dtype=np.float64)
