@@ -140,7 +140,7 @@ class InteractionEvent(Event):
                                 acc_idx = pop_a.accumulator_mgr._resolve_idx(
                                     self.resource_gain_acc
                                 )
-                                pop_a.accumulator_mgr.data[a_idx, acc_idx] += (
+                                pop_a.accumulator_mgr.data[acc_idx, a_idx] += (
                                     self.resource_gain_amount
                                 )
 

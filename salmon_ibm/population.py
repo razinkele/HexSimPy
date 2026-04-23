@@ -161,7 +161,7 @@ class Population:
         self.affinity_targets = self.affinity_targets[alive_idx].copy()
         self.spatial_affinity = self.spatial_affinity[alive_idx].copy()
         if self.accumulator_mgr is not None:
-            self.accumulator_mgr.data = self.accumulator_mgr.data[alive_idx].copy()
+            self.accumulator_mgr.data = self.accumulator_mgr.data[:, alive_idx].copy()
             self.accumulator_mgr.n_agents = n_new
         if self.trait_mgr is not None:
             for name in self.trait_mgr._data:
@@ -246,10 +246,10 @@ class Population:
 
         # --- Optional managers ---
         if self.accumulator_mgr is not None:
-            n_acc = self.accumulator_mgr.data.shape[1]
-            new_data = np.empty((new_n, n_acc), dtype=np.float64)
-            new_data[:old_n] = self.accumulator_mgr.data
-            new_data[old_n:] = 0.0
+            n_acc = self.accumulator_mgr.data.shape[0]
+            new_data = np.empty((n_acc, new_n), dtype=np.float64)
+            new_data[:, :old_n] = self.accumulator_mgr.data
+            new_data[:, old_n:] = 0.0
             self.accumulator_mgr.data = new_data
             self.accumulator_mgr.n_agents = new_n
         if self.trait_mgr is not None:

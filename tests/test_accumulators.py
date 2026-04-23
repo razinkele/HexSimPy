@@ -10,7 +10,7 @@ class TestAccumulatorManager:
             AccumulatorDef(name="age"),
         ]
         mgr = AccumulatorManager(n_agents=10, definitions=defs)
-        assert mgr.data.shape == (10, 2)
+        assert mgr.data.shape == (2, 10)
         assert mgr.data.dtype == np.float64
         assert np.all(mgr.data == 0.0)
 
@@ -472,7 +472,7 @@ def test_updater_uptake_can_overdeplete():
     # Each agent extracts 5.0. Total depletion = 15. hex_map goes to -10.
     assert hex_map[0] == pytest.approx(-10.0)
     # Each agent got 5.0
-    assert np.all(mgr.data[:, 0] == pytest.approx(5.0))
+    assert np.all(mgr.data[0, :] == pytest.approx(5.0))
 
 
 def test_updater_uptake_multi_agent_same_cell():
@@ -494,7 +494,7 @@ def test_updater_uptake_multi_agent_same_cell():
     assert hex_map[0] == pytest.approx(80.0), f"Expected 80.0, got {hex_map[0]}"
     # Each agent should have received 10.0
     assert mgr.data[0, 0] == pytest.approx(10.0)
-    assert mgr.data[1, 0] == pytest.approx(10.0)
+    assert mgr.data[0, 1] == pytest.approx(10.0)
 
 
 def test_individual_locations_writes_cell_indices():
@@ -508,7 +508,7 @@ def test_individual_locations_writes_cell_indices():
 
     updater_individual_locations(mgr, "pos", mask, cell_indices=cell_indices)
 
-    np.testing.assert_array_equal(mgr.data[:, 0], [10.0, 20.0, 30.0, 40.0])
+    np.testing.assert_array_equal(mgr.data[0, :], [10.0, 20.0, 30.0, 40.0])
 
 
 def test_accumulator_transfer_clamps_source_to_min_val():
@@ -520,13 +520,13 @@ def test_accumulator_transfer_clamps_source_to_min_val():
         AccumulatorDef(name="tgt", min_val=0.0, max_val=100.0),
     ]
     mgr = AccumulatorManager(n_agents=2, definitions=defs)
-    mgr.data[:, 0] = 5.0  # src = 5, min_val = 1.0
+    mgr.data[0, :] = 5.0  # src = 5, min_val = 1.0
     mask = np.ones(2, dtype=bool)
 
     # Fraction=1.0 would drive src to 0, below min_val=1.0
     updater_accumulator_transfer(mgr, "src", "tgt", mask, fraction=1.0)
 
-    assert np.all(mgr.data[:, 0] >= 1.0), f"src must clamp to min_val=1.0, got {mgr.data[:, 0]}"
+    assert np.all(mgr.data[0, :] >= 1.0), f"src must clamp to min_val=1.0, got {mgr.data[0, :]}"
 
 
 def test_accumulator_transfer_conserves_mass_under_clamp():
@@ -540,16 +540,16 @@ def test_accumulator_transfer_conserves_mass_under_clamp():
         AccumulatorDef(name="tgt", min_val=0.0, max_val=100.0),
     ]
     mgr = AccumulatorManager(n_agents=2, definitions=defs)
-    mgr.data[:, 0] = 5.0  # src = 5, clamp floor 1.0
-    mgr.data[:, 1] = 0.0
+    mgr.data[0, :] = 5.0  # src = 5, clamp floor 1.0
+    mgr.data[1, :] = 0.0
     mask = np.ones(2, dtype=bool)
 
     updater_accumulator_transfer(mgr, "src", "tgt", mask, fraction=1.0)
 
     # src is clamped from 0 back up to 1.0 → actual amount moved was 4.0, not 5.0.
     # Target must receive exactly 4.0 (no phantom mass).
-    np.testing.assert_array_almost_equal(mgr.data[:, 0], [1.0, 1.0])
-    np.testing.assert_array_almost_equal(mgr.data[:, 1], [4.0, 4.0])
+    np.testing.assert_array_almost_equal(mgr.data[0, :], [1.0, 1.0])
+    np.testing.assert_array_almost_equal(mgr.data[1, :], [4.0, 4.0])
 
 
 def test_ast_sandbox_allows_rng_whitelisted_methods():

@@ -245,7 +245,7 @@ class TestHexSimAccumulateEvent:
         from salmon_ibm.events import EveryStep
 
         pop = make_population(3, [0, 0, 0], n_accumulators=1)
-        pop.accumulator_mgr.data[:, 0] = [5.0, 10.0, 15.0]
+        pop.accumulator_mgr.data[0, :] = [5.0, 10.0, 15.0]
 
         evt = HexSimAccumulateEvent(
             name="test_acc", trigger=EveryStep(),
@@ -255,7 +255,7 @@ class TestHexSimAccumulateEvent:
         mask = pop.alive.copy()
         evt.execute(pop, landscape, 0, mask)
 
-        np.testing.assert_array_equal(pop.accumulator_mgr.data[:, 0], [0.0, 0.0, 0.0])
+        np.testing.assert_array_equal(pop.accumulator_mgr.data[0, :], [0.0, 0.0, 0.0])
 
     def test_increment_updater(self):
         """Increment updater should add amount to accumulator."""
@@ -274,7 +274,7 @@ class TestHexSimAccumulateEvent:
         landscape = {"rng": np.random.default_rng(), "spatial_data": {}, "global_variables": {}}
         evt.execute(pop, landscape, 0, pop.alive.copy())
 
-        np.testing.assert_array_almost_equal(pop.accumulator_mgr.data[:, 0], [3.5, 3.5])
+        np.testing.assert_array_almost_equal(pop.accumulator_mgr.data[0, :], [3.5, 3.5])
 
     def test_expression_updater(self):
         """Expression updater should evaluate HexSim DSL expression."""
@@ -282,7 +282,7 @@ class TestHexSimAccumulateEvent:
         from salmon_ibm.events import EveryStep
 
         pop = make_population(2, [0, 0], n_accumulators=2)
-        pop.accumulator_mgr.data[:, 0] = [10.0, 20.0]  # acc_0 = source
+        pop.accumulator_mgr.data[0, :] = [10.0, 20.0]  # acc_0 = source
 
         evt = HexSimAccumulateEvent(
             name="test", trigger=EveryStep(),
@@ -294,7 +294,7 @@ class TestHexSimAccumulateEvent:
         landscape = {"rng": np.random.default_rng(), "spatial_data": {}, "global_variables": {}}
         evt.execute(pop, landscape, 0, pop.alive.copy())
 
-        np.testing.assert_array_almost_equal(pop.accumulator_mgr.data[:, 1], [20.0, 40.0])
+        np.testing.assert_array_almost_equal(pop.accumulator_mgr.data[1, :], [20.0, 40.0])
 
     def test_unknown_function_skipped(self):
         """Unknown updater function should be silently skipped."""
@@ -369,9 +369,15 @@ class TestApplyTraitComboMask:
 
 class TestLazyAccDict:
     def test_lazy_access_returns_masked_values(self):
-        """Accessing a key should return masked column."""
+        """Accessing a key should return masked column.
+
+        Layout: data is (n_acc, n_agents). Row 0 = acc 'a' across 3 agents.
+        Mask selects agents 0 and 2.
+        """
         from salmon_ibm.accumulators import _LazyAccDict
-        data = np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+        # 2 accumulators ('a', 'b') x 3 agents
+        data = np.array([[1.0, 3.0, 5.0],   # acc 'a' values for agents 0,1,2
+                         [2.0, 4.0, 6.0]])  # acc 'b' values for agents 0,1,2
         mask = np.array([True, False, True])
         name_to_idx = {"a": 0, "b": 1}
 
@@ -382,7 +388,7 @@ class TestLazyAccDict:
     def test_missing_key_raises(self):
         """Accessing nonexistent key should raise KeyError."""
         from salmon_ibm.accumulators import _LazyAccDict
-        data = np.zeros((2, 1))
+        data = np.zeros((1, 2))  # (n_acc=1, n_agents=2)
         mask = np.ones(2, dtype=bool)
         d = _LazyAccDict(data, mask, {"x": 0})
         with pytest.raises(KeyError):
@@ -391,7 +397,7 @@ class TestLazyAccDict:
     def test_contains(self):
         """__contains__ should check name_to_idx."""
         from salmon_ibm.accumulators import _LazyAccDict
-        data = np.zeros((2, 1))
+        data = np.zeros((1, 2))  # (n_acc=1, n_agents=2)
         mask = np.ones(2, dtype=bool)
         d = _LazyAccDict(data, mask, {"x": 0})
         assert "x" in d
@@ -400,7 +406,7 @@ class TestLazyAccDict:
     def test_caches_on_repeated_access(self):
         """Second access to same key should return cached array."""
         from salmon_ibm.accumulators import _LazyAccDict
-        data = np.array([[1.0], [2.0]])
+        data = np.array([[1.0, 2.0]])  # (n_acc=1, n_agents=2)
         mask = np.ones(2, dtype=bool)
         d = _LazyAccDict(data, mask, {"x": 0})
         r1 = d["x"]

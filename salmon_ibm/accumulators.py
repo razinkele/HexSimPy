@@ -38,7 +38,12 @@ class AccumulatorManager:
             d.name: i for i, d in enumerate(definitions)
         }
         n_acc = len(definitions)
-        self.data = np.zeros((n_agents, n_acc), dtype=np.float64)
+        # Layout: (n_accumulators, n_agents). Column-major with respect to the
+        # update pattern. Every updater touches a single accumulator column
+        # across many agents; data[idx, :] is contiguous and cache-friendly.
+        # The inverse (n_agents, n_acc) would be a strided gather per update.
+        # See docs/superpowers/plans/2026-04-24-accumulator-layout-transpose.md.
+        self.data = np.zeros((n_acc, n_agents), dtype=np.float64)
 
     def index_of(self, name: str) -> int:
         return self._name_to_idx[name]
@@ -50,7 +55,7 @@ class AccumulatorManager:
 
     def get(self, key: Union[str, int]) -> np.ndarray:
         idx = self._resolve_idx(key)
-        return self.data[:, idx]
+        return self.data[idx, :]
 
     def set(
         self,
@@ -66,9 +71,9 @@ class AccumulatorManager:
         if defn.max_val is not None:
             clamped = np.minimum(clamped, defn.max_val)
         if mask is not None:
-            self.data[mask, idx] = clamped
+            self.data[idx, mask] = clamped
         else:
-            self.data[:, idx] = clamped
+            self.data[idx, :] = clamped
 
 
 # ---------------------------------------------------------------------------
@@ -83,19 +88,19 @@ def updater_clear(manager, acc_name, mask):
     val = 0.0
     if defn.min_val is not None:
         val = max(val, defn.min_val)
-    manager.data[mask, idx] = val
+    manager.data[idx, mask] = val
 
 
 def updater_increment(manager, acc_name, mask, *, amount):
     """Add a fixed quantity to accumulator for masked agents."""
     idx = manager._resolve_idx(acc_name)
     defn = manager.definitions[idx]
-    new_vals = manager.data[mask, idx] + amount
+    new_vals = manager.data[idx, mask] + amount
     if defn.min_val is not None:
         new_vals = np.maximum(new_vals, defn.min_val)
     if defn.max_val is not None:
         new_vals = np.minimum(new_vals, defn.max_val)
-    manager.data[mask, idx] = new_vals
+    manager.data[idx, mask] = new_vals
 
 
 def updater_stochastic_increment(manager, acc_name, mask, *, low, high, rng):
@@ -104,12 +109,12 @@ def updater_stochastic_increment(manager, acc_name, mask, *, low, high, rng):
     defn = manager.definitions[idx]
     n_masked = mask.sum()
     increments = rng.uniform(low, high, size=n_masked)
-    new_vals = manager.data[mask, idx] + increments
+    new_vals = manager.data[idx, mask] + increments
     if defn.min_val is not None:
         new_vals = np.maximum(new_vals, defn.min_val)
     if defn.max_val is not None:
         new_vals = np.minimum(new_vals, defn.max_val)
-    manager.data[mask, idx] = new_vals
+    manager.data[idx, mask] = new_vals
 
 
 # --- Expression updater helpers ---
@@ -254,7 +259,7 @@ class _LazyAccDict:
             col = self._idx.get(name)
             if col is None:
                 raise KeyError(name)
-            self._cache[name] = self._data[self._mask, col]
+            self._cache[name] = self._data[col, self._mask]
         return self._cache[name]
 
     def __contains__(self, name):
@@ -309,7 +314,7 @@ def updater_expression(
         _validate_expression(expression)
         namespace = dict(_SAFE_MATH)
         for name, col_idx in manager._name_to_idx.items():
-            namespace[name] = manager.data[mask, col_idx]
+            namespace[name] = manager.data[col_idx, mask]
         result = eval(expression, {"__builtins__": {}}, namespace)
 
     result = np.asarray(result, dtype=np.float64)
@@ -335,7 +340,7 @@ def updater_expression(
         result = np.maximum(result, defn.min_val)
     if defn.max_val is not None:
         result = np.minimum(result, defn.max_val)
-    manager.data[mask, idx] = result
+    manager.data[idx, mask] = result
 
 
 def updater_time_step(manager, acc_name, mask, *, timestep, modulus=None):
@@ -346,13 +351,13 @@ def updater_time_step(manager, acc_name, mask, *, timestep, modulus=None):
         if modulus is not None and modulus > 0
         else float(timestep)
     )
-    manager.data[mask, idx] = value
+    manager.data[idx, mask] = value
 
 
 def updater_individual_id(manager, acc_name, mask, *, agent_ids):
     """Write each agent's unique ID to accumulator."""
     idx = manager._resolve_idx(acc_name)
-    manager.data[mask, idx] = agent_ids[mask].astype(np.float64)
+    manager.data[idx, mask] = agent_ids[mask].astype(np.float64)
 
 
 def updater_stochastic_trigger(manager, acc_name, mask, *, probability, rng):
@@ -360,7 +365,7 @@ def updater_stochastic_trigger(manager, acc_name, mask, *, probability, rng):
     idx = manager._resolve_idx(acc_name)
     n_masked = mask.sum()
     triggers = (rng.random(n_masked) < probability).astype(np.float64)
-    manager.data[mask, idx] = triggers
+    manager.data[idx, mask] = triggers
 
 
 def updater_quantify_location(manager, acc_name, mask, *, hex_map, cell_indices):
@@ -371,7 +376,7 @@ def updater_quantify_location(manager, acc_name, mask, *, hex_map, cell_indices)
     valid = (cells >= 0) & (cells < len(hex_map))
     result = np.zeros(int(mask.sum()), dtype=np.float64)
     result[valid] = hex_map[cells[valid]]
-    manager.data[mask, idx] = result
+    manager.data[idx, mask] = result
 
 
 # --- Remaining 17 updater functions (complete HexSim set) ---
@@ -394,7 +399,7 @@ def updater_accumulator_transfer(
     src_idx = manager._resolve_idx(source_name)
     tgt_idx = manager._resolve_idx(target_name)
 
-    src_before = manager.data[mask, src_idx].copy()
+    src_before = manager.data[src_idx, mask].copy()
     nominal_amount = src_before * fraction
     src_defn = manager.definitions[src_idx]
     new_src = src_before - nominal_amount
@@ -402,18 +407,18 @@ def updater_accumulator_transfer(
         new_src = np.maximum(new_src, src_defn.min_val)
     if src_defn.max_val is not None:
         new_src = np.minimum(new_src, src_defn.max_val)
-    manager.data[mask, src_idx] = new_src
+    manager.data[src_idx, mask] = new_src
 
     # Actual mass moved = how much source actually changed. Preserves conservation.
     actual_amount = src_before - new_src
 
     tgt_defn = manager.definitions[tgt_idx]
-    new_tgt = manager.data[mask, tgt_idx] + actual_amount
+    new_tgt = manager.data[tgt_idx, mask] + actual_amount
     if tgt_defn.min_val is not None:
         new_tgt = np.maximum(new_tgt, tgt_defn.min_val)
     if tgt_defn.max_val is not None:
         new_tgt = np.minimum(new_tgt, tgt_defn.max_val)
-    manager.data[mask, tgt_idx] = new_tgt
+    manager.data[tgt_idx, mask] = new_tgt
 
 
 def updater_allocated_hexagons(
@@ -437,7 +442,7 @@ def updater_allocated_hexagons(
             if agent_range is not None and hasattr(agent_range, "cells")
             else 0
         )
-        manager.data[i, idx] = float(count)
+        manager.data[idx, i] = float(count)
 
 
 def updater_explored_hexagons(
@@ -454,7 +459,7 @@ def updater_explored_hexagons(
         explored = (
             explored_sets.get(i, set()) if isinstance(explored_sets, dict) else set()
         )
-        manager.data[i, idx] = float(len(explored))
+        manager.data[idx, i] = float(len(explored))
 
 
 def updater_group_size(
@@ -472,7 +477,7 @@ def updater_group_size(
     size_map = dict(zip(unique, counts))
     for i in masked_idx:
         gid = group_ids[i]
-        manager.data[i, idx] = float(size_map.get(gid, 0)) if gid >= 0 else 0.0
+        manager.data[idx, i] = float(size_map.get(gid, 0)) if gid >= 0 else 0.0
 
 
 def updater_group_sum(
@@ -491,8 +496,8 @@ def updater_group_sum(
     unique_groups = np.unique(groups[groups >= 0])
     for gid in unique_groups:
         members = masked_idx[groups == gid]
-        total = manager.data[members, src_idx].sum()
-        manager.data[members, tgt_idx] = total
+        total = manager.data[src_idx, members].sum()
+        manager.data[tgt_idx, members] = total
 
 
 def updater_births(
@@ -504,7 +509,7 @@ def updater_births(
 ):
     """Write the number of offspring produced by each agent."""
     idx = manager._resolve_idx(acc_name)
-    manager.data[mask, idx] = birth_counts[mask].astype(np.float64)
+    manager.data[idx, mask] = birth_counts[mask].astype(np.float64)
 
 
 def updater_mate_verification(
@@ -519,9 +524,9 @@ def updater_mate_verification(
     idx = manager._resolve_idx(acc_name)
     masked_idx = np.where(mask)[0]
     for i in masked_idx:
-        mate_id = int(manager.data[i, idx])
+        mate_id = int(manager.data[idx, i])
         if mate_id >= 0 and mate_id < len(alive) and not alive[mate_id]:
-            manager.data[i, idx] = -1.0
+            manager.data[idx, i] = -1.0
 
 
 def updater_quantify_extremes(
@@ -542,7 +547,7 @@ def updater_quantify_extremes(
     valid = (cells >= 0) & (cells < len(hex_map))
     result = np.zeros(int(mask.sum()), dtype=np.float64)
     result[valid] = hex_map[cells[valid]]
-    manager.data[mask, idx] = result
+    manager.data[idx, mask] = result
 
 
 def updater_hexagon_presence(
@@ -560,7 +565,7 @@ def updater_hexagon_presence(
     valid = (cells >= 0) & (cells < len(hex_map))
     result = np.zeros(int(mask.sum()), dtype=np.float64)
     result[valid] = (hex_map[cells[valid]] > threshold).astype(np.float64)
-    manager.data[mask, idx] = result
+    manager.data[idx, mask] = result
 
 
 def updater_uptake(
@@ -577,12 +582,12 @@ def updater_uptake(
     defn = manager.definitions[idx]
     cells = cell_indices[mask]
     extracted = hex_map[cells] * rate
-    new_vals = manager.data[mask, idx] + extracted
+    new_vals = manager.data[idx, mask] + extracted
     if defn.min_val is not None:
         new_vals = np.maximum(new_vals, defn.min_val)
     if defn.max_val is not None:
         new_vals = np.minimum(new_vals, defn.max_val)
-    manager.data[mask, idx] = new_vals
+    manager.data[idx, mask] = new_vals
     # Use unbuffered subtract to handle repeated cell indices correctly
     np.subtract.at(hex_map, cells, extracted)
 
@@ -596,7 +601,7 @@ def updater_individual_locations(
 ):
     """Write each agent's current cell index (patch ID) to accumulator."""
     idx = manager._resolve_idx(acc_name)
-    manager.data[mask, idx] = cell_indices[mask].astype(np.float64)
+    manager.data[idx, mask] = cell_indices[mask].astype(np.float64)
 
 
 def updater_resources_allocated(
@@ -617,9 +622,9 @@ def updater_resources_allocated(
         )
         if agent_range is not None and hasattr(agent_range, "cells"):
             total_resource = sum(resource_map[c] for c in agent_range.cells)
-            manager.data[i, idx] = total_resource
+            manager.data[idx, i] = total_resource
         else:
-            manager.data[i, idx] = 0.0
+            manager.data[idx, i] = 0.0
 
 
 def updater_resources_explored(
@@ -637,7 +642,7 @@ def updater_resources_explored(
             explored_sets.get(i, set()) if isinstance(explored_sets, dict) else set()
         )
         total = sum(resource_map[c] for c in explored)
-        manager.data[i, idx] = float(total)
+        manager.data[idx, i] = float(total)
 
 
 def updater_subpopulation_assign(
@@ -656,7 +661,7 @@ def updater_subpopulation_assign(
         return
     n = min(n_select, len(candidates))
     selected = rng.choice(candidates, size=n, replace=False)
-    manager.data[selected, idx] = value
+    manager.data[idx, selected] = value
 
 
 def updater_subpopulation_selector(
@@ -675,7 +680,7 @@ def updater_subpopulation_selector(
     for gid in np.unique(groups[groups >= 0]):
         members = masked_idx[groups == gid]
         selected = members[:n_per_group]
-        manager.data[selected, idx] = value
+        manager.data[idx, selected] = value
 
 
 def updater_trait_value_index(
@@ -689,7 +694,7 @@ def updater_trait_value_index(
     """Write each agent's trait category index to accumulator."""
     idx = manager._resolve_idx(acc_name)
     trait_vals = trait_mgr.get(trait_name)
-    manager.data[mask, idx] = trait_vals[mask].astype(np.float64)
+    manager.data[idx, mask] = trait_vals[mask].astype(np.float64)
 
 
 def updater_data_lookup(
@@ -703,8 +708,8 @@ def updater_data_lookup(
     """Look up values in a table keyed by another accumulator's integer value."""
     idx = manager._resolve_idx(acc_name)
     key_idx = manager._resolve_idx(key_acc_name)
-    keys = manager.data[mask, key_idx].astype(int)
+    keys = manager.data[key_idx, mask].astype(int)
     valid = (keys >= 0) & (keys < len(lookup_table))
     result = np.zeros(mask.sum(), dtype=np.float64)
     result[valid] = lookup_table[keys[valid]]
-    manager.data[mask, idx] = result
+    manager.data[idx, mask] = result

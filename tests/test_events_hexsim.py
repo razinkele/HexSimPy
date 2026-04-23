@@ -24,7 +24,7 @@ class TestHexSimSurvival:
         pop = _make_pop("fish", 5)
         defs = [AccumulatorDef("Survival [ switch ]")]
         pop.accumulator_mgr = AccumulatorManager(5, defs)
-        pop.accumulator_mgr.data[:, 0] = [0.0, 1.0, 0.0, 1.0, 1.0]
+        pop.accumulator_mgr.data[0, :] = [0.0, 1.0, 0.0, 1.0, 1.0]
         mask = pop.alive.copy()
         evt = HexSimSurvivalEvent(name="surv", survival_accumulator="Survival [ switch ]")
         evt.execute(pop, {}, 0, mask)
@@ -49,7 +49,7 @@ class TestHexSimSurvival:
         pop = _make_pop("fish", 4)
         defs = [AccumulatorDef("surv_acc")]
         pop.accumulator_mgr = AccumulatorManager(4, defs)
-        pop.accumulator_mgr.data[:, 0] = [1.0, 2.0, 5.0, 1.0]
+        pop.accumulator_mgr.data[0, :] = [1.0, 2.0, 5.0, 1.0]
         mask = pop.alive.copy()
         evt = HexSimSurvivalEvent(name="surv", survival_accumulator="surv_acc")
         evt.execute(pop, {}, 0, mask)
@@ -59,7 +59,7 @@ class TestHexSimSurvival:
         pop = _make_pop("fish", 4)
         defs = [AccumulatorDef("surv_acc")]
         pop.accumulator_mgr = AccumulatorManager(4, defs)
-        pop.accumulator_mgr.data[:, 0] = [0.0, 0.5, 0.0, 0.99]
+        pop.accumulator_mgr.data[0, :] = [0.0, 0.5, 0.0, 0.99]
         mask = pop.alive.copy()
         evt = HexSimSurvivalEvent(name="surv", survival_accumulator="surv_acc")
         evt.execute(pop, {}, 0, mask)
@@ -115,8 +115,8 @@ class TestDataLookup:
         pop = _make_pop("fish", 3)
         defs = [AccumulatorDef("row"), AccumulatorDef("col"), AccumulatorDef("result")]
         pop.accumulator_mgr = AccumulatorManager(3, defs)
-        pop.accumulator_mgr.data[:, 0] = [0, 1, 2]  # row keys
-        pop.accumulator_mgr.data[:, 1] = [0, 1, 0]  # col keys
+        pop.accumulator_mgr.data[0, :] = [0, 1, 2]  # row keys
+        pop.accumulator_mgr.data[1, :] = [0, 1, 0]  # col keys
         table = np.array([[10, 20], [30, 40], [50, 60]], dtype=float)
         mask = pop.alive.copy()
         evt = DataLookupEvent(
@@ -134,7 +134,7 @@ class TestDataLookup:
         pop = _make_pop("fish", 3)
         defs = [AccumulatorDef("row"), AccumulatorDef("result")]
         pop.accumulator_mgr = AccumulatorManager(3, defs)
-        pop.accumulator_mgr.data[:, 0] = [0, 2, 1]
+        pop.accumulator_mgr.data[0, :] = [0, 2, 1]
         table = np.array([100.0, 200.0, 300.0])
         mask = pop.alive.copy()
         evt = DataLookupEvent(
@@ -150,7 +150,7 @@ class TestDataLookup:
         pop = _make_pop("fish", 3)
         defs = [AccumulatorDef("row"), AccumulatorDef("result")]
         pop.accumulator_mgr = AccumulatorManager(3, defs)
-        pop.accumulator_mgr.data[:, 0] = [-1, 0, 99]  # -1 and 99 are OOB
+        pop.accumulator_mgr.data[0, :] = [-1, 0, 99]  # -1 and 99 are OOB
         table = np.array([10.0, 20.0, 30.0])
         mask = pop.alive.copy()
         evt = DataLookupEvent(

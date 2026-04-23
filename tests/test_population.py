@@ -91,7 +91,7 @@ class TestAddAgents:
         acc_mgr = AccumulatorManager(10, acc_defs)
         pop = Population("test", basic_pool, accumulator_mgr=acc_mgr)
         pop.add_agents(5, np.zeros(5, dtype=int))
-        assert pop.accumulator_mgr.data.shape == (15, 1)
+        assert pop.accumulator_mgr.data.shape == (1, 15)
 
     def test_add_then_compact_roundtrip(self, basic_pop):
         basic_pop.add_agents(5, np.zeros(5, dtype=int))
@@ -113,7 +113,7 @@ def test_compact_with_genome_traits_accumulators():
 
     # Add accumulators
     pop.accumulator_mgr = AccumulatorManager(5, [AccumulatorDef("energy")])
-    pop.accumulator_mgr.data[:, 0] = [10.0, 20.0, 30.0, 40.0, 50.0]
+    pop.accumulator_mgr.data[0, :] = [10.0, 20.0, 30.0, 40.0, 50.0]
 
     # Add traits
     pop.trait_mgr = TraitManager(
@@ -136,8 +136,8 @@ def test_compact_with_genome_traits_accumulators():
 
     # Should have 3 survivors (indices 0, 2, 4)
     assert pop.n == 3
-    assert pop.accumulator_mgr.data.shape == (3, 1)
-    np.testing.assert_array_equal(pop.accumulator_mgr.data[:, 0], [10.0, 30.0, 50.0])
+    assert pop.accumulator_mgr.data.shape == (1, 3)
+    np.testing.assert_array_equal(pop.accumulator_mgr.data[0, :], [10.0, 30.0, 50.0])
     np.testing.assert_array_equal(pop.trait_mgr._data["stage"], [0, 0, 0])
 
 

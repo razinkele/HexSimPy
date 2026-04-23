@@ -456,7 +456,7 @@ class DataLookupEvent(Event):
             result[valid] = self.lookup_table[row_vals[valid]]
 
         tgt_idx = acc_mgr._resolve_idx(self.target_accumulator)
-        acc_mgr.data[alive_idx, tgt_idx] = result
+        acc_mgr.data[tgt_idx, alive_idx] = result
 
 
 @register_event("set_spatial_affinity")
@@ -539,8 +539,8 @@ class SetSpatialAffinityEvent(Event):
         if acc_mgr and self.error_accumulator:
             err_idx = acc_mgr._resolve_idx(self.error_accumulator)
             failed = targets < 0
-            acc_mgr.data[alive_idx[failed], err_idx] = 1.0
-            acc_mgr.data[alive_idx[~failed], err_idx] = 0.0
+            acc_mgr.data[err_idx, alive_idx[failed]] = 1.0
+            acc_mgr.data[err_idx, alive_idx[~failed]] = 0.0
 
 
 @register_event("move")
@@ -749,7 +749,7 @@ class HexSimMoveEvent(Event):
         # Write distance to accumulator if specified
         if acc_mgr and self.dispersal_accumulator:
             d_idx = acc_mgr._resolve_idx(self.dispersal_accumulator)
-            acc_mgr.data[alive_idx, d_idx] = distances
+            acc_mgr.data[d_idx, alive_idx] = distances
 
 
 @register_event("data_probe")

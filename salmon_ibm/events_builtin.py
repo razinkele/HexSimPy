@@ -218,7 +218,7 @@ class IntroductionEvent(Event):
         if population.accumulator_mgr is not None:
             for acc_name, value in self.initial_accumulators.items():
                 idx = population.accumulator_mgr.index_of(acc_name)
-                population.accumulator_mgr.data[new_idx, idx] = value
+                population.accumulator_mgr.data[idx, new_idx] = value
 
 
 @register_event("reproduction")
