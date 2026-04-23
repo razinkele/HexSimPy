@@ -495,3 +495,17 @@ def test_updater_uptake_multi_agent_same_cell():
     # Each agent should have received 10.0
     assert mgr.data[0, 0] == pytest.approx(10.0)
     assert mgr.data[1, 0] == pytest.approx(10.0)
+
+
+def test_individual_locations_writes_cell_indices():
+    """IndividualLocations must write each agent's tri_idx to its accumulator."""
+    from salmon_ibm.accumulators import AccumulatorManager, AccumulatorDef, updater_individual_locations
+
+    defs = [AccumulatorDef(name="pos", min_val=0.0, max_val=None)]
+    mgr = AccumulatorManager(n_agents=4, definitions=defs)
+    cell_indices = np.array([10, 20, 30, 40], dtype=np.int64)
+    mask = np.ones(4, dtype=bool)
+
+    updater_individual_locations(mgr, "pos", mask, cell_indices=cell_indices)
+
+    np.testing.assert_array_equal(mgr.data[:, 0], [10.0, 20.0, 30.0, 40.0])

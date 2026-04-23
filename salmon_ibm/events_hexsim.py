@@ -257,7 +257,7 @@ class HexSimAccumulateEvent(Event):
             "Clear": updater_clear,
             "Increment": updater_increment,
             "TimeStep": updater_time_step,
-            "IndividualLocations": "individual_locations",
+            "IndividualLocations": updater_individual_locations,
             "QuantifyLocation": updater_quantify_location,
             "TraitId": updater_trait_value_index,
             "ExploredRunningSum": updater_quantify_location,
@@ -352,13 +352,11 @@ class HexSimAccumulateEvent(Event):
                             cell_indices=population.tri_idx,
                         )
                     elif func_name == "IndividualLocations":
-                        from salmon_ibm.accumulators import updater_quantify_location
-
-                        updater_quantify_location(
+                        # Write each agent's cell index to the accumulator.
+                        updater_individual_locations(
                             acc_mgr,
                             acc_name,
                             uf_mask,
-                            hex_map=np.zeros(1),
                             cell_indices=population.tri_idx,
                         )
 
