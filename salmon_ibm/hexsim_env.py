@@ -11,8 +11,38 @@ from pathlib import Path
 
 import numpy as np
 
+try:
+    from numba import njit, prange
+
+    _HAS_NUMBA = True
+except ImportError:
+    _HAS_NUMBA = False
+
+    def njit(*args, **kwargs):
+        def decorator(func):
+            return func
+
+        if len(args) == 1 and callable(args[0]):
+            return args[0]
+        return decorator
+
+    prange = range
+
 from heximpy.hxnparser import HexMap
 from salmon_ibm.hexsim import HexMesh
+
+
+@njit(cache=True, parallel=True)
+def _gather_by_zone(col: np.ndarray, zone_ids: np.ndarray, out: np.ndarray) -> None:
+    """Scatter a small per-zone vector to per-cell buffer.
+
+    For each cell i, out[i] = col[zone_ids[i]]. zone_ids is int32 and
+    col is float64, both contiguous; n_cells can be ~O(1M) on Columbia.
+    Parallel prange over cells — independent writes, no data race.
+    """
+    n = out.shape[0]
+    for i in prange(n):
+        out[i] = col[zone_ids[i]]
 
 
 def _validate_temp_table(data: np.ndarray, n_zones: int) -> None:
@@ -53,9 +83,13 @@ class HexSimEnvironment:
         if tz_path.exists():
             tz_hm = HexMap.from_file(tz_path)
             # Zone IDs for water cells (float → int, 0-based: subtract 1,
-            # since zone values 1-45 map to CSV rows 0-44)
+            # since zone values 1-45 map to CSV rows 0-44).
+            # int32 suffices (max zone ~45) and halves gather indexing bandwidth
+            # vs int64 for million-cell meshes.
             tz_water = tz_hm.values[mesh._water_full_idx]
-            self._zone_ids = np.clip(tz_water.astype(int) - 1, 0, None)
+            self._zone_ids = np.clip(tz_water.astype(np.int32) - 1, 0, None).astype(
+                np.int32
+            )
 
             # ── Temperature lookup table ─────────────────────────────────
             csv_path = ws / "Analysis" / "Data Lookup" / temperature_csv
@@ -79,9 +113,17 @@ class HexSimEnvironment:
                 UserWarning,
                 stacklevel=2,
             )
-            self._zone_ids = np.zeros(mesh.n_cells, dtype=int)
+            self._zone_ids = np.zeros(mesh.n_cells, dtype=np.int32)
             self._temp_table = np.full((1, 1), 15.0, dtype=np.float32)
             self.n_timesteps = 1
+
+        # Transpose the temp table to (n_timesteps, n_zones) in float64 once,
+        # so advance() can slice one contiguous row per step and hand it to
+        # _gather_by_zone without per-step conversion or gather-from-strided.
+        # The table is tiny (e.g., 2975 * 45 * 8 = ~1 MB) — memory is cheap.
+        self._temp_table_T = np.ascontiguousarray(
+            self._temp_table.T.astype(np.float64)
+        )
 
         # ── Upstream gradient (static SSH proxy) ─────────────────────────
         up_path = hex_dir / "Gradient [ upstream ]" / "Gradient [ upstream ].1.hxn"
@@ -111,10 +153,17 @@ class HexSimEnvironment:
         self.current_t: int = -1
 
     def advance(self, t: int) -> None:
-        """Update fields for timestep *t* (wraps around)."""
+        """Update fields for timestep *t* (wraps around).
+
+        Slice one contiguous row from the transposed table (shape n_zones,
+        ~O(1 KB)) and scatter to cells via a Numba gather kernel. This was
+        previously a 2D fancy index `self._temp_table[self._zone_ids, t_idx]`
+        doing a strided gather across n_cells (~O(1M)) — ~9x slower.
+        """
         self.current_t = t
         t_idx = t % self.n_timesteps
-        self._temp_buf[:] = self._temp_table[self._zone_ids, t_idx]
+        col = self._temp_table_T[t_idx]  # (n_zones,), contiguous, float64
+        _gather_by_zone(col, self._zone_ids, self._temp_buf)
 
     def sample(self, cell_idx: int) -> dict[str, float]:
         """All field values at a single cell."""
