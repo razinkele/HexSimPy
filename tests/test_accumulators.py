@@ -509,3 +509,44 @@ def test_individual_locations_writes_cell_indices():
     updater_individual_locations(mgr, "pos", mask, cell_indices=cell_indices)
 
     np.testing.assert_array_equal(mgr.data[:, 0], [10.0, 20.0, 30.0, 40.0])
+
+
+def test_accumulator_transfer_clamps_source_to_min_val():
+    """Source accumulator must not fall below its own min_val after transfer."""
+    from salmon_ibm.accumulators import AccumulatorManager, AccumulatorDef, updater_accumulator_transfer
+
+    defs = [
+        AccumulatorDef(name="src", min_val=1.0, max_val=100.0),
+        AccumulatorDef(name="tgt", min_val=0.0, max_val=100.0),
+    ]
+    mgr = AccumulatorManager(n_agents=2, definitions=defs)
+    mgr.data[:, 0] = 5.0  # src = 5, min_val = 1.0
+    mask = np.ones(2, dtype=bool)
+
+    # Fraction=1.0 would drive src to 0, below min_val=1.0
+    updater_accumulator_transfer(mgr, "src", "tgt", mask, fraction=1.0)
+
+    assert np.all(mgr.data[:, 0] >= 1.0), f"src must clamp to min_val=1.0, got {mgr.data[:, 0]}"
+
+
+def test_accumulator_transfer_conserves_mass_under_clamp():
+    """When source clamp reduces the actual subtracted amount, target must
+    receive the actual amount — not the pre-clamp nominal amount.
+    Conservation: delta_src + delta_tgt == 0 (modulo target clamping)."""
+    from salmon_ibm.accumulators import AccumulatorManager, AccumulatorDef, updater_accumulator_transfer
+
+    defs = [
+        AccumulatorDef(name="src", min_val=1.0, max_val=100.0),
+        AccumulatorDef(name="tgt", min_val=0.0, max_val=100.0),
+    ]
+    mgr = AccumulatorManager(n_agents=2, definitions=defs)
+    mgr.data[:, 0] = 5.0  # src = 5, clamp floor 1.0
+    mgr.data[:, 1] = 0.0
+    mask = np.ones(2, dtype=bool)
+
+    updater_accumulator_transfer(mgr, "src", "tgt", mask, fraction=1.0)
+
+    # src is clamped from 0 back up to 1.0 → actual amount moved was 4.0, not 5.0.
+    # Target must receive exactly 4.0 (no phantom mass).
+    np.testing.assert_array_almost_equal(mgr.data[:, 0], [1.0, 1.0])
+    np.testing.assert_array_almost_equal(mgr.data[:, 1], [4.0, 4.0])

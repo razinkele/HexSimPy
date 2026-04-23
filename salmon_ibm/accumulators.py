@@ -346,18 +346,35 @@ def updater_accumulator_transfer(
     *,
     fraction: float = 1.0,
 ):
-    """Transfer a fraction of one accumulator's value to another."""
+    """Transfer a fraction of one accumulator's value to another.
+
+    Conservation: the actual amount moved from source (which may differ from
+    `fraction * src_value` if the source clamps at min_val) is what the target
+    receives. The pre-clamp nominal amount is never added to the target.
+    """
     src_idx = manager._resolve_idx(source_name)
     tgt_idx = manager._resolve_idx(target_name)
-    amount = manager.data[mask, src_idx] * fraction
-    manager.data[mask, src_idx] -= amount
-    defn = manager.definitions[tgt_idx]
-    new_vals = manager.data[mask, tgt_idx] + amount
-    if defn.min_val is not None:
-        new_vals = np.maximum(new_vals, defn.min_val)
-    if defn.max_val is not None:
-        new_vals = np.minimum(new_vals, defn.max_val)
-    manager.data[mask, tgt_idx] = new_vals
+
+    src_before = manager.data[mask, src_idx].copy()
+    nominal_amount = src_before * fraction
+    src_defn = manager.definitions[src_idx]
+    new_src = src_before - nominal_amount
+    if src_defn.min_val is not None:
+        new_src = np.maximum(new_src, src_defn.min_val)
+    if src_defn.max_val is not None:
+        new_src = np.minimum(new_src, src_defn.max_val)
+    manager.data[mask, src_idx] = new_src
+
+    # Actual mass moved = how much source actually changed. Preserves conservation.
+    actual_amount = src_before - new_src
+
+    tgt_defn = manager.definitions[tgt_idx]
+    new_tgt = manager.data[mask, tgt_idx] + actual_amount
+    if tgt_defn.min_val is not None:
+        new_tgt = np.maximum(new_tgt, tgt_defn.min_val)
+    if tgt_defn.max_val is not None:
+        new_tgt = np.minimum(new_tgt, tgt_defn.max_val)
+    manager.data[mask, tgt_idx] = new_tgt
 
 
 def updater_allocated_hexagons(
