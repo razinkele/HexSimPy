@@ -1,6 +1,8 @@
 """Unit tests for multi-species interactions."""
 
 import numpy as np
+import pytest
+
 from salmon_ibm.interactions import (
     MultiPopulationManager,
     InteractionEvent,
@@ -113,3 +115,114 @@ class TestTransitionEvent:
         n_infected = (vals == 1).sum()
         assert n_infected > 0, "Some agents should be infected"
         assert (vals == 0).sum() > 0, "Some should remain susceptible"
+
+
+class TestInteractionEventVectorized:
+    """Invariant tests for the Option 2 (first-A-wins) vectorized execute()."""
+
+    def _setup(self, n_pred=3, n_prey=5, cell_pred=0, cell_prey=0):
+        from salmon_ibm.agents import AgentPool
+        from salmon_ibm.population import Population
+        mgr = MultiPopulationManager()
+        pred_pool = AgentPool(n=n_pred, start_tri=0, rng_seed=1)
+        pred_pool.tri_idx[:] = cell_pred
+        prey_pool = AgentPool(n=n_prey, start_tri=0, rng_seed=2)
+        prey_pool.tri_idx[:] = cell_prey
+        pred = Population(name="pred", pool=pred_pool)
+        prey = Population(name="prey", pool=prey_pool)
+        mgr.register("pred", pred)
+        mgr.register("prey", prey)
+        return mgr, pred, prey
+
+    def test_p_eq_1_kills_every_live_prey_in_shared_cells(self):
+        """With p=1.0, every B in a shared cell gets killed (first A wins each)."""
+        mgr, pred, prey = self._setup(n_pred=3, n_prey=5)
+        landscape = {"multi_pop_mgr": mgr, "rng": np.random.default_rng(0)}
+        event = InteractionEvent(
+            name="p", pop_a_name="pred", pop_b_name="prey",
+            encounter_probability=1.0,
+            outcome=InteractionOutcome.PREDATION,
+        )
+        event.execute(pred, landscape, t=0, mask=pred.pool.alive)
+        assert int(prey.pool.alive.sum()) == 0, (
+            f"All prey should be dead with p=1.0; alive={prey.pool.alive.sum()}"
+        )
+        stats = landscape["interaction_stats"][0]
+        assert stats["kills"] == 5
+        # Encounters are total hits in the |A|*|B| matrix (pre-dedup).
+        # With p=1.0 and 3*5 pairs, encounters = 15.
+        assert stats["encounters"] == 15
+
+    def test_p_eq_0_yields_no_kills(self):
+        """With p=0, no rolls succeed; no kills, no encounters."""
+        mgr, pred, prey = self._setup(n_pred=3, n_prey=5)
+        landscape = {"multi_pop_mgr": mgr, "rng": np.random.default_rng(0)}
+        event = InteractionEvent(
+            name="p", pop_a_name="pred", pop_b_name="prey",
+            encounter_probability=0.0,
+            outcome=InteractionOutcome.PREDATION,
+        )
+        event.execute(pred, landscape, t=0, mask=pred.pool.alive)
+        assert int(prey.pool.alive.sum()) == 5
+        stats = landscape["interaction_stats"][0]
+        assert stats["kills"] == 0
+        assert stats["encounters"] == 0
+
+    def test_no_shared_cells_no_kills(self):
+        """Predator cell 0, prey cell 1 — no overlap, no interactions."""
+        mgr, pred, prey = self._setup(n_pred=3, n_prey=5, cell_pred=0, cell_prey=1)
+        landscape = {"multi_pop_mgr": mgr, "rng": np.random.default_rng(0)}
+        event = InteractionEvent(
+            name="p", pop_a_name="pred", pop_b_name="prey",
+            encounter_probability=1.0,
+            outcome=InteractionOutcome.PREDATION,
+        )
+        event.execute(pred, landscape, t=0, mask=pred.pool.alive)
+        assert int(prey.pool.alive.sum()) == 5
+        assert landscape["interaction_stats"][0]["kills"] == 0
+
+    def test_each_kill_credits_exactly_one_predator(self):
+        """With p=1.0 and a resource accumulator, total resource gain
+        equals kills * resource_gain_amount (conservation)."""
+        from salmon_ibm.accumulators import AccumulatorManager, AccumulatorDef
+        mgr, pred, prey = self._setup(n_pred=3, n_prey=5)
+        pred.accumulator_mgr = AccumulatorManager(
+            3, [AccumulatorDef("food", min_val=0.0)]
+        )
+        landscape = {"multi_pop_mgr": mgr, "rng": np.random.default_rng(0)}
+        event = InteractionEvent(
+            name="p", pop_a_name="pred", pop_b_name="prey",
+            encounter_probability=1.0,
+            outcome=InteractionOutcome.PREDATION,
+            resource_gain_acc="food",
+            resource_gain_amount=2.0,
+        )
+        event.execute(pred, landscape, t=0, mask=pred.pool.alive)
+        food_total = pred.accumulator_mgr.data[0, :].sum()
+        kills = landscape["interaction_stats"][0]["kills"]
+        assert food_total == pytest.approx(kills * 2.0), (
+            f"Food total {food_total} should equal {kills} kills * 2.0"
+        )
+
+    def test_first_predator_wins_when_p_equals_1(self):
+        """With p=1.0, every hit in row 0 — so predator index 0 in each
+        cell's agents_a list claims ALL kills in that cell."""
+        from salmon_ibm.accumulators import AccumulatorManager, AccumulatorDef
+        mgr, pred, prey = self._setup(n_pred=3, n_prey=5)
+        pred.accumulator_mgr = AccumulatorManager(
+            3, [AccumulatorDef("food", min_val=0.0)]
+        )
+        landscape = {"multi_pop_mgr": mgr, "rng": np.random.default_rng(0)}
+        event = InteractionEvent(
+            name="p", pop_a_name="pred", pop_b_name="prey",
+            encounter_probability=1.0,
+            outcome=InteractionOutcome.PREDATION,
+            resource_gain_acc="food",
+            resource_gain_amount=1.0,
+        )
+        event.execute(pred, landscape, t=0, mask=pred.pool.alive)
+        # First predator (index 0) gets all 5 kills' resources.
+        foods = pred.accumulator_mgr.data[0, :]
+        assert foods[0] == pytest.approx(5.0)
+        assert foods[1] == pytest.approx(0.0)
+        assert foods[2] == pytest.approx(0.0)

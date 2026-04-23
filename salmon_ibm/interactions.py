@@ -111,7 +111,20 @@ class InteractionEvent(Event):
     penalty_amount: float = 0.0
 
     def execute(self, population, landscape, t: int, mask: np.ndarray) -> None:
-        """Run encounters. Retrieves MultiPopulationManager from landscape."""
+        """Run encounters. Retrieves MultiPopulationManager from landscape.
+
+        Vectorized per-cell using "Option 2" semantics: for each shared cell,
+        a dice-roll matrix rng.random((|A|, |B|)) determines candidate
+        encounters. For each B column, only the FIRST row (smallest a_idx)
+        with a successful roll claims the kill — matching the natural
+        iteration order of the prior nested Python loop.
+
+        RNG consumption order differs from the prior scalar version: the
+        scalar path drew one random per (a, b) iteration; this path draws
+        |A|*|B| randoms in one matrix per shared cell. Kill counts under a
+        given seed will differ numerically, but distributions are
+        statistically equivalent.
+        """
         if not self.pop_a_name or not self.pop_b_name:
             return
         multi_pop_mgr = landscape["multi_pop_mgr"]
@@ -120,30 +133,66 @@ class InteractionEvent(Event):
         pop_a = multi_pop_mgr.get(self.pop_a_name)
         pop_b = multi_pop_mgr.get(self.pop_b_name)
 
-        stats = {"encounters": 0, "kills": 0}
+        total_encounters = 0
+        total_kills = 0
+
+        # Buffer resource gains per A agent; commit in one scatter at end.
+        resource_gains = None
+        acc_idx = None
+        if (
+            self.resource_gain_acc
+            and pop_a.accumulator_mgr is not None
+            and self.outcome == InteractionOutcome.PREDATION
+        ):
+            acc_idx = pop_a.accumulator_mgr._resolve_idx(self.resource_gain_acc)
+            resource_gains = np.zeros(pop_a.pool.n, dtype=np.float64)
 
         for agents_a, agents_b in pairs:
-            # Each agent in A encounters each agent in B with probability p
-            for a_idx in agents_a:
-                for b_idx in agents_b:
-                    if not pop_b.alive[b_idx]:
-                        continue  # Skip already-dead prey
-                    if rng.random() < self.encounter_probability:
-                        stats["encounters"] += 1
-                        if self.outcome == InteractionOutcome.PREDATION:
-                            pop_b.alive[b_idx] = False
-                            stats["kills"] += 1
-                            if (
-                                self.resource_gain_acc
-                                and pop_a.accumulator_mgr is not None
-                            ):
-                                acc_idx = pop_a.accumulator_mgr._resolve_idx(
-                                    self.resource_gain_acc
-                                )
-                                pop_a.accumulator_mgr.data[acc_idx, a_idx] += (
-                                    self.resource_gain_amount
-                                )
+            if agents_a.size == 0 or agents_b.size == 0:
+                continue
+            # Filter already-dead B agents (possible if same B index appeared
+            # in an earlier cell's pairs — defensive).
+            alive_b_mask = pop_b.alive[agents_b]
+            if not alive_b_mask.any():
+                continue
+            live_b = agents_b[alive_b_mask]
 
-        # Store stats in landscape for observability (previously returned but discarded)
+            # Dice-roll matrix: (|A|, |B|) of uniform[0, 1).
+            rolls = rng.random((agents_a.size, live_b.size))
+            hits = rolls < self.encounter_probability
+            total_encounters += int(hits.sum())
+
+            if self.outcome != InteractionOutcome.PREDATION:
+                # Non-predation outcomes (competition, disease) were non-
+                # functional in the scalar path too — skip rather than
+                # silently double-count.
+                continue
+
+            # Option 2 dedup: first A row with a hit wins each B column.
+            col_has_hit = hits.any(axis=0)
+            if not col_has_hit.any():
+                continue
+            winning_a_rows = np.argmax(hits, axis=0)
+
+            b_cols = np.where(col_has_hit)[0]
+            a_rows = winning_a_rows[b_cols]
+
+            # Global agent indices.
+            a_globals = agents_a[a_rows]
+            b_globals = live_b[b_cols]
+
+            pop_b.alive[b_globals] = False
+            total_kills += int(b_globals.size)
+
+            if resource_gains is not None:
+                np.add.at(resource_gains, a_globals, self.resource_gain_amount)
+
+        # Commit resource gains in one pass (contiguous write).
+        if resource_gains is not None and acc_idx is not None:
+            pop_a.accumulator_mgr.data[acc_idx, :] += resource_gains
+
         interaction_stats = landscape.setdefault("interaction_stats", [])
-        interaction_stats.append({"event": self.name, "t": t, **stats})
+        interaction_stats.append({
+            "event": self.name, "t": t,
+            "encounters": total_encounters, "kills": total_kills,
+        })
