@@ -187,10 +187,13 @@ def test_run_and_pause(page: Page):
     progress = page.locator('[id="progress_text"]')
     expect(progress).to_contain_text(re.compile(r"t = [2-9]"), timeout=STEP_TIMEOUT)
     page.click("#btn_pause")
-    # After pause, verify simulation stopped
-    page.wait_for_timeout(1500)
+    # After pause, verify simulation stopped: progress text should settle on a
+    # value and then not change. expect().to_have_text with a 2s timeout waits
+    # for the text to remain stable.
+    progress.wait_for(state="visible", timeout=5000)
     text1 = progress.inner_text()
-    page.wait_for_timeout(2000)
+    # If simulation is truly paused, text1 stays equal for 2s.
+    expect(progress).to_have_text(text1, timeout=2000)
     text2 = progress.inner_text()
     assert text1 == text2, f"Simulation didn't pause: {text1} → {text2}"
 

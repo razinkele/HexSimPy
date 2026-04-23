@@ -422,8 +422,15 @@ class TestTrailsToggle:
 
 class TestLandscapeSwitch:
     @pytest.mark.xfail(
-        reason="Playwright select_option doesn't trigger Shiny selectize binding; "
-        "works in --headed mode with manual click",
+        reason=(
+            "Playwright select_option doesn't trigger Shiny selectize binding; "
+            "works in --headed mode with manual click. "
+            "Workaround: use page.evaluate with dispatchEvent(new Event('change')) "
+            "as at test_map_visualization.py:474. Re-enable once Playwright's "
+            "select_option handler invokes the selectize change listener, "
+            "or migrate this test to the dispatchEvent pattern."
+        ),
+        strict=False,
     )
     def test_landscape_switch_triggers_full_rebuild(self, page: Page):
         """Switching landscape causes deck.gl to receive a full update."""
