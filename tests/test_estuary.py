@@ -74,3 +74,42 @@ def test_do_override_rejects_inverted_thresholds():
 
     with pytest.raises(ValueError, match="lethal.*must be.*<=.*high"):
         do_override(np.array([3.0]), lethal=5.0, high=2.0)
+
+
+def test_estuary_params_defaults_match_liland_2024():
+    from salmon_ibm.estuary import EstuaryParams
+    p = EstuaryParams()
+    assert p.do_lethal == 3.0
+    assert p.do_high == 5.5
+    assert p.s_opt == 0.5
+    assert p.s_tol == 6.0
+    assert p.seiche_threshold_m_per_s == 0.02
+
+
+def test_validate_do_field_units_accepts_mg_per_l():
+    """Typical mg/L field (0-20 range) passes."""
+    import numpy as np
+    from salmon_ibm.estuary import validate_do_field_units
+    validate_do_field_units(np.array([0.0, 5.0, 10.0, 15.0, 20.0]))
+    # NaN handling
+    validate_do_field_units(np.array([np.nan, 8.0, 10.0]))
+
+
+def test_validate_do_field_units_rejects_mmol_per_m3():
+    """Typical mmol/m^3 field (150-400 range) must raise."""
+    import pytest
+    import numpy as np
+    from salmon_ibm.estuary import validate_do_field_units
+    with pytest.raises(ValueError, match="mmol/m"):
+        validate_do_field_units(np.array([250.0, 300.0, 280.0]))
+
+
+def test_do_override_uses_new_defaults():
+    """do_override with default args uses Liland 2024 thresholds (3.0 / 5.5)."""
+    import numpy as np
+    from salmon_ibm.estuary import do_override, DO_OK, DO_ESCAPE, DO_LETHAL
+    # 6.0 is above high=5.5 → OK; 4.0 < high → ESCAPE; 2.0 < lethal=3.0 → LETHAL
+    out = do_override(np.array([6.0, 4.0, 2.0]))
+    assert out[0] == DO_OK
+    assert out[1] == DO_ESCAPE
+    assert out[2] == DO_LETHAL
