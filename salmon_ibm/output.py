@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 import pandas as pd
 
 from salmon_ibm.agents import AgentPool
+
+if TYPE_CHECKING:
+    from salmon_ibm.population import Population
 
 
 class OutputLogger:
@@ -22,10 +27,12 @@ class OutputLogger:
         self._alive: list[np.ndarray] = []
         self._arrived: list[np.ndarray] = []
 
-    def log_step(self, t: int, pool: AgentPool):
+    def log_step(self, t: int, population: "Population"):
+        pool = population.pool
         n = pool.n
         self._times.append(np.full(n, t, dtype=np.int32))
-        self._agent_ids.append(np.arange(n, dtype=np.int32))
+        # Use Population.agent_ids (stable across compact()) not np.arange(n).
+        self._agent_ids.append(population.agent_ids.astype(np.int32).copy())
         self._tri_idxs.append(pool.tri_idx.copy())
         self._lats.append(self.centroids[pool.tri_idx, 0].copy())
         self._lons.append(self.centroids[pool.tri_idx, 1].copy())
