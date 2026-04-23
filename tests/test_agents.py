@@ -94,3 +94,36 @@ def test_agent_pool_init_covers_all_array_fields():
     assert not missing, (
         f"AgentPool.__init__ did not initialize these ARRAY_FIELDS as ndarrays: {missing}"
     )
+
+
+def test_push_temperature_preserves_dead_agents_history():
+    """With alive_mask, dead agents retain their last-slot value; ring shift drops the oldest."""
+    import numpy as np
+    from salmon_ibm.agents import AgentPool
+
+    pool = AgentPool(n=3, start_tri=0, rng_seed=0)
+    pool.temp_history[:] = np.array([[5.0, 6.0, 7.0], [5.0, 6.0, 7.0], [5.0, 6.0, 7.0]])
+    pool.alive[1] = False  # agent 1 dead
+
+    pool.push_temperature(np.array([99.0, 99.0, 99.0]), alive_mask=pool.alive)
+
+    # Alive agents (0 and 2): last slot is 99.0 (fresh write).
+    assert pool.temp_history[0, -1] == 99.0
+    assert pool.temp_history[2, -1] == 99.0
+    # Dead agent (1): last slot preserved at 7.0 (ring shift was NOT applied).
+    assert pool.temp_history[1, -1] == 7.0, (
+        f"Dead agent's temp_history must be frozen; got {pool.temp_history[1, -1]}"
+    )
+
+
+def test_push_temperature_backward_compat_without_mask():
+    """Without alive_mask, push_temperature behaves as before (no gating)."""
+    import numpy as np
+    from salmon_ibm.agents import AgentPool
+
+    pool = AgentPool(n=2, start_tri=0, rng_seed=0)
+    pool.temp_history[:] = np.array([[1.0, 2.0, 3.0], [1.0, 2.0, 3.0]])
+    pool.push_temperature(np.array([99.0, 99.0]))
+    # Last slot updated for all agents.
+    assert pool.temp_history[0, -1] == 99.0
+    assert pool.temp_history[1, -1] == 99.0

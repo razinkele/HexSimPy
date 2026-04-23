@@ -90,9 +90,16 @@ class AgentPool:
         h = self.temp_history
         return (h[:, 0] + h[:, 1] + h[:, 2]) * (1.0 / 3.0)
 
-    def push_temperature(self, temps: np.ndarray):
-        self.temp_history[:, :-1] = self.temp_history[:, 1:]
-        self.temp_history[:, -1] = temps
+    def push_temperature(self, temps: np.ndarray, alive_mask: np.ndarray | None = None):
+        if alive_mask is None:
+            self.temp_history[:, :-1] = self.temp_history[:, 1:]
+            self.temp_history[:, -1] = temps
+            return
+        # For alive agents: ring shift + new sample.
+        # For dead agents: freeze history so later compact() doesn't inherit stale data.
+        alive_mask = np.asarray(alive_mask, dtype=bool)
+        self.temp_history[alive_mask, :-1] = self.temp_history[alive_mask, 1:]
+        self.temp_history[alive_mask, -1] = temps[alive_mask]
 
 
 class FishAgent:

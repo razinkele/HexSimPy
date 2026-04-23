@@ -130,8 +130,8 @@ class Population:
     def t3h_mean(self) -> np.ndarray:
         return self.pool.t3h_mean()
 
-    def push_temperature(self, temps):
-        self.pool.push_temperature(temps)
+    def push_temperature(self, temps, alive_mask=None):
+        self.pool.push_temperature(temps, alive_mask=alive_mask)
 
     @property
     def floaters(self) -> np.ndarray:

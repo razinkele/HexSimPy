@@ -181,7 +181,8 @@ class Simulation:
 
     def _event_push_temperature(self, population, landscape, t, mask):
         temps = landscape["fields"]["temperature"][population.tri_idx]
-        population.push_temperature(temps)
+        alive_mask = population.alive & ~population.arrived
+        population.push_temperature(temps, alive_mask=alive_mask)
 
     def _event_behavior_selection(self, population, landscape, t, mask):
         step_mask = population.alive & ~population.arrived
