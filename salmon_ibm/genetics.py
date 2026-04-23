@@ -22,7 +22,7 @@ def _haldane_crossover_probs(linkage_distances_cM: np.ndarray) -> np.ndarray:
     return 0.5 * (1.0 - np.exp(-2.0 * linkage_distances_cM / 100.0))
 
 
-@njit
+@njit(cache=True)
 def _produce_gamete_numba(parent_genotype, crossover_probs, rng_draws):
     """Produce a haploid gamete from a diploid parent via crossover.
 

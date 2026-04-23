@@ -29,6 +29,14 @@ class BehaviorParams:
     avoid_cwr_cooldown_h: int = 12
     max_dist_to_cwr: float = 5000.0
 
+    def __post_init__(self):
+        # Cache a contiguous copy of p_table so pick_behaviors() doesn't call
+        # np.ascontiguousarray(...) every step (the table never changes).
+        if self.p_table is not None:
+            self._p_table_c = np.ascontiguousarray(self.p_table)
+        else:
+            self._p_table_c = None
+
     @classmethod
     def defaults(cls):
         p = np.array([
@@ -80,9 +88,14 @@ def pick_behaviors(t3h_mean, hours_to_spawn, params, seed=None):
 
     if HAS_NUMBA:
         rand_vals = rng.random(n)
+        # Use cached contiguous view; falls back to explicit conversion if params
+        # was mutated after construction (defensive, not expected).
+        p_table_c = getattr(params, "_p_table_c", None)
+        if p_table_c is None:
+            p_table_c = np.ascontiguousarray(params.p_table)
         return _pick_behaviors_numba(
             temp_idx.astype(np.int32), time_idx.astype(np.int32),
-            np.ascontiguousarray(params.p_table), rand_vals,
+            p_table_c, rand_vals,
         )
     else:
         behaviors = np.empty(n, dtype=int)

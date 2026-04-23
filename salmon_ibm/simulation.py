@@ -122,6 +122,12 @@ class Simulation:
         self.est_cfg = config.get("estuary", {})
         self._skip_estuarine_overrides = self._detect_estuarine_noop()
 
+        # Scratch buffers for per-step operations (avoid alloc in hot loops).
+        # _zero_salinity is used as the "salinity" field when the env doesn't
+        # provide one; _event_bioenergetics previously allocated a fresh
+        # np.zeros(n_triangles) every step via fields.get(..., default).
+        self._zero_salinity = np.zeros(self.mesh.n_triangles, dtype=np.float64)
+
         self.logger = None
         if output_path:
             self.logger = OutputLogger(output_path, self.mesh.centroids)
@@ -218,7 +224,7 @@ class Simulation:
         fields = landscape["fields"]
         temps_at_agents = fields["temperature"][population.tri_idx]
         activity = np.take(self._activity_lut, population.behavior, mode="clip")
-        sal = fields.get("salinity", np.zeros(self.mesh.n_triangles))
+        sal = fields.get("salinity", self._zero_salinity)
         sal_at_agents = sal[population.tri_idx]
         s_cfg = self.est_cfg.get("salinity_cost", {})
         sal_cost = salinity_cost(
