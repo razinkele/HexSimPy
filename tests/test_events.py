@@ -706,3 +706,25 @@ class TestSummaryReportEvent:
         for t in range(10):
             event.execute(pop, landscape, t=t, mask=pop.alive.copy())
         assert len(landscape["summary_reports"]) == 10
+
+
+def test_single_pop_sequencer_clears_combo_mask_cache_each_step():
+    """EventSequencer.step() must clear per-step combo mask cache (parity with MultiPopEventSequencer)."""
+    from salmon_ibm.events import EventSequencer
+    from salmon_ibm.events_hexsim import _combo_mask_cache
+    from unittest.mock import MagicMock
+
+    # Populate cache directly to simulate a leak from a prior step
+    _combo_mask_cache[("sentinel",)] = np.array([True])
+
+    population = MagicMock()
+    population.alive = np.array([True])
+    population.arrived = np.array([False])
+    landscape = {}
+
+    seq = EventSequencer(events=[])
+    seq.step(population, landscape, t=0)
+
+    assert ("sentinel",) not in _combo_mask_cache, (
+        "EventSequencer.step() must clear the combo mask cache"
+    )

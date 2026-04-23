@@ -96,6 +96,10 @@ class EventSequencer:
 
     def step(self, population, landscape, t: int) -> None:
         landscape["step_alive_mask"] = population.alive & ~population.arrived
+        # Clear per-step caches (parity with MultiPopEventSequencer)
+        from salmon_ibm.events_hexsim import clear_combo_mask_cache
+
+        clear_combo_mask_cache()
         for event in self.events:
             if event.trigger.should_fire(t):
                 mask = self._compute_mask(population, event.trait_filter)
