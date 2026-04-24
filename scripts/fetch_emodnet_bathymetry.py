@@ -74,7 +74,14 @@ def regrid_to_mesh(raw_tif: Path, mesh_nc: Path, coverage: str) -> None:
     depth_at_nodes = np.where(np.isnan(depth_at_nodes), 0.0, -depth_at_nodes)
     depth_at_nodes = np.maximum(depth_at_nodes, 0.0)
 
+    # Sync node mask with real depth: a node is "water" iff EMODnet depth > 0.
+    # Without this, test_mesh_depth_at_water_cells fails because some cells
+    # flagged as water in the stub mask have zero EMODnet depth (EMODnet
+    # classifies them as land).
+    new_mask = (depth_at_nodes > 0.0).astype(np.float32)
+
     mesh_ds["depth"] = (mesh_ds.depth.dims, depth_at_nodes.astype(np.float32))
+    mesh_ds["mask"] = (mesh_ds.mask.dims, new_mask)
     mesh_ds.attrs["depth_source"] = (
         f"EMODnet Bathymetry {coverage} via WCS {WCS_URL}, "
         f"fetched {datetime.date.today().isoformat()}, "
