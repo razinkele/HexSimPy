@@ -32,6 +32,7 @@ from salmon_ibm.population import Population
 from salmon_ibm.bioenergetics import update_energy
 from salmon_ibm.config import (
     bio_params_from_config,
+    load_bio_params_from_config,
     behavior_params_from_config,
     genome_from_config,
     network_from_config,
@@ -117,7 +118,9 @@ class Simulation:
         self._multi_pop_mgr.register(self.population)
 
         self.beh_params = behavior_params_from_config(config)
-        self.bio_params = bio_params_from_config(config)
+        # Routes to BalticBioParams if config has `species_config:` key,
+        # otherwise returns classic BioParams.
+        self.bio_params = load_bio_params_from_config(config)
         self._activity_lut = self._build_activity_lut()
         self.est_cfg = config.get("estuary", {})
         self._skip_estuarine_overrides = self._detect_estuarine_noop()
@@ -247,9 +250,15 @@ class Simulation:
             population.mass_g[alive] = new_mass
             dead_indices = np.where(alive)[0][dead]
             population.alive[dead_indices] = False
-        # Recompute alive mask after starvation kills to avoid double-counting
+        # Recompute alive mask after starvation kills to avoid double-counting.
+        # Use T_ACUTE_LETHAL when available (BalticBioParams) — T_MAX on Baltic
+        # returns T_AVOID=20°C which is a behavioral threshold, not acute lethal.
+        # For Chinook BioParams, T_MAX=26°C is already the acute-lethal threshold.
+        lethal_T = getattr(
+            self.bio_params, "T_ACUTE_LETHAL", self.bio_params.T_MAX
+        )
         thermal_kill = (population.alive & ~population.arrived) & (
-            temps_at_agents >= self.bio_params.T_MAX
+            temps_at_agents >= lethal_T
         )
         population.alive[thermal_kill] = False
 

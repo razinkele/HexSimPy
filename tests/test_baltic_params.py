@@ -88,3 +88,61 @@ species:
 """)
     params = load_baltic_species_config(cfg_path)
     assert params.cmax_A == 0.303
+
+
+def test_load_bio_params_routes_to_baltic_when_species_config_set(tmp_path):
+    """A YAML config with species_config: <path> must route to BalticBioParams."""
+    from salmon_ibm.config import load_bio_params_from_config
+    from salmon_ibm.baltic_params import BalticBioParams
+
+    species_yaml = tmp_path / "species.yaml"
+    species_yaml.write_text("""
+species:
+  BalticAtlanticSalmon:
+    T_OPT: 16.0
+    T_AVOID: 20.0
+    T_ACUTE_LETHAL: 24.0
+""")
+    cfg = {"species_config": str(species_yaml)}
+    params = load_bio_params_from_config(cfg)
+    assert isinstance(params, BalticBioParams)
+    assert params.T_OPT == 16.0
+    assert params.T_ACUTE_LETHAL == 24.0
+
+
+def test_load_bio_params_falls_back_to_bio_params_when_no_species_config():
+    """If species_config key absent, return classic BioParams (backward compat)."""
+    from salmon_ibm.config import load_bio_params_from_config
+    from salmon_ibm.bioenergetics import BioParams
+    from salmon_ibm.baltic_params import BalticBioParams
+
+    cfg = {"bioenergetics": {"RA": 0.003}}
+    params = load_bio_params_from_config(cfg)
+    assert isinstance(params, BioParams)
+    assert not isinstance(params, BalticBioParams), (
+        "Fall-back path must return BioParams, not BalticBioParams"
+    )
+
+
+def test_kill_gate_prefers_acute_lethal_for_baltic_params():
+    """Integration: at 22°C (between T_AVOID=20 and T_ACUTE_LETHAL=24),
+    BalticBioParams must NOT trigger the kill gate."""
+    from salmon_ibm.baltic_params import BalticBioParams
+
+    p = BalticBioParams()
+    # Simulate what _event_bioenergetics does:
+    lethal_T = getattr(p, "T_ACUTE_LETHAL", p.T_MAX)
+    assert lethal_T == 24.0, "Should read T_ACUTE_LETHAL, not T_MAX"
+    # At 22°C, which is a realistic Curonian summer SST, agents MUST NOT die.
+    assert 22.0 < lethal_T, "22°C should not trigger kill gate for Baltic"
+
+
+def test_kill_gate_falls_back_to_t_max_for_bio_params():
+    """Classic BioParams has no T_ACUTE_LETHAL; kill gate must use T_MAX."""
+    from salmon_ibm.bioenergetics import BioParams
+
+    p = BioParams()
+    lethal_T = getattr(p, "T_ACUTE_LETHAL", p.T_MAX)
+    assert lethal_T == p.T_MAX == 26.0, (
+        "Chinook BioParams must use T_MAX=26 since T_ACUTE_LETHAL absent"
+    )

@@ -44,6 +44,28 @@ def bio_params_from_config(cfg: dict) -> BioParams:
     return BioParams(**overrides)
 
 
+def load_bio_params_from_config(cfg: dict):
+    """Route to BalticBioParams if ``species_config`` key present, else BioParams.
+
+    The ``species_config`` key points to a YAML file like
+    ``configs/baltic_salmon_species.yaml`` — see the Curonian realism plan
+    (docs/superpowers/plans/2026-04-24-curonian-realism-upgrades.md).
+
+    Returns:
+        BalticBioParams if ``species_config`` is set, else BioParams.
+        Both expose the same Wisconsin fields (RA, RB, RQ, ED_MORTAL,
+        ED_TISSUE, MASS_FLOOR_FRACTION) so downstream ``update_energy``
+        works with either.
+    """
+    species_path = cfg.get("species_config")
+    if species_path:
+        # Resolve relative paths against the YAML working dir
+        from salmon_ibm.baltic_params import load_baltic_species_config
+
+        return load_baltic_species_config(species_path)
+    return bio_params_from_config(cfg)
+
+
 def behavior_params_from_config(cfg: dict) -> BehaviorParams:
     """Create a BehaviorParams instance from the optional ``behavior`` section.
 

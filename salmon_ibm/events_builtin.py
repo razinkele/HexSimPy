@@ -90,11 +90,16 @@ class SurvivalEvent(Event):
             population.alive[dead_indices] = False
 
         if self.thermal:
-            # Recompute alive mask after starvation kills
+            # Recompute alive mask after starvation kills. Prefer T_ACUTE_LETHAL
+            # when available (BalticBioParams): T_MAX on Baltic returns T_AVOID
+            # (20°C behavioral threshold) — not the acute-lethal gate.
             current_alive = population.alive & ~getattr(
                 population, "arrived", np.zeros(population.n, dtype=bool)
             )
-            thermal_kill = current_alive & (temps >= self.bio_params.T_MAX)
+            lethal_T = getattr(
+                self.bio_params, "T_ACUTE_LETHAL", self.bio_params.T_MAX
+            )
+            thermal_kill = current_alive & (temps >= lethal_T)
             population.alive[thermal_kill] = False
 
 
