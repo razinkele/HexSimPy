@@ -35,6 +35,10 @@
   - **Fixed test placeholders** — `test_environment_exposes_spatial_salinity_field` now has a concrete N>S gradient assertion. Integration test invariant replaced with hard `alive + dead + arrived == 500` (v1 was a tautology).
   - **Added argparse to baseline script** — Phase 0 and Phase 5.2 both invoke `scripts/baseline_curonian_stub.py --config ...`; previously Phase 0 hardcoded the stub config.
   - **Expanded deferred-follow-ups** — cormorant colony at Juodkrantė (specific location), Nemunas delta branching, hatchery vs wild origin, round goby invasion, summer cyanobacteria.
+- **v3 (2026-04-24, post-v2-verification)** — one more focused review found two residual issues, both fixed:
+  - **CRITICAL:** the back-compat `T_MAX` property on `BalticBioParams` returns `T_AVOID = 20.0°C`. But `simulation.py:252` (`_event_bioenergetics`) and `events_builtin.py:97` (`SurvivalEvent`) use `self.bio_params.T_MAX` as a **hard kill gate** — so Baltic configs would kill agents at 20°C, the exact mass-die-off the v2 thermal split was designed to prevent. Task 1.3 Step 5 now explicitly updates both kill-gate callers to prefer `T_ACUTE_LETHAL` via `getattr(bio_params, "T_ACUTE_LETHAL", bio_params.T_MAX)`. `events_builtin.py` added to Task 1.3's Files list.
+  - Task 1.3 Step 4 now updates BOTH the import line in `simulation.py:34` AND the call site — v2 only mentioned the call site, which would have produced `ImportError` at runtime.
+  - Fixed vacuous `not isinstance(params, object)` assertion in the fallback test (v2 had `type(params).__mro__[1] if False else object` which always evaluated to `object`).
 
 ---
 
@@ -383,8 +387,10 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 **Purpose:** CRITICAL GAP from v1 plan. Tasks 1.1 and 1.2 create `BalticBioParams` and the YAML file but DON'T connect them to runtime. Without this task, the species config is inert — `Simulation` keeps using the old `BioParams` regardless. This task is the bridge.
 
 **Files:**
-- Modify: `salmon_ibm/config.py` (add `load_bio_params_from_config`)
-- Modify: `salmon_ibm/simulation.py:~120` (use the new loader)
+- Modify: `salmon_ibm/config.py` — add `load_bio_params_from_config`
+- Modify: `salmon_ibm/simulation.py` — update import (line ~34) + call site (line ~120) + kill-gate (line ~252)
+- Modify: `salmon_ibm/events_builtin.py` — update kill-gate at `SurvivalEvent.execute` (line ~97)
+- Modify: `salmon_ibm/bioenergetics.py` — doc comment on `update_energy` noting dual-params acceptance
 - Test: `tests/test_baltic_params.py`
 
 - [ ] **Step 1: Write the failing integration test**
@@ -414,11 +420,14 @@ def test_load_bio_params_falls_back_to_bio_params_when_no_species_config():
     """If species_config key absent, return classic BioParams (backward compat)."""
     from salmon_ibm.config import load_bio_params_from_config
     from salmon_ibm.bioenergetics import BioParams
+    from salmon_ibm.baltic_params import BalticBioParams
 
     cfg = {"bioenergetics": {"RA": 0.003}}
     params = load_bio_params_from_config(cfg)
     assert isinstance(params, BioParams)
-    assert not isinstance(params, type(params).__mro__[1] if False else object)
+    assert not isinstance(params, BalticBioParams), (
+        "Fall-back path must return BioParams, not BalticBioParams"
+    )
 ```
 
 - [ ] **Step 2: Run — expect FAIL (`load_bio_params_from_config` doesn't exist)**
@@ -440,34 +449,71 @@ def load_bio_params_from_config(config: dict):
     return bio_params_from_config(config)
 ```
 
-- [ ] **Step 4: Update `simulation.py:~120` to use the new loader**
+- [ ] **Step 4: Update `simulation.py` — BOTH the import AND the call site**
 
-Replace `self.bio_params = bio_params_from_config(config)` with `self.bio_params = load_bio_params_from_config(config)`.
+`simulation.py` line 34 currently has `from salmon_ibm.config import bio_params_from_config`. Add the new loader to this import:
 
-- [ ] **Step 5: Verify `update_energy` handles BalticBioParams**
+```python
+# OLD: from salmon_ibm.config import bio_params_from_config
+from salmon_ibm.config import bio_params_from_config, load_bio_params_from_config
+```
 
-`update_energy(ed_kJ_g, mass_g, temperature_c, activity_mult, salinity_cost, params)` reads `params.RA, params.RB, params.RQ, params.ED_MORTAL, params.ED_TISSUE, params.MASS_FLOOR_FRACTION`. `BalticBioParams` exposes all of these with compatible defaults — no signature change needed. Document this with a comment in `update_energy`:
+Then at `simulation.py:~120`, replace the call:
+
+```python
+# OLD: self.bio_params = bio_params_from_config(config)
+self.bio_params = load_bio_params_from_config(config)
+```
+
+- [ ] **Step 5: Update the two kill-gate callers of `bio_params.T_MAX`**
+
+> **v3 correction — CRITICAL.** The back-compat `T_MAX` property on `BalticBioParams` returns `T_AVOID = 20.0°C`. But `simulation.py:252` (`_event_bioenergetics`) and `events_builtin.py:97` (`SurvivalEvent.execute`) both use `self.bio_params.T_MAX` as a **hard kill gate** (`thermal_kill = temp >= T_MAX → pool.alive = False`). With a Baltic config this would kill agents at 20°C — the exact mass-die-off the v2 thermal split was designed to prevent. Both callers must branch on `T_ACUTE_LETHAL` when available.
+
+Find the two callers:
+
+```bash
+grep -n "bio_params.T_MAX\|params.T_MAX" salmon_ibm/simulation.py salmon_ibm/events_builtin.py
+```
+
+Expected output: `simulation.py:~252` and `events_builtin.py:~97`.
+
+Update both sites to prefer `T_ACUTE_LETHAL` when defined:
+
+```python
+# OLD: thermal_kill = (... & (temps >= self.bio_params.T_MAX))
+lethal_T = getattr(self.bio_params, "T_ACUTE_LETHAL", self.bio_params.T_MAX)
+thermal_kill = (... & (temps >= lethal_T))
+```
+
+This keeps the Chinook `BioParams` path unchanged (no `T_ACUTE_LETHAL` attr → falls back to `T_MAX`) and uses the correct 24°C acute threshold for `BalticBioParams`.
+
+- [ ] **Step 6: Verify `update_energy` handles BalticBioParams**
+
+`update_energy(ed_kJ_g, mass_g, temperature_c, activity_mult, salinity_cost, params)` reads `params.RA, params.RB, params.RQ, params.ED_MORTAL, params.ED_TISSUE, params.MASS_FLOOR_FRACTION`. `BalticBioParams` exposes all of these. Document with a comment in `update_energy`:
 
 ```python
 def update_energy(..., params):
     """params: BioParams | BalticBioParams (both expose the same Wisconsin fields)."""
 ```
 
-- [ ] **Step 6: Run the integration tests — expect PASS**
+- [ ] **Step 7: Run the integration tests — expect PASS**
 
 ```bash
-micromamba run -n shiny python -m pytest tests/test_baltic_params.py tests/test_bioenergetics.py tests/test_simulation.py -v
+micromamba run -n shiny python -m pytest tests/test_baltic_params.py tests/test_bioenergetics.py tests/test_simulation.py tests/test_events.py -v
 ```
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add salmon_ibm/config.py salmon_ibm/simulation.py salmon_ibm/bioenergetics.py tests/test_baltic_params.py
-git commit -m "feat(config): route species_config YAML key to BalticBioParams loader
+git add salmon_ibm/config.py salmon_ibm/simulation.py salmon_ibm/bioenergetics.py salmon_ibm/events_builtin.py tests/test_baltic_params.py
+git commit -m "feat(config): route species_config to BalticBioParams + use T_ACUTE_LETHAL for kill-gate
 
-Wires the Phase 1 Baltic species config into Simulation.__init__. Without
-this bridge Phases 1.1 and 1.2 would be inert — the YAML exists, the
-dataclass exists, but no code path reads one into the other.
+Wires the Phase 1 Baltic species config into Simulation.__init__, AND
+updates the two kill-gate callers (_event_bioenergetics, SurvivalEvent)
+to read bio_params.T_ACUTE_LETHAL when available. Without this second
+fix the back-compat T_MAX property would make 20°C a hard kill gate
+for Baltic configs — defeating the entire point of the T_AVOID vs
+T_ACUTE_LETHAL split.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 ```
