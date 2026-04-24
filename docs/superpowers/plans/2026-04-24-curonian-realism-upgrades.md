@@ -9,13 +9,32 @@
 **Tech Stack:** Python 3.10+, NumPy, xarray, PyYAML, scipy, pytest, `micromamba run -n shiny`. Data: EMODnet Bathymetry WCS, CMEMS Baltic reanalysis, HELCOM/ICES discharge records, OSM (via osmnx).
 
 **Reference implementation:** inSTREAM at `C:\Users\arturas.baziukas\OneDrive - ku.lt\HORIZON_EUROPE\inSTREAM\instream-py\`. Specifically:
-- `configs/baltic_salmon_species.yaml` — 225-line species config with 24 peer-reviewed citations
-- `configs/example_baltic.yaml` — 420-line multi-reach full config
-- `scripts/generate_baltic_example.py` — cell generation, OSM extraction
-- `app/modules/bathymetry.py::fetch_emodnet_dtm()` — EMODnet WCS client
+- `configs/baltic_salmon_species.yaml` — Baltic species config with ~17 peer-reviewed citation blocks
+- `configs/example_baltic.yaml` — ~410-line multi-reach full config
 - `docs/calibration-notes.md` — parameter provenance
 
+**Note (v2 correction):** Two files originally claimed as reference implementations — `scripts/generate_baltic_example.py` and `app/modules/bathymetry.py` — **do not exist** in inSTREAM. The EMODnet and Baltic-cell-generation code in Phases 2-3 must be written from scratch (not ported).
+
 **Test command:** `micromamba run -n shiny python -m pytest tests/ -v`. Substitute `conda run -n shiny` on machines with conda on PATH.
+
+## Plan revision history
+
+- **v1 (2026-04-24)** — initial draft from multi-agent Curonian analysis.
+- **v2 (2026-04-24, post-review)** — three review agents (scientific-validator, code-reviewer, explore) independently flagged substantive issues. Revisions applied:
+  - **Added Task 1.3** — the critical integration bridge: `species_config` YAML key must be wired into `Simulation.__init__` via a new `load_bio_params_from_config()` in `config.py`. Without this, Tasks 1.1-1.2 produce an inert file the runtime never reads.
+  - **Fixed Handeland DOI** — `10.1016/j.aquaculture.2008.03.057` points to a flounder genetics paper. Correct is `10.1016/j.aquaculture.2008.06.042`.
+  - **Split T_MAX into T_AVOID (20°C) + T_ACUTE_LETHAL (24°C)** — treating 20°C as a hard mortality cap would wipe out all agents every Curonian summer (observed SST routinely reaches 20-22°C). T_AVOID is behavioral; acute mortality is ~24°C per Elliott & Elliott 2010. Back-compat `T_MAX` property exposes T_AVOID.
+  - **Corrected citations** — T_OPT: Jensen et al. 1989/2001 (primary) not Koskela 1997 (supporting only). Spawn window: Heinimaa & Heinimaa 2003 or local Lithuanian sources, NOT Lilja & Romakkaniemi 2003 (that paper is about June river entry, not autumn spawning). Length-weight: provenance flagged as "needs verification" (Kallio-Nyberg 2020 is not a length-weight paper).
+  - **Corrected numerics** — Curonian max depth ~14.5 m natural (not 25 m); Klaipėda salinity typically 2.5 PSU (not 7 PSU); Nemunas discharge 300-500 m³/s baseline, 1500-2500 m³/s spring flood peak (not 200-400/600-1000); YAML has ~17 citations (not 24).
+  - **Removed broken references** — `inSTREAM/.../app/modules/bathymetry.py` and `scripts/generate_baltic_example.py` do not exist. The EMODnet client must be written from scratch.
+  - **Fixed YAML field-name mismatch** — inSTREAM uses MM-DD strings (`spawn_start_day: "10-15"`) but `BalticBioParams` uses DOY integers. Added explicit translation step in Task 1.2 with a verification check to catch silent fallback-to-defaults.
+  - **Fixed `xr.open_rasterio`** — removed in xarray 2022.06. Script now uses `rioxarray.open_rasterio`.
+  - **Fixed unstructured-mesh regridding** — `raw.interp(lat=..., lon=...)` on 1D mesh node arrays does per-dim broadcasting, NOT pointwise interpolation. Both EMODnet and CMEMS scripts now use `scipy.interpolate.RegularGridInterpolator` for correct pointwise lookup.
+  - **Pinned `copernicusmarine<2.0`** — v2.0 has breaking API changes to `subset()`.
+  - **Added CMEMS land-sea mask warning** — at ~2 km native resolution, CMEMS Baltic may mask the lagoon interior as land. Added a verification step and an alternative data source (SHYFEM via Idzelytė et al. 2023) if CMEMS coverage fails.
+  - **Fixed test placeholders** — `test_environment_exposes_spatial_salinity_field` now has a concrete N>S gradient assertion. Integration test invariant replaced with hard `alive + dead + arrived == 500` (v1 was a tautology).
+  - **Added argparse to baseline script** — Phase 0 and Phase 5.2 both invoke `scripts/baseline_curonian_stub.py --config ...`; previously Phase 0 hardcoded the stub config.
+  - **Expanded deferred-follow-ups** — cormorant colony at Juodkrantė (specific location), Nemunas delta branching, hatchery vs wild origin, round goby invasion, summer cyanobacteria.
 
 ---
 
@@ -62,31 +81,54 @@
 
 **Files:** `scripts/baseline_curonian_stub.py` (new)
 
-- [ ] **Step 1: Write a deterministic baseline script**
+- [ ] **Step 1: Write a deterministic baseline script with `--config` argparse**
 
 ```python
-"""Run current stub Curonian config; record key outputs for comparison."""
-import numpy as np
+"""Run the given config; record key outputs for comparison.
+
+Used twice in this plan:
+  - Phase 0: baseline of config_curonian_minimal.yaml (stub)
+  - Phase 5.2: post-upgrade on config_curonian_baltic.yaml (realistic)
+
+Both invocations use the same script via --config, so outputs are
+directly comparable.
+"""
+import argparse
 from salmon_ibm.config import load_config
 from salmon_ibm.simulation import Simulation
 
-def run():
-    cfg = load_config("config_curonian_minimal.yaml")
-    sim = Simulation(cfg, n_agents=500, data_dir="data", rng_seed=42)
-    sim.run(n_steps=720)  # 30 days hourly
-    alive = int(sim.pool.alive.sum())
+
+def run(config_path: str, n_agents: int = 500, n_steps: int = 720):
+    cfg = load_config(config_path)
+    sim = Simulation(cfg, n_agents=n_agents, data_dir="data", rng_seed=42)
+    sim.run(n_steps=n_steps)
+    alive_mask = sim.pool.alive
+    alive = int(alive_mask.sum())
     arrived = int(sim.pool.arrived.sum())
-    mean_ed = float(sim.pool.ed_kJ_g[sim.pool.alive].mean()) if alive else 0.0
-    mean_mass = float(sim.pool.mass_g[sim.pool.alive].mean()) if alive else 0.0
+    mean_ed = float(sim.pool.ed_kJ_g[alive_mask].mean()) if alive else 0.0
+    mean_mass = float(sim.pool.mass_g[alive_mask].mean()) if alive else 0.0
     return {
-        "alive": alive, "arrived": arrived,
-        "mean_ed_kJ_g": mean_ed, "mean_mass_g": mean_mass,
+        "config": config_path,
+        "alive": alive,
+        "arrived": arrived,
+        "mean_ed_kJ_g": mean_ed,
+        "mean_mass_g": mean_mass,
         "temp_range": (float(sim.env.fields["temperature"].min()),
                        float(sim.env.fields["temperature"].max())),
+        "salinity_range": (
+            float(sim.env.fields["salinity"].min()),
+            float(sim.env.fields["salinity"].max()),
+        ) if "salinity" in sim.env.fields else (None, None),
     }
 
+
 if __name__ == "__main__":
-    for k, v in run().items():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default="config_curonian_minimal.yaml")
+    parser.add_argument("--n-agents", type=int, default=500)
+    parser.add_argument("--n-steps", type=int, default=720)
+    args = parser.parse_args()
+    for k, v in run(args.config, args.n_agents, args.n_steps).items():
         print(f"{k}: {v}")
 ```
 
@@ -131,20 +173,26 @@ def test_baltic_bioparams_defaults_from_literature():
     # Smith et al. 2009 CMax coefficients (marine-phase post-smolt S. salar)
     assert p.cmax_A == pytest.approx(0.303)
     assert p.cmax_B == pytest.approx(-0.275)
-    # Koskela et al. 1997 thermal optimum; Handeland 2008 upper lethal
+    # Jensen et al. 2001 thermal optimum
     assert p.T_OPT == pytest.approx(16.0)
-    assert p.T_MAX == pytest.approx(20.0)
-    # Kallio-Nyberg 2020 length-weight coefficients
+    # Two-threshold thermal response (v2): avoidance vs acute mortality
+    assert p.T_AVOID == pytest.approx(20.0)
+    assert p.T_ACUTE_LETHAL == pytest.approx(24.0)
+    # Length-weight (provenance under verification)
     assert p.LW_a == pytest.approx(0.0077)
     assert p.LW_b == pytest.approx(3.05)
-    # Baum & Prouzet 1987 linear fecundity
+    # Linear fecundity approximation
     assert p.fecundity_per_g == pytest.approx(2.0)
+    # Backward-compat: T_MAX property still works (maps to T_AVOID)
+    assert p.T_MAX == pytest.approx(20.0)
 
 
 def test_baltic_bioparams_rejects_invalid_ranges():
     """Post-init validation must reject nonsense parameters (same discipline as BioParams)."""
-    with pytest.raises(ValueError, match="T_MAX"):
-        BalticBioParams(T_OPT=25.0, T_MAX=20.0)
+    with pytest.raises(ValueError, match="T_AVOID"):
+        BalticBioParams(T_OPT=25.0, T_AVOID=20.0)
+    with pytest.raises(ValueError, match="T_ACUTE_LETHAL"):
+        BalticBioParams(T_AVOID=25.0, T_ACUTE_LETHAL=20.0)
     with pytest.raises(ValueError, match="cmax_A"):
         BalticBioParams(cmax_A=-1.0)
 
@@ -189,11 +237,28 @@ All scientifically-sensitive values are sourced from peer-reviewed
 literature; citations inline below. Parameter provenance summary:
 
   cmax_A, cmax_B: Smith, Booker & Wells 2009 (doi:10.1016/j.marenvres.2008.12.010)
-  T_OPT:          Koskela et al. 1997 (Baltic salmon 16-29 cm fish)
-  T_MAX:          Handeland et al. 2008 (doi:10.1016/j.aquaculture.2008.03.057)
-  LW_a, LW_b:     Kallio-Nyberg et al. 2020 (Baltic post-smolt LW regression)
-  fecundity:      Baum & Prouzet 1987 (Atlantic salmon linear fecundity)
-  spawn window:   Lilja & Romakkaniemi 2003 (Baltic spawning phenology)
+                  — verify exact values against Table 2 before production use
+  T_OPT:          Jensen, Jonsson & Forseth 2001 (doi:10.1046/j.0269-8463.2001.00572.x)
+                  — primary source for 16-17°C Atlantic salmon thermal peak;
+                  Koskela et al. 1997 (doi:10.1111/j.1095-8649.1997.tb01976.x)
+                  is Baltic low-temperature supporting evidence only.
+  T_AVOID:        20.0°C — behavioral avoidance / reduced growth (Handeland
+                  et al. 2008 doi:10.1016/j.aquaculture.2008.06.042 — CORRECTED
+                  DOI; v1 plan cited .03.057 which is a different paper).
+                  NOT a hard mortality cap.
+  T_ACUTE_LETHAL: 24.0°C — acute thermal mortality (Elliott & Elliott 2010 review;
+                  Smialek, Pander & Geist 2021 doi:10.1111/fme.12507).
+  LW_a, LW_b:     Provenance needs verification. Baltic length-weight typically
+                  from ICES WGBAST reports or Kallio-Nyberg & Ikonen 1992.
+                  Kallio-Nyberg et al. 2020 (cited in v1) is NOT a length-weight paper.
+  fecundity:      Linear 2.0 eggs/g defensible for mid-sized (Heinimaa & Heinimaa
+                  2003: 1845 eggs/kg = 1.85 eggs/g for 9 kg females). Real form
+                  declines with size — consider allometric for production runs.
+  spawn window:   Late Oct – Nov 30 for Lithuanian Nemunas tributaries (Žeimena,
+                  Merkys, Dubysa). v1 plan's Lilja & Romakkaniemi 2003 citation
+                  was WRONG — that paper is about June adult river entry, not
+                  autumn spawning. Use Heinimaa & Heinimaa 2003 or local Lithuanian
+                  sources for Nemunas basin.
 
 These values supersede the generic Snyder-Chinook BioParams for
 Baltic salmon simulations. See docs/superpowers/specs/ for full
@@ -218,17 +283,23 @@ class BalticBioParams:
     ED_TISSUE: float = 36.0   # lipid-first catabolism (Brett 1995 / Breck 2008)
     MASS_FLOOR_FRACTION: float = 0.5
 
-    # Species-specific Baltic values
-    cmax_A: float = 0.303          # Smith 2009 post-smolt CMax intercept
-    cmax_B: float = -0.275         # Smith 2009 post-smolt CMax slope
-    T_OPT: float = 16.0            # Koskela 1997 Baltic salmon thermal peak
-    T_MAX: float = 20.0            # Handeland 2008 zero-growth upper bound
-    LW_a: float = 0.0077           # Kallio-Nyberg 2020 length-weight intercept
-    LW_b: float = 3.05             # Kallio-Nyberg 2020 length-weight exponent
-    fecundity_per_g: float = 2.0   # Baum & Prouzet 1987 linear eggs-per-gram
+    # Species-specific Baltic values. Two-threshold thermal response (v2 correction):
+    #   T_OPT → peak growth
+    #   T_AVOID → behavioral avoidance (NOT a mortality gate)
+    #   T_ACUTE_LETHAL → hard mortality threshold
+    # v1 used T_MAX=20°C as a kill-gate — that would wipe out agents every Curonian
+    # summer (observed SST routinely reaches 20-22°C). Split into two thresholds.
+    cmax_A: float = 0.303           # Smith 2009 post-smolt CMax intercept
+    cmax_B: float = -0.275          # Smith 2009 post-smolt CMax slope
+    T_OPT: float = 16.0             # Jensen et al. 1989/2001 Atlantic salmon peak
+    T_AVOID: float = 20.0           # Handeland 2008: behavioral avoidance / reduced growth
+    T_ACUTE_LETHAL: float = 24.0    # Elliott & Elliott 2010: acute mortality
+    LW_a: float = 0.0077            # Length-weight intercept — provenance needs verification
+    LW_b: float = 3.05              # Length-weight exponent — provenance needs verification
+    fecundity_per_g: float = 2.0    # Linear approximation (size-declining in reality)
 
-    # Spawning phenology (day of year; Lilja & Romakkaniemi 2003)
-    spawn_window_start_day: int = 288  # Oct 15
+    # Spawning phenology (day of year; Lithuanian Nemunas basin populations)
+    spawn_window_start_day: int = 288  # Oct 15 (Lithuanian; spawning typically later than N. Finland)
     spawn_window_end_day: int = 334    # Nov 30
     spawn_temp_min_c: float = 5.0
     spawn_temp_max_c: float = 14.0
@@ -239,9 +310,13 @@ class BalticBioParams:
     )
 
     def __post_init__(self):
-        if self.T_MAX <= self.T_OPT:
+        if self.T_AVOID <= self.T_OPT:
             raise ValueError(
-                f"T_MAX ({self.T_MAX}) must be > T_OPT ({self.T_OPT})"
+                f"T_AVOID ({self.T_AVOID}) must be > T_OPT ({self.T_OPT})"
+            )
+        if self.T_ACUTE_LETHAL <= self.T_AVOID:
+            raise ValueError(
+                f"T_ACUTE_LETHAL ({self.T_ACUTE_LETHAL}) must be > T_AVOID ({self.T_AVOID})"
             )
         if self.cmax_A <= 0:
             raise ValueError(f"cmax_A must be > 0, got {self.cmax_A}")
@@ -255,6 +330,14 @@ class BalticBioParams:
             raise ValueError("ED_TISSUE and ED_MORTAL must be > 0")
         if not (0 <= self.spawn_window_start_day <= 365):
             raise ValueError("spawn_window_start_day must be 0-365")
+
+    # Backward compat: existing callers of update_energy read params.T_MAX as the
+    # thermal mortality gate. Under v2 semantics T_AVOID is that gate (behavioral),
+    # while T_ACUTE_LETHAL is the hard-mortality threshold. Expose T_MAX as T_AVOID
+    # for legacy callers; new code reading acute mortality must use T_ACUTE_LETHAL.
+    @property
+    def T_MAX(self) -> float:
+        return self.T_AVOID
 
 
 def load_baltic_species_config(path: str | Path) -> BalticBioParams:
@@ -295,39 +378,155 @@ BioParams validation.
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 ```
 
+## Task 1.3: Wire `species_config` loader into `Simulation`
+
+**Purpose:** CRITICAL GAP from v1 plan. Tasks 1.1 and 1.2 create `BalticBioParams` and the YAML file but DON'T connect them to runtime. Without this task, the species config is inert — `Simulation` keeps using the old `BioParams` regardless. This task is the bridge.
+
+**Files:**
+- Modify: `salmon_ibm/config.py` (add `load_bio_params_from_config`)
+- Modify: `salmon_ibm/simulation.py:~120` (use the new loader)
+- Test: `tests/test_baltic_params.py`
+
+- [ ] **Step 1: Write the failing integration test**
+
+Add to `tests/test_baltic_params.py`:
+
+```python
+def test_simulation_loads_baltic_bioparams_via_species_config_key(tmp_path):
+    """A YAML config with species_config: <path> must route Simulation to BalticBioParams."""
+    from salmon_ibm.config import load_bio_params_from_config
+    from salmon_ibm.baltic_params import BalticBioParams
+
+    species_yaml = tmp_path / "species.yaml"
+    species_yaml.write_text("""
+species:
+  BalticAtlanticSalmon:
+    T_OPT: 16.0
+    T_MAX: 20.0
+""")
+    cfg = {"species_config": str(species_yaml)}
+    params = load_bio_params_from_config(cfg)
+    assert isinstance(params, BalticBioParams)
+    assert params.T_OPT == 16.0
+
+
+def test_load_bio_params_falls_back_to_bio_params_when_no_species_config():
+    """If species_config key absent, return classic BioParams (backward compat)."""
+    from salmon_ibm.config import load_bio_params_from_config
+    from salmon_ibm.bioenergetics import BioParams
+
+    cfg = {"bioenergetics": {"RA": 0.003}}
+    params = load_bio_params_from_config(cfg)
+    assert isinstance(params, BioParams)
+    assert not isinstance(params, type(params).__mro__[1] if False else object)
+```
+
+- [ ] **Step 2: Run — expect FAIL (`load_bio_params_from_config` doesn't exist)**
+
+- [ ] **Step 3: Add loader to `salmon_ibm/config.py`**
+
+```python
+def load_bio_params_from_config(config: dict):
+    """Route to BalticBioParams if `species_config:` key present, else BioParams.
+
+    The species_config key points to a YAML file like
+    `configs/baltic_salmon_species.yaml` — see the Baltic realism plan
+    (docs/superpowers/plans/2026-04-24-curonian-realism-upgrades.md).
+    """
+    species_path = config.get("species_config")
+    if species_path:
+        from salmon_ibm.baltic_params import load_baltic_species_config
+        return load_baltic_species_config(species_path)
+    return bio_params_from_config(config)
+```
+
+- [ ] **Step 4: Update `simulation.py:~120` to use the new loader**
+
+Replace `self.bio_params = bio_params_from_config(config)` with `self.bio_params = load_bio_params_from_config(config)`.
+
+- [ ] **Step 5: Verify `update_energy` handles BalticBioParams**
+
+`update_energy(ed_kJ_g, mass_g, temperature_c, activity_mult, salinity_cost, params)` reads `params.RA, params.RB, params.RQ, params.ED_MORTAL, params.ED_TISSUE, params.MASS_FLOOR_FRACTION`. `BalticBioParams` exposes all of these with compatible defaults — no signature change needed. Document this with a comment in `update_energy`:
+
+```python
+def update_energy(..., params):
+    """params: BioParams | BalticBioParams (both expose the same Wisconsin fields)."""
+```
+
+- [ ] **Step 6: Run the integration tests — expect PASS**
+
+```bash
+micromamba run -n shiny python -m pytest tests/test_baltic_params.py tests/test_bioenergetics.py tests/test_simulation.py -v
+```
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add salmon_ibm/config.py salmon_ibm/simulation.py salmon_ibm/bioenergetics.py tests/test_baltic_params.py
+git commit -m "feat(config): route species_config YAML key to BalticBioParams loader
+
+Wires the Phase 1 Baltic species config into Simulation.__init__. Without
+this bridge Phases 1.1 and 1.2 would be inert — the YAML exists, the
+dataclass exists, but no code path reads one into the other.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
+```
+
+---
+
 ## Task 1.2: Port the full `baltic_salmon_species.yaml` config
 
 **Files:**
 - `configs/baltic_salmon_species.yaml` (new — copy from inSTREAM with HexSim schema adaptations)
 
-- [ ] **Step 1: Copy and adapt**
+> **v2 correction — field name mismatch in inSTREAM YAML.** The source file uses `spawn_start_day: "10-15"` and `spawn_end_day: "11-30"` (MM-DD strings), not `spawn_window_start_day: 288` (integer). A plain `cp` will NOT work: `load_baltic_species_config()` filters unknown keys and will silently fall back to BalticBioParams defaults with no error. Translation is required.
+
+- [ ] **Step 1: Copy AND adapt (not a plain cp)**
 
 ```bash
 cp "C:/Users/arturas.baziukas/OneDrive - ku.lt/HORIZON_EUROPE/inSTREAM/instream-py/configs/baltic_salmon_species.yaml" \
     "C:/Users/arturas.baziukas/OneDrive - ku.lt/HORIZON_EUROPE/HexSim/configs/baltic_salmon_species.yaml"
 ```
 
-Then edit the new file to keep only the fields `BalticBioParams` recognizes (CMax, T_OPT, T_MAX, LW_a, LW_b, fecundity, spawn window). Preserve all citation comments — they document provenance.
+Then edit the new HexSim file:
+1. Keep only the fields `BalticBioParams` recognizes (CMax, T_OPT, T_AVOID, T_ACUTE_LETHAL, LW_a, LW_b, fecundity, spawn window).
+2. **Translate MM-DD spawn fields to day-of-year integers:**
 
-- [ ] **Step 2: Test round-trip: config → params**
+```yaml
+# OLD (inSTREAM): spawn_start_day: "10-15"  # string MM-DD
+# OLD (inSTREAM): spawn_end_day:   "11-30"  # string MM-DD
+# NEW (HexSim):   spawn_window_start_day: 288  # Oct 15 = DOY 288
+# NEW (HexSim):   spawn_window_end_day:   334  # Nov 30 = DOY 334
+```
 
-Run the `test_baltic_species_config_loader_parses_yaml` test against the real ported file:
+3. **Split `T_MAX` into `T_AVOID` + `T_ACUTE_LETHAL`** per the two-threshold thermal model (see Task 1.1 docstring). If the inSTREAM file has a single `T_MAX: 20.0`, replace with:
+
+```yaml
+T_AVOID: 20.0
+T_ACUTE_LETHAL: 24.0
+```
+
+4. **Preserve all citation comments** from inSTREAM verbatim — they document provenance. Correct the Handeland DOI if present (`.03.057` → `.06.042`).
+
+- [ ] **Step 2: Test round-trip**
 
 ```bash
 micromamba run -n shiny python -c "
 from salmon_ibm.baltic_params import load_baltic_species_config
 p = load_baltic_species_config('configs/baltic_salmon_species.yaml')
-print(f'OK: T_OPT={p.T_OPT}, T_MAX={p.T_MAX}, spawn={p.spawn_window_start_day}-{p.spawn_window_end_day}')
+print(f'OK: T_OPT={p.T_OPT}, T_AVOID={p.T_AVOID}, T_ACUTE_LETHAL={p.T_ACUTE_LETHAL}, spawn={p.spawn_window_start_day}-{p.spawn_window_end_day}')
 "
 ```
 
-Expected output: `OK: T_OPT=16.0, T_MAX=20.0, spawn=288-334`.
+Expected: `OK: T_OPT=16.0, T_AVOID=20.0, T_ACUTE_LETHAL=24.0, spawn=288-334`.
+
+If output shows `spawn=288-334` but you did NOT set those keys explicitly in the YAML, the translation step above was skipped and the loader is falling back to defaults — fix the YAML.
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add configs/baltic_salmon_species.yaml
-git commit -m "feat(baltic): port baltic_salmon_species.yaml from inSTREAM with full citations"
+git commit -m "feat(baltic): port baltic_salmon_species.yaml with MM-DD→DOY translation and T_AVOID/T_ACUTE_LETHAL split"
 ```
 
 ---
@@ -344,67 +543,99 @@ git commit -m "feat(baltic): port baltic_salmon_species.yaml from inSTREAM with 
 - `scripts/fetch_emodnet_bathymetry.py` (new)
 - `data/curonian_bathymetry.nc` (new, generated)
 
-- [ ] **Step 1: Inspect the inSTREAM reference**
+- [ ] **Step 1: Install needed packages**
+
+> **v2 correction:** the v1 plan referenced `inSTREAM/.../app/modules/bathymetry.py::fetch_emodnet_dtm` as a template, but that file does **not** exist in inSTREAM. Write the EMODnet client from scratch using owslib + rioxarray.
 
 ```bash
-grep -n "fetch_emodnet_dtm\|emodnet__mean\|WCS" \
-    "C:/Users/arturas.baziukas/OneDrive - ku.lt/HORIZON_EUROPE/inSTREAM/instream-py/app/modules/bathymetry.py" | head -30
+micromamba install -n shiny owslib rioxarray
 ```
 
-Note the WCS URL, coverage name, request parameters, and the rasterio/xarray pattern it uses.
+- [ ] **Step 2: Verify EMODnet WCS coverage name**
 
-- [ ] **Step 2: Write `scripts/fetch_emodnet_bathymetry.py`**
+EMODnet Bathymetry releases (2018, 2020, 2022) have used different coverage names. Before coding, manually check the current GetCapabilities:
 
-Skeleton (adapt from inSTREAM reference):
+```bash
+curl -s "https://ows.emodnet-bathymetry.eu/wcs?service=WCS&version=2.0.1&request=GetCapabilities" | grep -oE "<wcs:CoverageId>[^<]+" | head -5
+```
+
+Use the coverage name returned by the live service. If "emodnet__mean" is no longer valid, use whatever the service lists (likely `emodnet_mean_2022` or similar).
+
+- [ ] **Step 3: Write `scripts/fetch_emodnet_bathymetry.py`**
 
 ```python
 """Fetch EMODnet Bathymetry for the Curonian Lagoon + Nemunas mouth + Baltic coast.
 
-Output: data/curonian_bathymetry.nc with variables (lat, lon, depth).
+Output: data/curonian_bathymetry.nc with variables (lat, lon, depth) on the
+Curonian mesh nodes.
 
-Fetches EMODnet DTM 2022 (1/16 arc-minute mean) via WCS, subsets to
-the Curonian bounding box, and regrids onto the existing Curonian
-triangular mesh defined in data/curonian_minimal_grid.nc.
-
-Provenance recorded in docs/curonian-data-provenance.md.
+v2 implementation notes:
+  - `xr.open_rasterio` was removed in xarray 2022.06 — use rioxarray.
+  - Unstructured-mesh regridding: we cannot use `raw.interp(lat=..., lon=...)`
+    with 1-D node coordinate arrays because xarray's interp broadcasts along
+    each dim independently, not point-wise. We use scipy.interpolate instead.
 """
 import argparse
+import datetime
 from pathlib import Path
 
 import numpy as np
 import xarray as xr
-import requests  # or owslib.wcs; whichever inSTREAM used
+import rioxarray  # registers .rio accessor on xr.DataArray/Dataset
+from owslib.wcs import WebCoverageService
+from scipy.interpolate import RegularGridInterpolator
 
-# Curonian Lagoon + mouth + 10 km coastal buffer
 BBOX = {
     "minlon": 20.4, "maxlon": 21.9,
     "minlat": 54.9, "maxlat": 55.8,
 }
 WCS_URL = "https://ows.emodnet-bathymetry.eu/wcs"
+# VERIFY against live GetCapabilities (Step 2); update if the release has changed.
 COVERAGE = "emodnet__mean"
 
 
-def fetch(bbox=BBOX, out_path="data/curonian_bathymetry_raw.tif"):
-    # WCS GetCoverage request; see inSTREAM reference for exact params
-    ...
+def fetch(bbox, out_path):
+    wcs = WebCoverageService(WCS_URL, version="2.0.1")
+    response = wcs.getCoverage(
+        identifier=[COVERAGE],
+        subsets=[("Lat", bbox["minlat"], bbox["maxlat"]),
+                 ("Long", bbox["minlon"], bbox["maxlon"])],
+        format="image/tiff",
+    )
+    with open(out_path, "wb") as f:
+        f.write(response.read())
 
 
 def regrid_to_mesh(raw_tif_path, mesh_nc_path, out_nc_path):
     mesh = xr.open_dataset(mesh_nc_path)
-    raw = xr.open_rasterio(raw_tif_path).squeeze()
-    # Interpolate raw (regular grid) onto mesh.lat, mesh.lon (1D node positions)
-    depth = raw.interp(x=mesh.lon, y=mesh.lat, method="linear")
+    # rioxarray opens a georeferenced raster with .x/.y coordinates
+    raw = rioxarray.open_rasterio(raw_tif_path).squeeze()
+    # raw.x is lon, raw.y is lat (descending per GeoTIFF convention)
+    # Build a scipy interpolator for point-wise queries on mesh nodes
+    x = raw.x.values  # lon (1D)
+    y = raw.y.values  # lat (1D, likely descending)
+    z = raw.values    # (n_y, n_x) depth in meters (EMODnet convention: positive down)
+    # Flip to ascending latitude if needed, so the interpolator gets monotonic axes
+    if y[0] > y[-1]:
+        y = y[::-1]
+        z = z[::-1, :]
+    interp = RegularGridInterpolator(
+        (y, x), z, method="linear", bounds_error=False, fill_value=np.nan
+    )
+    query_points = np.column_stack([mesh.lat.values, mesh.lon.values])
+    depth_at_nodes = interp(query_points)
+    # EMODnet uses negative values for depth below sea level; normalize to positive
+    # downward if that's the HexSim convention (check mesh.depth semantics).
+    depth_at_nodes = np.abs(depth_at_nodes)
     ds = xr.Dataset(
-        {"depth": (("node",), depth.values)},
-        coords={
-            "lat": ("node", mesh.lat.values),
-            "lon": ("node", mesh.lon.values),
-        },
+        {"depth": (("node",), depth_at_nodes.astype(np.float32))},
+        coords={"lat": ("node", mesh.lat.values),
+                "lon": ("node", mesh.lon.values)},
         attrs={
-            "source": "EMODnet Bathymetry 2022, 1/16 arc-min mean",
+            "source": "EMODnet Bathymetry (verify release via WCS GetCapabilities)",
             "url": WCS_URL,
             "coverage": COVERAGE,
-            "fetched": "<fill-in-date>",
+            "fetched": datetime.date.today().isoformat(),
             "license": "CC-BY 4.0 (EMODnet)",
         },
     )
@@ -417,7 +648,7 @@ if __name__ == "__main__":
     parser.add_argument("--out", default="data/curonian_bathymetry.nc")
     args = parser.parse_args()
     tif = "data/curonian_bathymetry_raw.tif"
-    fetch(out_path=tif)
+    fetch(BBOX, tif)
     regrid_to_mesh(tif, args.mesh, args.out)
     print(f"Wrote {args.out}")
 ```
@@ -435,11 +666,14 @@ print(f'mean Curonian depth (expected ~3.8 m): {float(ds.depth.mean()):.2f} m')
 "
 ```
 
-Expected values (validate against EMODnet):
-- Curonian Lagoon mean: ~3.5-4.5 m (it is a shallow lagoon)
-- Near Klaipėda Strait: 5-15 m
-- Baltic Sea coast: 10-25 m within 10 km
+Expected values (validated against Mėžinė et al. 2019, Stragauskaitė et al. 2021):
+- Curonian Lagoon mean: ~3.8 m (lagoon area 1584 km², volume 6.3 km³; Mėžinė 2019)
+- Klaipėda Strait natural max: ~14.5 m (dredged shipping channel is deeper but artificial)
+- Nemunas mouth: ~5 m
+- Baltic Sea coast within 10 km: 10-25 m
 - No negative depths (land) in the mesh region; if present, mesh mask is wrong.
+
+**Note:** any `depth.max() > 18 m` in the natural mesh indicates the bbox has captured dredged port channels at Klaipėda (artificial, ~14.5 m natural maximum). Decide whether to include (if agents can use shipping channels) or clip.
 
 - [ ] **Step 4: Add regression test**
 
@@ -459,10 +693,16 @@ def test_emodnet_curonian_depth_sanity():
     ds = xr.open_dataset(bathy)
     depth = ds.depth.values
     assert np.all(depth >= 0), f"Negative depths found (land): {depth[depth < 0]}"
+    # Curonian published mean is ~3.8 m (Mėžinė et al. 2019); allow 2-7 m envelope.
     assert 2.0 < float(depth.mean()) < 7.0, (
         f"Mean depth {depth.mean():.2f} m outside expected Curonian range 2-7 m"
     )
-    assert depth.max() < 50.0, "Unreasonable deep hole; verify bounding box"
+    # Natural max ~14.5 m at Klaipėda Strait; coast to 25 m in 10 km buffer.
+    # >30 m suggests the bbox has captured too much open Baltic or a WCS error.
+    assert depth.max() < 30.0, (
+        f"Max depth {depth.max():.1f} m — natural Curonian max is 14.5 m, "
+        f"coast reaches ~25 m in 10 km buffer. Check bbox."
+    )
 ```
 
 - [ ] **Step 5: Commit**
@@ -566,11 +806,31 @@ echo "Username: <your-cmems-user>" > ~/.copernicusmarine-credentials
 # See https://help.marine.copernicus.eu/en/articles/4444611 for details
 ```
 
-- [ ] **Step 2: Install CMEMS client**
+- [ ] **Step 2: Install CMEMS client — PIN THE VERSION**
+
+`copernicusmarine` v2.0 (Nov 2024) rewrote the `subset()` API; this plan's script targets v1.x syntax. Pin:
 
 ```bash
-micromamba install -n shiny copernicusmarine
+micromamba install -n shiny "copernicusmarine>=1.3,<2.0"
 ```
+
+If you need v2+, update the script's `cm.subset()` call — `output_filename` and dataset selection keywords changed.
+
+- [ ] **Step 2a: CMEMS land-sea mask warning for the Curonian**
+
+CMEMS Baltic physics runs at ~2 km (≈1 nautical mile) native resolution. The Curonian Lagoon is a shallow coastal lagoon; in the CMEMS Baltic grid many of its cells may be masked as **land**. Before committing to CMEMS for the lagoon interior, verify coverage by plotting `tos` on day 1 and confirming the lagoon is not uniform NaN:
+
+```bash
+micromamba run -n shiny python -c "
+import xarray as xr
+import numpy as np
+ds = xr.open_dataset('data/curonian_forcing_cmems_raw.nc')
+print(f'NaN fraction in tos[0]: {float(np.isnan(ds.thetao.isel(time=0)).mean()):.2%}')
+print(f'Valid temp range on day 0: {float(ds.thetao.isel(time=0).min()):.1f} to {float(ds.thetao.isel(time=0).max()):.1f}')
+"
+```
+
+If >50% of the Curonian mesh falls in CMEMS-masked land, CMEMS is the wrong data source for the lagoon interior. Fall back to the **SHYFEM high-resolution Curonian hydrodynamic model** (Idzelytė et al. 2023, doi:10.5194/os-19-1047-2023) or interpolate from nearby Baltic Proper cells.
 
 - [ ] **Step 3: Write `scripts/fetch_cmems_forcing.py`**
 
@@ -605,16 +865,58 @@ def fetch_physics():
 
 
 def regrid_to_mesh(raw_nc, mesh_nc, out_nc):
+    """Regrid CMEMS (regular lat/lon grid) onto the unstructured Curonian mesh.
+
+    Uses point-wise interpolation via scipy — xarray's `interp` with 1D
+    coordinate arrays does NOT do pointwise interpolation on unstructured
+    meshes; it broadcasts along each dim independently. This is the same
+    gotcha as the EMODnet bathymetry script.
+    """
     import xarray as xr
+    import numpy as np
+    from scipy.interpolate import RegularGridInterpolator
+
     raw = xr.open_dataset(raw_nc)
     mesh = xr.open_dataset(mesh_nc)
-    # Interpolate each variable onto mesh nodes
-    regridded = raw.interp(latitude=mesh.lat, longitude=mesh.lon, method="linear")
-    # Rename to HexSim's expected variable names (per config)
-    regridded = regridded.rename({
-        "thetao": "tos", "so": "sos", "uo": "uo", "vo": "vo", "zos": "zos",
-    })
-    regridded.to_netcdf(out_nc)
+    n_time = raw.sizes["time"]
+    n_nodes = mesh.lat.size
+
+    # CMEMS dim names may be 'latitude'/'longitude' or 'lat'/'lon' depending
+    # on product; normalize.
+    rename = {d: "lat" for d in raw.dims if d in ("latitude",)}
+    rename.update({d: "lon" for d in raw.dims if d in ("longitude",)})
+    raw = raw.rename(rename)
+
+    lat_src = raw.lat.values
+    lon_src = raw.lon.values
+    # Ensure ascending
+    if lat_src[0] > lat_src[-1]:
+        lat_src = lat_src[::-1]
+        raw = raw.isel(lat=slice(None, None, -1))
+    query = np.column_stack([mesh.lat.values, mesh.lon.values])
+
+    variables = {}
+    for src, dst in [("thetao", "tos"), ("so", "sos"),
+                     ("uo", "uo"), ("vo", "vo"), ("zos", "zos")]:
+        if src not in raw:
+            continue
+        arr = raw[src].squeeze().values  # (time, lat, lon) — drop depth if present
+        out = np.empty((n_time, n_nodes), dtype=np.float32)
+        for t in range(n_time):
+            interp = RegularGridInterpolator(
+                (lat_src, lon_src), arr[t],
+                method="linear", bounds_error=False, fill_value=np.nan,
+            )
+            out[t] = interp(query).astype(np.float32)
+        variables[dst] = (("time", "node"), out)
+
+    ds = xr.Dataset(
+        variables,
+        coords={"time": raw.time.values,
+                "lat": ("node", mesh.lat.values),
+                "lon": ("node", mesh.lon.values)},
+    )
+    ds.to_netcdf(out_nc)
 
 
 if __name__ == "__main__":
@@ -640,10 +942,12 @@ print(f'n_days: {ds.sizes[\"time\"]} (expect ~5113 for 2011-2024)')
 "
 ```
 
-Expected sanity:
-- Temperature: 0-22°C (winter cold, summer warm)
-- Salinity: 0-8 PSU (E-W gradient across lagoon + mouth)
-- Number of days: ~5113 for 2011-2024
+Expected sanity (validated against Stakėnienė et al. 2023, Idzelytė et al. 2023):
+- Temperature: 0-22°C (winter cold, summer warm at surface)
+- Salinity in Klaipėda Strait: typical 2.5 PSU, with episodic intrusions reaching 6-7 PSU in autumn (2019-2020 extreme: 6.3 PSU). The 1986-2005 mean was 2.5 PSU at the strait and 1.2 PSU in the lagoon interior. Gradient does not extend >~20 km south of the strait — most of the lagoon is freshwater. v1 plan's "0-7 PSU across the lagoon" was a peak-intrusion extreme, not typical.
+- Number of days: ~5113 for 2011-2024.
+
+**Expected CMEMS NetCDF file size: 200-800 MB** for the full Curonian bbox + 5 variables × 5113 days. Add `data/curonian_forcing_cmems*.nc` to `.gitignore` (see Phase 6 provenance doc); commit regeneration script instead.
 
 - [ ] **Step 5: Commit**
 
@@ -675,23 +979,49 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 
 ```python
 def test_environment_exposes_spatial_salinity_field():
-    """Environment.fields['salinity'] must be a per-cell array from CMEMS forcing."""
+    """Environment.fields['salinity'] must be a per-cell array from CMEMS forcing.
+
+    Verifies (a) shape matches mesh, (b) values are in Baltic lagoon range,
+    (c) gradient points the right direction: saltier near Klaipėda Strait
+    (NW, ~55.7 N, 21.1 E) than at Nemunas mouth (SE, ~55.3 N, 21.2 E).
+    """
     import numpy as np
-    import xarray as xr
+    from pathlib import Path
+    import pytest
     from salmon_ibm.environment import Environment
     from salmon_ibm.mesh import TriMesh
 
+    if not Path("data/curonian_forcing_cmems.nc").exists():
+        pytest.skip("Run scripts/fetch_cmems_forcing.py first")
+
     mesh = TriMesh.from_netcdf("data/curonian_minimal_grid.nc")
-    env = Environment(mesh, "data/curonian_forcing_cmems.nc")
-    env.advance(t=0)  # Jan 1, 2011
+    env = Environment({"forcings": {"physics_surface": {
+        "file": "curonian_forcing_cmems.nc", "salt_var": "sos",
+        "temp_var": "tos", "u_var": "uo", "v_var": "vo", "ssh_var": "zos",
+        "time_var": "time",
+    }}}, mesh, data_dir="data")
+    env.advance(t=0)
     sal = env.fields["salinity"]
     assert sal.shape == (mesh.n_triangles,)
-    assert np.all(sal >= 0), "Negative salinity"
-    assert np.all(sal <= 10), "Unreasonably high salinity for Curonian"
-    # E-W gradient: cells near Klaipėda (north-west, high lat + low lon) should
-    # be saltier than cells at Nemunas mouth (south-east).
-    # Pick two cells: use mesh.centroids to find NW and SE.
-    ...
+    # Lagoon-realistic envelope: 0 PSU interior to ~7 PSU peak at strait.
+    valid = sal[~np.isnan(sal)]
+    assert valid.size > 0, "All-NaN salinity — CMEMS land-sea mask covers mesh"
+    assert np.all(valid >= 0), "Negative salinity"
+    assert valid.max() <= 10.0, f"Unrealistic salinity max {valid.max():.1f} PSU"
+
+    # Gradient check: sort cells by latitude; northern cells should average
+    # higher salinity than southern cells (Klaipėda Strait vs Nemunas mouth).
+    centroids = mesh.centroids  # (n_tri, 2) as [lat, lon]
+    lat = centroids[:, 0]
+    north_mask = lat > np.percentile(lat, 75)  # top quartile by latitude
+    south_mask = lat < np.percentile(lat, 25)
+    north_mean = float(np.nanmean(sal[north_mask]))
+    south_mean = float(np.nanmean(sal[south_mask]))
+    assert north_mean > south_mean, (
+        f"Expected saltier at north (Klaipėda Strait, {north_mean:.2f} PSU) "
+        f"than south (Nemunas mouth, {south_mean:.2f} PSU) — CMEMS gradient "
+        f"may be inverted or lagoon is mostly land-masked on this day."
+    )
 ```
 
 - [ ] **Step 2: Run — expect FAIL**
@@ -835,11 +1165,19 @@ def test_realistic_curonian_runs_with_realistic_dynamics():
     assert 0.0 <= float(temp.min()) < 25.0
     assert 0.0 <= float(sal.min()) and float(sal.max()) <= 10.0
 
-    # Agent sanity
-    alive = sim.pool.alive.sum()
+    # Agent sanity — hard invariant (not a tautology like v1)
+    alive = int(sim.pool.alive.sum())
+    dead = int((~sim.pool.alive & ~sim.pool.arrived).sum())
+    arrived = int(sim.pool.arrived.sum())
+    assert alive + dead + arrived == 500, (
+        f"Agent count invariant broken: alive={alive} dead={dead} arrived={arrived}"
+    )
+    # Not total extinction — 30 days at realistic temperature should keep some alive
     assert alive > 0, "All agents died — env likely broken"
-    # Not everyone should arrive in 30 days; not everyone should die
-    assert 0 < int(sim.pool.arrived.sum()) + int(alive) <= 500
+    # At realistic Curonian temperature, thermal-avoid threshold 20°C should
+    # NOT cause mass die-off; T_ACUTE_LETHAL=24°C is the real mortality gate.
+    # If >90% died in 30 days, something is wrong with the thermal response.
+    assert dead < 450, f"Mass die-off ({dead}/500) — check T_ACUTE_LETHAL logic"
 
     # Baltic-salmon bioenergetics should keep mean ED in 4-7 kJ/g range
     mean_ed = float(sim.pool.ed_kJ_g[sim.pool.alive].mean())
@@ -960,9 +1298,14 @@ After Phases 1-6 land:
 Create each as its own dedicated plan when this one lands:
 
 1. **Reach-level habitat attributes** (FRACSPWN, FRACVSHL, shelter_speed_frac, drift_conc per cell). Requires OSM landcover + possible Lithuanian field data. Estimated 2-3 weeks.
-2. **Grey seal + cormorant predation events.** Adds new event types in `events_builtin.py`. Estimated 1 week.
-3. **Ice cover Dec-Mar** and **seiche wind-forcing.** P2 realism polish.
-4. **Real Nemunas EPA discharge** when data access is granted.
+2. **Grey seal + cormorant predation events.** Adds new event types in `events_builtin.py`. Cormorant colony at **Juodkrantė on the Curonian Spit** is the specific location (4,000+ breeding pairs); not a generic Kuršių Nerija reference. Estimated 1 week.
+3. **Ice cover Dec-Mar** — 58-134 days of lagoon ice cover (Idzelytė et al. 2019); critical for egg/winter-resident modeling. Also triggers under-ice hypoxia. P2 realism polish.
+4. **Seiche wind-forcing** — wire `winds_stub.nc` into `seiche_pause()`.
+5. **Real Nemunas EPA discharge** — negotiate access to Lithuanian Environmental Protection Agency records at Smalininkai station (Valiuškevičius et al. 2019: long-term mean ~530-700 m³/s, spring flood 1500-2500+ m³/s).
+6. **Nemunas delta branching** — the delta splits into **Atmata, Skirvytė, Pakalnė, Gilija, Rusnė**. Skirvytė carries the main flow to Kaliningrad; Atmata/Pakalnė discharge to the NE corner of the lagoon. Salmon homing to natal tributaries (Žeimena, Merkys, Dubysa) must navigate this branching — needs topology-aware migration logic.
+7. **Hatchery vs wild fish distinction** — most "Baltic salmon" in the Nemunas today are **hatchery-origin from Žeimena and Simnas rivers** (Lithuanian programme since 1997). Separate calibration and behavior parameters for hatchery vs wild populations may be needed.
+8. **Round goby egg predation** — `Neogobius melanostomus` invasion in the Curonian since 2002 (Rakauskas et al. 2013) is a potential egg/larval predator on salmon redds.
+9. **Summer cyanobacteria + hypoxia** — heavy eutrophic lagoon (Mėžinė et al. 2019); summer DO crashes and H₂S episodes documented but not scoped here.
 
 # Rollback plan
 
