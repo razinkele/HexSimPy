@@ -1,0 +1,9 @@
+config: config_curonian_minimal.yaml
+n_agents: 500
+n_steps: 720
+alive: 500
+arrived: 0
+mean_ed_kJ_g: 6.499999999999998
+mean_mass_g: 3077.96642259454
+temp_range: (15.2664155960083, 19.843034744262695)
+salinity_range: (0.5245642066001892, 6.662906646728516)
