@@ -43,6 +43,42 @@
   - Added **Execution order** section near the top showing Phases 1-4 must land before Phase 5 can run. Without explicit ordering, an implementer could defer Phase 3 (CMEMS) and then Phase 5's integration test would skip silently via `pytest.skip` for missing data — false green.
   - Added **Task 3.1 Step 2b**: SHYFEM fallback stub (`scripts/fetch_shyfem_forcing.py`). Keeps a placeholder in-tree so an implementer hitting the CMEMS land-mask failure path doesn't have to invent the fallback from scratch. The stub raises `NotImplementedError` with an explicit contact pointer to KU Marine Research Institute.
 
+## Post-execution notes (actual results vs plan predictions)
+
+All 6 phases were executed on 2026-04-24 against the live codebase. The following are lessons learned that a future session should know — predictions that matched, that didn't, and new edge cases found only at execution time.
+
+### ✅ Predictions that matched
+
+- **N>S salinity gradient is real** — post-fetch CMEMS shows northern quartile cells ~0.5-2 PSU saltier than southern, exactly as the estuary physics required.
+- **EMODnet bathymetry gives realistic Curonian depths** — mean 11.9 m across the mesh (mesh extends into Baltic coast, hence higher than lagoon-interior 3-4 m). `test_bathymetry_mesh_envelope` pins 2-20 m mean.
+- **The 3-pass plan review caught all execution-blocking bugs** before coding. Zero blocker-class surprises at execution.
+- **BalticBioParams+Population integration worked without touching `update_energy`** — the plan's claim that "BalticBioParams exposes all the same Wisconsin fields" was correct; no existing Chinook path broke.
+
+### ❌ Predictions that were wrong
+
+- **`copernicusmarine<2.0` pin is incompatible with Python 3.13.** The `shiny` env is Python 3.13, and v1.x requires Python <3.13. Had to use v2.4 with its breaking API changes. The v2 breakages encountered:
+  - `force_download` → deprecated, ignored (warning only)
+  - `overwrite_output_data` → renamed to `overwrite`
+  - `zos` not in `cmems_mod_bal_phy_my_P1D-m` dataset (needed a separate SSH product which was deferred)
+- **owslib 2.0.1 requires `identifier=coverage` as a string**, not `identifier=[coverage]` as the plan's skeleton wrote. A list gets URL-encoded as the Python `repr` (e.g. `%5B%27emodnet__mean%27%5D`) and the WCS service returns HTTP 404.
+- **35% NaN from CMEMS land-sea mask is enough to kill all agents.** The plan's 50% threshold for SHYFEM fallback was too loose — at 35% NaN, NaN values still propagated through the thermal kill path and killed every agent. Fix landed: `NearestNDInterpolator` fill of any NaN cells, not just at the 50%+ threshold.
+
+### 🆕 Execution-only discoveries
+
+- **The mesh is `(y=30, x=30)` 2D regular grid, not 1D node-indexed.** The plan's regridder skeleton used `np.column_stack([lat.values, lon.values])` assuming 1D arrays. With 2D lat/lon, `column_stack` does `hstack` → shape `(30, 60)` which scipy's `RegularGridInterpolator` rejects (expects `(N, 2)`). Fix: `.ravel()` the mesh coords before stacking, reshape output back to `(y, x)`.
+- **`xarray.to_netcdf()` defaults to NetCDF4**, but HexSim's `Environment` loader uses `engine="scipy"` which only reads NetCDF3. All data writes must specify `format="NETCDF3_64BIT"` explicitly. Hit this on both Nemunas discharge and CMEMS regridded output.
+- **Environment loader requires `ssh_var` even if no SSH product is available.** Plan deferred real SSH to a separate product, but the loader fails fast without `ssh_var`. Workaround: zero-fill `zos` in the CMEMS regridder output so the loader succeeds and seiche detection becomes a no-op until a real SSH product is wired.
+- **EMODnet coverage name `emodnet__mean` (double underscore) still valid** as of 2026-04-24 — no need for the plan's dynamic coverage-picker `pick_coverage()` helper, but the helper is future-proof so it stayed.
+- **CMEMS download size: 227 MB raw → 92 MB regridded** for the Curonian bbox × 5114 days × 4 variables at 2 km native. Within the plan's 200-800 MB envelope estimate.
+
+### Tooling environment
+
+- Python 3.13 in micromamba env `shiny`
+- `copernicusmarine 2.4.0` (installed via conda-forge)
+- `owslib 2.0.1` (installed via conda-forge)
+- `rioxarray 0.19.0` (installed via conda-forge)
+- `pytest-mock` needed installing to fix a pre-existing (unrelated) test regression — landed at session end.
+
 ---
 
 ## File Structure
