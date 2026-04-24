@@ -1,0 +1,60 @@
+# Baltic Atlantic salmon (Salmo salar) species configuration for HexSim.
+#
+# Adapted from inSTREAM's configs/baltic_salmon_species.yaml with HexSim
+# schema reconciliation:
+#   - spawn_start_day "10-15" (MM-DD string)  →  spawn_window_start_day: 288 (DOY integer)
+#   - weight_A/B                                 →  LW_a/LW_b (HexSim naming)
+#   - single T_MAX=20                            →  T_AVOID=20 + T_ACUTE_LETHAL=24
+#     (v3 of the Curonian realism plan: 20°C hard-kill would wipe agents every
+#      Curonian summer; split into behavioral-avoidance and acute-lethal)
+#   - Corrected Handeland et al. 2008 DOI: .03.057 → .06.042 (.03.057 points
+#     to a flounder genetics paper)
+#
+# All scientifically-sensitive parameters are sourced from peer-reviewed
+# literature; inline citations preserve inSTREAM's provenance audit trail.
+# See docs/superpowers/plans/2026-04-24-curonian-realism-upgrades.md for
+# the full revision history and rationale.
+
+species:
+  BalticAtlanticSalmon:
+    # --- Wisconsin bioenergetics ---
+    RA: 0.00264
+    RB: -0.217
+    RQ: 0.06818
+    ED_MORTAL: 4.0
+    ED_TISSUE: 36.0  # lipid-first catabolism (Brett 1995; Breck 2008)
+    MASS_FLOOR_FRACTION: 0.5
+
+    # --- CMax allometric (Smith 2009 Thornton-Lessem post-smolt curve) ---
+    cmax_A: 0.303
+      # [Smith, Booker & Wells 2009, doi:10.1016/j.marenvres.2008.12.010 —
+      #  marine-phase post-smolt Salmo salar CMax allometric intercept]
+    cmax_B: -0.275
+      # [Smith, Booker & Wells 2009, doi:10.1016/j.marenvres.2008.12.010 —
+      #  marine-phase post-smolt Salmo salar CMax allometric slope]
+
+    # --- Thermal response (two-threshold, HexSim v3) ---
+    T_OPT: 16.0
+      # [Jensen, Jonsson & Forseth 2001, doi:10.1046/j.0269-8463.2001.00572.x
+      #  — Atlantic salmon thermal performance]
+    T_AVOID: 20.0
+      # [Handeland, Imsland & Stefansson 2008, doi:10.1016/j.aquaculture.2008.06.042
+      #  — post-smolt zero-growth upper; behavioral avoidance NOT acute mortality]
+    T_ACUTE_LETHAL: 24.0
+      # [Elliott & Elliott 2010 review; Smialek, Pander & Geist 2021,
+      #  doi:10.1111/fme.12507 — Atlantic salmon acute thermal mortality]
+
+    # --- Length-weight relationship ---
+    LW_a: 0.0077
+      # [Baltic Atlantic salmon typical LW range; exact source under verification]
+    LW_b: 3.05
+
+    # --- Fecundity (linear approximation; real form declines with size) ---
+    fecundity_per_g: 2.0
+
+    # --- Spawning phenology (day-of-year integers, Lithuanian Nemunas basin) ---
+    spawn_window_start_day: 288   # Oct 15
+    spawn_window_end_day: 334     # Nov 30
+    spawn_temp_min_c: 5.0
+    spawn_temp_max_c: 14.0
+      # [Heggberget & Wallace 1984; Heinimaa & Heinimaa 2003 for Baltic reference]
