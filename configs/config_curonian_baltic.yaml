@@ -1,0 +1,62 @@
+# Curonian Lagoon simulation config — Baltic salmon realism.
+#
+# Per docs/superpowers/plans/2026-04-24-curonian-realism-upgrades.md:
+#   - Phase 1 DONE:  species_config wired to baltic_salmon_species.yaml.
+#   - Phase 2 TODO:  replace depth stub with EMODnet (scripts/fetch_emodnet_bathymetry.py).
+#   - Phase 3 TODO:  replace forcing_cmems_phy_stub.nc with real CMEMS data
+#                    (scripts/fetch_cmems_forcing.py).
+#   - Phase 4 DONE:  nemunas_discharge.nc is a synthetic climatology; replace
+#                    with Lithuanian EPA data when access is granted.
+#
+# Until Phases 2-3 land, this config uses stub forcings but already drives
+# the simulation with Baltic bioenergetics (T_AVOID=20, T_ACUTE_LETHAL=24,
+# lipid-first ED_TISSUE=36) via the species_config key.
+
+# Baltic Atlantic salmon parameters (literature-traced, 8 citations inline).
+# Presence of this key routes the simulation to BalticBioParams; absence
+# falls back to the classic BioParams (Chinook defaults).
+species_config: configs/baltic_salmon_species.yaml
+
+grid:
+  file: curonian_minimal_grid.nc
+  lat_var: lat
+  lon_var: lon
+  mask_var: mask
+  depth_var: depth
+
+forcings:
+  physics_surface:
+    # TODO Phase 3: replace with data/curonian_forcing_cmems.nc (real CMEMS Baltic).
+    file: forcing_cmems_phy_stub.nc
+    time_var: time
+    u_var: uo
+    v_var: vo
+    ssh_var: zos
+    temp_var: tos
+    salt_var: sos
+  river_discharge:
+    # Phase 4: synthetic Nemunas climatology (scripts/fetch_nemunas_discharge.py).
+    # Replace with Lithuanian EPA records when access is granted.
+    file: nemunas_discharge.nc
+    time_var: time
+    Q_var: Q
+  winds:
+    # Still a stub; wiring into seiche_pause() is deferred to its own plan.
+    file: winds_stub.nc
+    time_var: time
+    u10_var: u10
+    v10_var: v10
+
+# Estuary parameters use the updated Liland 2024 DO thresholds from earlier
+# review work. Salinity cost is scalar — Phase 3 will make salinity a
+# spatially-explicit field.
+estuary:
+  salinity_cost:
+    S_opt: 0.5
+    S_tol: 6.0
+    k: 0.6
+  do_avoidance:
+    lethal: 3.0        # Liland et al. 2024 (was 2.0 in v1 plan)
+    high: 5.5          # Liland et al. 2024 (was 4.0 in v1 plan)
+  seiche_pause:
+    dSSHdt_thresh_m_per_15min: 0.02
