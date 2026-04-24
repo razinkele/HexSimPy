@@ -39,6 +39,9 @@
   - **CRITICAL:** the back-compat `T_MAX` property on `BalticBioParams` returns `T_AVOID = 20.0°C`. But `simulation.py:252` (`_event_bioenergetics`) and `events_builtin.py:97` (`SurvivalEvent`) use `self.bio_params.T_MAX` as a **hard kill gate** — so Baltic configs would kill agents at 20°C, the exact mass-die-off the v2 thermal split was designed to prevent. Task 1.3 Step 5 now explicitly updates both kill-gate callers to prefer `T_ACUTE_LETHAL` via `getattr(bio_params, "T_ACUTE_LETHAL", bio_params.T_MAX)`. `events_builtin.py` added to Task 1.3's Files list.
   - Task 1.3 Step 4 now updates BOTH the import line in `simulation.py:34` AND the call site — v2 only mentioned the call site, which would have produced `ImportError` at runtime.
   - Fixed vacuous `not isinstance(params, object)` assertion in the fallback test (v2 had `type(params).__mro__[1] if False else object` which always evaluated to `object`).
+- **v3.1 (2026-04-24, post-v3-fresh-eyes)** — a generalist pass after three specialist passes surfaced two small-but-real operational risks:
+  - Added **Execution order** section near the top showing Phases 1-4 must land before Phase 5 can run. Without explicit ordering, an implementer could defer Phase 3 (CMEMS) and then Phase 5's integration test would skip silently via `pytest.skip` for missing data — false green.
+  - Added **Task 3.1 Step 2b**: SHYFEM fallback stub (`scripts/fetch_shyfem_forcing.py`). Keeps a placeholder in-tree so an implementer hitting the CMEMS land-mask failure path doesn't have to invent the fallback from scratch. The stub raises `NotImplementedError` with an explicit contact pointer to KU Marine Research Institute.
 
 ---
 
@@ -68,6 +71,30 @@
 - `salmon_ibm/config.py` — support species-config block pointing to baltic_salmon_species.yaml
 
 ---
+
+## Execution order (critical)
+
+Phases are **sequentially dependent** for Phase 5 (integration) to succeed:
+
+```
+  Phase 0 (baseline capture)
+    ↓
+  Phase 1 (species config + loader wiring)
+    ↓
+  Phase 2 (EMODnet bathymetry)
+    ↓
+  Phase 3 (CMEMS forcing + spatial salinity)   ← may fall back to SHYFEM
+    ↓
+  Phase 4 (Nemunas discharge, synthetic or real)
+    ↓
+  Phase 5 (integration test)
+    ↓
+  Phase 6 (provenance documentation)
+```
+
+Phase 6 is the only phase that can be done any time (pure documentation). All others MUST be done in order — skipping Phase 3 for later means Phase 5's integration test can't run (will skip silently via `pytest.skip(...)` due to missing CMEMS data).
+
+**Do NOT start Phase 5 until Phases 1-4 have all landed.**
 
 ## Scope: what this plan does NOT cover
 
@@ -877,6 +904,43 @@ print(f'Valid temp range on day 0: {float(ds.thetao.isel(time=0).min()):.1f} to 
 ```
 
 If >50% of the Curonian mesh falls in CMEMS-masked land, CMEMS is the wrong data source for the lagoon interior. Fall back to the **SHYFEM high-resolution Curonian hydrodynamic model** (Idzelytė et al. 2023, doi:10.5194/os-19-1047-2023) or interpolate from nearby Baltic Proper cells.
+
+- [ ] **Step 2b: SHYFEM fallback stub (prepare before attempting CMEMS)**
+
+Create `scripts/fetch_shyfem_forcing.py` as a placeholder to avoid inventing a fallback mid-execution if CMEMS land-masking fails:
+
+```python
+"""SHYFEM Curonian Lagoon hydrodynamic model output fetcher (FALLBACK).
+
+Use only if CMEMS land-sea mask covers >50% of the Curonian mesh
+(see fetch_cmems_forcing.py Step 2a verification).
+
+Reference: Idzelytė et al. 2023, doi:10.5194/os-19-1047-2023 — SHYFEM
+unstructured-mesh coupled hydrological-hydrodynamic model for Nemunas
++ Curonian Lagoon. Output hosted at Klaipėda University Marine Research
+Institute; access requires contact with R. Idzelytė or the authors.
+
+This is a PLACEHOLDER. Fill in the actual access path + variable names
+when SHYFEM is actually needed. Keeping the file in-tree means the
+implementer does not have to invent a fallback on the spot.
+"""
+import argparse
+
+
+def fetch_shyfem_forcing(bbox, start, end, out_path):
+    raise NotImplementedError(
+        "SHYFEM fallback not wired. Contact KU Marine Research Institute "
+        "for data access; see Idzelytė et al. 2023 for variable names."
+    )
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--bbox", default="20.4,54.9,21.9,55.8")
+    parser.add_argument("--out", default="data/curonian_forcing_shyfem.nc")
+    args = parser.parse_args()
+    fetch_shyfem_forcing(args.bbox, "2011-01-01", "2024-12-31", args.out)
+```
 
 - [ ] **Step 3: Write `scripts/fetch_cmems_forcing.py`**
 
