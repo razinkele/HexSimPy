@@ -26,11 +26,15 @@ grid:
 
 forcings:
   physics_surface:
-    # TODO Phase 3: replace with data/curonian_forcing_cmems.nc (real CMEMS Baltic).
-    file: forcing_cmems_phy_stub.nc
+    # Phase 3 DONE: real CMEMS Baltic reanalysis 2011-2024 (5114 days, 30x30, 73.7 MB).
+    # Land-sea mask coverage: 35% NaN on day 0 — acceptable, SHYFEM fallback not needed.
+    file: curonian_forcing_cmems.nc
     time_var: time
     u_var: uo
     v_var: vo
+    # ssh_var zos is zero-filled in the fetcher output (real SSH not in
+    # BALTICSEA_MULTIYEAR_PHY_003_011). Seiche detection will be a no-op
+    # until a separate SSH product is wired in a follow-up plan.
     ssh_var: zos
     temp_var: tos
     salt_var: sos
