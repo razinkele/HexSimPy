@@ -13,6 +13,19 @@ build/
 .claude/
 .playwright-mcp/
 
+# Credentials — must never be committed
+.env
+.env.*
+!.env.example
+.copernicusmarine-credentials
+.cmems-credentials
+
+# Large CMEMS / EMODnet downloads (regeneratable via scripts/)
+data/curonian_forcing_cmems.nc
+data/curonian_forcing_cmems_raw.nc
+data/curonian_forcing_shyfem.nc
+data/curonian_bathymetry_raw.tif
+
 # OS
 Thumbs.db
 .DS_Store
