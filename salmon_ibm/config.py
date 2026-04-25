@@ -219,7 +219,7 @@ def barrier_map_from_config(cfg: dict, mesh):
             ),
         )
     hbf_path = bar_cfg["file"]
-    bmap = BarrierMap.from_hbf(hbf_path, mesh, class_config=class_config) if class_config else BarrierMap.from_hbf(hbf_path, mesh)
+    bmap = BarrierMap.from_hbf_hexsim(hbf_path, mesh, class_config=class_config) if class_config else BarrierMap.from_hbf_hexsim(hbf_path, mesh)
     if not bmap.has_barriers():
         return None
     arrays = bmap.to_arrays(mesh)

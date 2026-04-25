@@ -99,7 +99,7 @@ class Simulation:
 
             hbf_path = barrier_cfg.get("file")
             if hbf_path:
-                bmap = BarrierMap.from_hbf(hbf_path, self.mesh)
+                bmap = BarrierMap.from_hbf_hexsim(hbf_path, self.mesh)
                 if bmap.has_barriers():
                     self._barrier_arrays = bmap.to_arrays(self.mesh)
 

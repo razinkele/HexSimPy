@@ -51,8 +51,25 @@ class BarrierMap:
         return len(self._edges)
 
     @classmethod
-    def from_hbf(cls, path, mesh, class_config=None):
-        """Load barriers from .hbf file and map to compact mesh indices."""
+    def empty(cls) -> "BarrierMap":
+        """No-barrier map — for landscapes without barriers (e.g. Nemunas H3)."""
+        return cls()
+
+    @classmethod
+    def from_hbf_hexsim(cls, path, mesh, class_config=None):
+        """Load barriers from HexSim ``.hbf`` file into compact mesh indices.
+
+        Requires a :class:`HexMesh` (reads ``_ncols``, ``_nrows``,
+        ``_full_to_compact``).  Raises ``TypeError`` on any other mesh
+        backend — H3 / Tri landscapes should use their own sibling loader
+        (``BarrierMap.from_csv_h3`` once Phase 4 lands, or ``empty()``
+        for barrier-free scenarios).
+        """
+        if not hasattr(mesh, "_ncols"):
+            raise TypeError(
+                f"BarrierMap.from_hbf_hexsim requires a HexMesh; "
+                f"got {type(mesh).__name__}"
+            )
         barriers = read_barriers(str(path))
         bmap = cls()
         from salmon_ibm.hexsim import _hex_neighbors_offset

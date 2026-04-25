@@ -35,7 +35,7 @@ class TestColumbiaWorkspaceCompatibility:
         hbf_files = glob.glob(f"{ws_escaped}/Spatial Data/barriers/**/*.hbf", recursive=True)
         if not hbf_files:
             pytest.skip("No .hbf files found")
-        bmap = BarrierMap.from_hbf(hbf_files[0], mesh)
+        bmap = BarrierMap.from_hbf_hexsim(hbf_files[0], mesh)
         assert bmap.n_edges > 0
 
     def test_full_simulation_with_config(self):
