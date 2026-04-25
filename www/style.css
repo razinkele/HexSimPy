@@ -250,7 +250,10 @@ aside.sidebar {
     background: linear-gradient(180deg, var(--lagoon-dark) 0%, var(--lagoon-deep) 100%) !important;
     border-right: 1px solid var(--card-border) !important;
     color: var(--text-primary) !important;
-    padding: 16px 14px !important;
+    /* 8px top padding (was 16px) keeps the status strip and Landscape
+     * accordion close to the top edge — there's no header text above
+     * them now that 'Salmon IBM' moved to the navbar. */
+    padding: 8px 14px !important;
     overflow-y: auto;
 }
 
@@ -581,19 +584,22 @@ input[type="number"]:focus, select:focus {
 
 /* --- Sidebar status strip — single tight row above the accordion ---
  * Holds progress_text + status_text on one line with `gap` separating
- * them.  Replaces the old vertical stack of two divs (each with
- * margin: 6px 0) plus a hr separator. */
+ * them.  No wrap: at 290px sidebar width the two short labels fit
+ * comfortably; if they ever don't, we'd rather see overflow than a
+ * second line that pushes the accordion down. */
 .sidebar-status-strip {
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     align-items: baseline;
-    gap: 4px 12px;
+    gap: 10px;
     font-family: var(--font-mono);
-    font-size: 0.78rem;
+    font-size: 0.74rem;
     color: var(--lagoon-shallow);
-    padding: 4px 6px;
-    margin-bottom: 6px;
+    padding: 2px 4px;
+    margin-bottom: 4px;
     border-bottom: 1px solid var(--card-border);
+    white-space: nowrap;
+    overflow-x: auto;
 }
 
 .sidebar-status-strip > * {
@@ -1113,6 +1119,19 @@ button[aria-label="Toggle sidebar"] {
     color: var(--text-primary);
     margin-top: 8px;
     min-height: 28px;
+}
+
+/* Before the simulation runs, the live_stats() callback returns an
+ * empty <div class="live-stats-bar"></div>.  Without this rule the
+ * empty bar still occupies min-height + padding + margin (~50 px) and
+ * pushes the accordion down. */
+.live-stats-bar:empty,
+.shiny-html-output:has(> .live-stats-bar:empty) {
+    margin: 0 !important;
+    padding: 0 !important;
+    min-height: 0 !important;
+    border: 0 !important;
+    background: transparent !important;
 }
 .trail-toggle {
     display: flex;
