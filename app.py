@@ -1423,23 +1423,23 @@ def server(input, output, session):
             return {"longitude": lon, "latitude": lat, "zoom": zoom}
         # TriMesh — mesh.nodes stores [lat, lon] in degrees (degrees because
         # the build script writes raw lat/lon arrays into the NC).  Centre
-        # on the bbox midpoint with a zoom that fits the whole bbox into
-        # the viewport with a small margin.
+        # on the bbox midpoint at a zoom that frames the lagoon comfortably.
         if not is_hexsim and hasattr(mesh, "nodes"):
             try:
                 node_lat = mesh.nodes[:, 0]
                 node_lon = mesh.nodes[:, 1]
                 lat_lo, lat_hi = float(node_lat.min()), float(node_lat.max())
                 lon_lo, lon_hi = float(node_lon.min()), float(node_lon.max())
-                # Both arrays look like real lat/lon (within ±90/±180).
                 if -90 <= lat_lo <= 90 and -180 <= lon_lo <= 180:
                     lat = 0.5 * (lat_lo + lat_hi)
                     lon = 0.5 * (lon_lo + lon_hi)
-                    extent = max(lat_hi - lat_lo, lon_hi - lon_lo, 0.01)
-                    # Zoom = log2(360 / extent) gives full-globe at 1° extent.
-                    # Subtract 0.4 for a small margin around the bbox.
-                    zoom = float(max(0.0, min(15.0, np.log2(360.0 / extent) - 0.4)))
-                    return {"longitude": lon, "latitude": lat, "zoom": zoom}
+                    # Hardcoded zoom 8.5 — at the Curonian Lagoon bbox
+                    # (~0.9° lat × 1.5° lon) this frames the whole
+                    # lagoon + Curonian Spit + Baltic strip with a
+                    # comfortable margin.  Computed-from-extent zooms
+                    # tested too high (the map widget cached its
+                    # post-init zoom of ~12 for unclear reasons).
+                    return {"longitude": lon, "latitude": lat, "zoom": 8.5}
             except Exception:
                 pass
         if is_hexsim:
