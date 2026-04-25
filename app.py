@@ -1415,37 +1415,32 @@ def server(input, output, session):
         is_h3 = hasattr(sim.mesh, "resolution")
         is_hexsim = hasattr(sim.mesh, "n_cells") and not is_h3
         if is_h3:
-            # H3Mesh.centroids is [lat, lon] in degrees — feed deck.gl
-            # WebMercator directly.  No multiply by _cached_scale, no
-            # axis flip (the HexSim path negates y to compensate for an
-            # HexSim-internal "y-up meters" convention that doesn't
-            # apply here).
+            # H3Mesh — render as actual hexagons via H3HexagonLayer (the
+            # deck.gl layer that takes a hex ID string and tessellates
+            # the cell on the GPU).  Each cell is a per-feature dict
+            # with `hex` (string) + `color` (RGBA).  ~52k features —
+            # the JSON payload is ~5 MB but the layer renders in <100 ms.
+            import h3 as _h3
             mesh = sim.mesh
-            positions = np.column_stack(
-                [
-                    mesh.centroids[idx, 1],   # lon
-                    mesh.centroids[idx, 0],   # lat
-                ]
-            ).astype(np.float32)
             rgb = _colorscale_rgb(z, cscale)
-            colors = np.column_stack(
-                [
-                    rgb[idx, 0],
-                    rgb[idx, 1],
-                    rgb[idx, 2],
-                    np.full(n, 220, dtype=np.uint8),
-                ]
-            ).astype(np.uint8)
-            water = layer(
-                "ScatterplotLayer",
+            h3_ids = mesh.h3_ids[idx]
+            data_rows = [
+                {
+                    "hex": _h3.int_to_str(int(h)),
+                    "color": [int(r), int(g), int(b), 220],
+                }
+                for h, (r, g, b) in zip(h3_ids.tolist(), rgb[idx].tolist())
+            ]
+            water = h3_hexagon_layer(
                 "water",
-                data={"length": n},
-                getPosition=encode_binary_attribute(positions),
-                getFillColor=encode_binary_attribute(colors),
-                getRadius=0.0001,
-                radiusMinPixels=3,
-                radiusMaxPixels=8,
+                data=data_rows,
+                getHexagon="@@=d.hex",
+                getFillColor="@@=d.color",
+                stroked=False,
+                filled=True,
+                extruded=False,
                 pickable=False,
+                highPrecision=True,
             )
         elif is_hexsim:
             # ScatterplotLayer for hex grid — avoids SolidPolygonLayer WebGL
@@ -1508,32 +1503,27 @@ def server(input, output, session):
         n = len(idx)
 
         if is_h3:
+            import h3 as _h3
             mesh = sim.mesh
-            positions = np.column_stack(
-                [
-                    mesh.centroids[idx, 1],   # lon
-                    mesh.centroids[idx, 0],   # lat
-                ]
-            ).astype(np.float32)
             rgb = _colorscale_rgb(z, cscale)
-            colors = np.column_stack(
-                [
-                    rgb[idx, 0],
-                    rgb[idx, 1],
-                    rgb[idx, 2],
-                    np.full(n, 220, dtype=np.uint8),
-                ]
-            ).astype(np.uint8)
-            water = layer(
-                "ScatterplotLayer",
+            h3_ids = mesh.h3_ids[idx]
+            data_rows = [
+                {
+                    "hex": _h3.int_to_str(int(h)),
+                    "color": [int(r), int(g), int(b), 220],
+                }
+                for h, (r, g, b) in zip(h3_ids.tolist(), rgb[idx].tolist())
+            ]
+            water = h3_hexagon_layer(
                 "water",
-                data={"length": n},
-                getPosition=encode_binary_attribute(positions),
-                getFillColor=encode_binary_attribute(colors),
-                getRadius=0.0001,
-                radiusMinPixels=3,
-                radiusMaxPixels=8,
+                data=data_rows,
+                getHexagon="@@=d.hex",
+                getFillColor="@@=d.color",
+                stroked=False,
+                filled=True,
+                extruded=False,
                 pickable=False,
+                highPrecision=True,
             )
             _cached_water_layer = water
             layers = [water]
