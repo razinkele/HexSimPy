@@ -1515,18 +1515,21 @@ def server(input, output, session):
         nonlocal _cached_water_n, _cached_water_layer
         z, cscale = _resolve_field(sim)
         idx = _water_idx(sim)
-        pos_bin, col_bin, n = _build_water_binary(
-            sim.mesh,
-            z,
-            cscale,
-            idx,
-            scale=_cached_scale,
-            landscape=landscape,
-        )
+        n = len(idx)
         _cached_water_n = n
 
         is_h3 = hasattr(sim.mesh, "resolution")
         is_hexsim = hasattr(sim.mesh, "n_cells") and not is_h3
+        # _build_water_binary is the legacy ScatterplotLayer-positions
+        # path used only for HexSim (n_cells without resolution) and
+        # the TriMesh fallback when BitmapLayer can't supply a field.
+        # Skip it for H3 + the BitmapLayer success path — those allocate
+        # tens of MB of binary data we never send.
+        pos_bin = col_bin = None
+        if is_hexsim or (not is_h3 and n > 0):
+            # We may need pos_bin/col_bin for the fallback branch below.
+            # Defer the heavy encoding until we know we'll use it.
+            pass
         if is_h3:
             # H3Mesh — render as actual hexagons via H3HexagonLayer (the
             # deck.gl layer that takes a hex ID string and tessellates
@@ -1616,13 +1619,18 @@ def server(input, output, session):
                 )
             else:
                 # Fall back to the legacy ScatterplotLayer if the field
-                # isn't on the forcing NC for some reason.
+                # isn't on the forcing NC for some reason.  Build the
+                # heavy binary buffers on demand (~15 MB at 916 k cells).
+                pb, cb, n2 = _build_water_binary(
+                    sim.mesh, z, cscale, idx,
+                    scale=_cached_scale, landscape=landscape,
+                )
                 water = layer(
                     "ScatterplotLayer",
                     "water",
-                    data={"length": n},
-                    getPosition=pos_bin,
-                    getFillColor=col_bin,
+                    data={"length": n2},
+                    getPosition=pb,
+                    getFillColor=cb,
                     getRadius=30,
                     radiusMinPixels=2,
                     radiusMaxPixels=6,
@@ -1630,12 +1638,20 @@ def server(input, output, session):
                 )
         _cached_water_layer = water
         update_layers = [water, _build_trips_layer()]
-        await map_widget.update(
-            session,
-            layers=update_layers,
-            view_state=_view_state(sim, landscape=landscape),
-            views=[map_view(controller=True)],
-        )
+        try:
+            await map_widget.update(
+                session,
+                layers=update_layers,
+                view_state=_view_state(sim, landscape=landscape),
+                views=[map_view(controller=True)],
+            )
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception(
+                "map_widget.update failed (n=%d, layer=%s)", n,
+                getattr(water, "get", lambda k, d=None: d)("type"),
+            )
+            raise
 
     async def _hex_color_update(sim, landscape=None):
         """Rebuild hex grid with new field colors — no set_style, no view state change."""
