@@ -1730,14 +1730,30 @@ def server(input, output, session):
                 else:
                     style = CARTO_POSITRON if _cached_theme == "light" else CARTO_DARK
                     await map_widget.set_style(session, style)
-                    # Give the basemap a moment to finish loading.  If
-                    # the deck_update message arrives mid-style-swap,
-                    # maplibre's jumpTo silently no-ops and the camera
-                    # stays at world default zoom 1.  This 600 ms delay
-                    # is shorter than a typical style swap (~250-400 ms)
-                    # plus a margin; the user notices nothing.
+                    # Give the basemap a moment to finish loading.
                     await asyncio.sleep(0.6)
                 await _full_update(sim, landscape=landscape)
+                # Re-issue the camera state via deck_fly_to AFTER the
+                # layers + style are settled.  Without this, the
+                # initial maplibre jumpTo (issued inside deck_update)
+                # races the basemap loader and the camera stays at
+                # world default zoom 1.
+                if not is_hexsim:
+                    await asyncio.sleep(0.3)
+                    vs = _view_state(sim, landscape=landscape)
+                    try:
+                        await map_widget.fly_to(
+                            session,
+                            longitude=vs["longitude"],
+                            latitude=vs["latitude"],
+                            zoom=vs["zoom"],
+                            duration=0,  # jumpTo, not animated
+                        )
+                    except Exception:
+                        import logging
+                        logging.getLogger(__name__).debug(
+                            "fly_to fallback failed (non-fatal)"
+                        )
                 try:
                     await session.send_custom_message("map_loader_hide", {})
                 except Exception:
