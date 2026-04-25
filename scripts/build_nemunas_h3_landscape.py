@@ -176,12 +176,26 @@ def sample_cmems(
 # ---------------------------------------------------------------------------
 
 
-def polygon_water_mask(lats: np.ndarray, lons: np.ndarray) -> np.ndarray:
+def polygon_water_mask(
+    lats: np.ndarray, lons: np.ndarray, buffer_deg: float = 0.001
+) -> np.ndarray:
     """For each (lat, lon) centroid, True if it lies inside the OSM ∪ NE
-    water polygon union.  Uses an STRtree spatial index so 100k points
-    over a polygon with thousands of rings still runs in a few seconds.
+    water polygon union — buffered outward by ``buffer_deg`` first.
+
+    A naive centroid-in-polygon test rejects cells whose centre sits a
+    few tens of metres past a riverbank, even though most of the H3 hex
+    is still in-water.  At res-9 cells are ~200 m across, and OSM river
+    polygons hug the bank tightly, so without buffering a 200-300 m wide
+    river renders as broken dots — the user-visible "scattered hexes"
+    bug.
+
+    Buffering the polygon by 0.001° (~110 m at lat 55°) — roughly half
+    a cell edge — recaptures bank-adjacent cells without re-admitting
+    polderland 5-10 km from any water (the original false-positive set).
     """
     union = get_water_union()
+    if buffer_deg > 0:
+        union = union.buffer(buffer_deg)
     # The union is typically a MultiPolygon; STRtree wants a flat list of
     # polygons.  ``.geoms`` returns the components for both Polygon and
     # MultiPolygon (after we wrap a Polygon in a 1-element list).

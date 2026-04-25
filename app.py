@@ -786,7 +786,15 @@ def server(input, output, session):
             )
 
         # ── Initialize streaming chart bins ──
+        # Three cases for "upstream distance" (the migration-progress chart's
+        # x-axis):
+        #   * HexSim workspace with a `Gradient [ upstream ]` hexmap → use it.
+        #   * TriMesh (Curonian) → centroid x-coordinate in meters.
+        #   * H3Mesh (Nemunas) → no notion of upstream/downstream in a delta;
+        #     fall back to longitude (degrees) just so the chart has a
+        #     non-degenerate axis.  centroids[:, 1] is lon for H3Mesh.
         ws = getattr(sim.mesh, "_workspace", None)
+        is_h3 = sim.mesh.__class__.__name__ == "H3Mesh"
         if ws and "Gradient [ upstream ]" in ws.hexmaps:
             up_hm = ws.hexmaps["Gradient [ upstream ]"]
             up_vals = up_hm.values[up_hm.values > 0]
@@ -794,6 +802,14 @@ def server(input, output, session):
             sim._upstream_distances = up_hm.values[sim.mesh._water_full_idx].astype(
                 np.float64
             )
+        elif is_h3:
+            # H3Mesh.centroids stores [lat, lon] in degrees.  Use lon as a
+            # placeholder axis for the streaming chart; the chart label is
+            # still "river_length_km" but the actual ecological meaning is
+            # "longitude" for delta scenarios.
+            lon = sim.mesh.centroids[:, 1].astype(np.float64)
+            sim._upstream_distances = lon - lon.min()
+            max_dist = float(sim._upstream_distances.max()) or 1.0
         else:
             max_dist = float(abs(sim.mesh.centroids[:, 0]).max())
             sim._upstream_distances = sim.mesh.centroids[:, 0].copy()
@@ -803,7 +819,11 @@ def server(input, output, session):
 
         # Push chart reset to JS
         try:
-            n_agents = int(cfg["grid"].get("n_agents", input.n_agents()))
+            # Legacy HexSim configs nest n_agents under cfg["grid"]; H3 +
+            # TriMesh configs don't have a "grid" block, so fall back to
+            # the sidebar input.
+            grid_cfg = cfg.get("grid") or {}
+            n_agents = int(grid_cfg.get("n_agents", input.n_agents()))
             await session.send_custom_message(
                 "chart_reset",
                 {
