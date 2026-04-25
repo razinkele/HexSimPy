@@ -1730,6 +1730,13 @@ def server(input, output, session):
                 else:
                     style = CARTO_POSITRON if _cached_theme == "light" else CARTO_DARK
                     await map_widget.set_style(session, style)
+                    # Give the basemap a moment to finish loading.  If
+                    # the deck_update message arrives mid-style-swap,
+                    # maplibre's jumpTo silently no-ops and the camera
+                    # stays at world default zoom 1.  This 600 ms delay
+                    # is shorter than a typical style swap (~250-400 ms)
+                    # plus a margin; the user notices nothing.
+                    await asyncio.sleep(0.6)
                 await _full_update(sim, landscape=landscape)
                 try:
                     await session.send_custom_message("map_loader_hide", {})
