@@ -1285,7 +1285,15 @@ def server(input, output, session):
         """Return subsample indices for the current mesh."""
         nonlocal _cached_subsample_idx
         mesh = sim.mesh
-        is_hexsim = hasattr(mesh, "n_cells")
+        is_h3 = hasattr(mesh, "resolution")           # H3Mesh
+        is_hexsim = hasattr(mesh, "n_cells") and not is_h3  # HexMesh only
+        if is_h3:
+            # H3: render only water cells.  Land cells in a delta NetCDF
+            # carry depth=0 / NaN forcing and would render as zero-coloured
+            # noise that visually competes with the actual water grid.
+            if _cached_subsample_idx is None:
+                _cached_subsample_idx = np.where(mesh.water_mask)[0]
+            return _cached_subsample_idx
         if is_hexsim:
             if _cached_subsample_idx is None:
                 n = mesh.n_cells
@@ -1304,7 +1312,23 @@ def server(input, output, session):
     def _view_state(sim, landscape=None):
         """Return the appropriate view_state for the current landscape."""
         mesh = sim.mesh
+        is_h3 = hasattr(mesh, "resolution")
         is_hexsim = hasattr(mesh, "_edge")
+        if is_h3:
+            # H3Mesh.centroids is [lat, lon] in degrees — no scale, no flip.
+            water = np.where(mesh.water_mask)[0]
+            if len(water):
+                lat = float(np.median(mesh.centroids[water, 0]))
+                lon = float(np.median(mesh.centroids[water, 1]))
+            else:
+                lat = float(np.median(mesh.centroids[:, 0]))
+                lon = float(np.median(mesh.centroids[:, 1]))
+            # Zoom: pin ≥3 px per H3 edge.
+            import h3 as _h3
+            edge_m = _h3.average_hexagon_edge_length(mesh.resolution, unit="m")
+            zoom = float(np.log2(3 * 156543.03 / max(edge_m, 1.0)))
+            zoom = float(max(0.0, min(22.0, zoom)))
+            return {"longitude": lon, "latitude": lat, "zoom": zoom}
         if is_hexsim:
             cx = mesh.centroids[:, 1] * _cached_scale
             cy = -mesh.centroids[:, 0] * _cached_scale
@@ -1388,8 +1412,42 @@ def server(input, output, session):
         )
         _cached_water_n = n
 
-        is_hexsim = hasattr(sim.mesh, "n_cells")
-        if is_hexsim:
+        is_h3 = hasattr(sim.mesh, "resolution")
+        is_hexsim = hasattr(sim.mesh, "n_cells") and not is_h3
+        if is_h3:
+            # H3Mesh.centroids is [lat, lon] in degrees — feed deck.gl
+            # WebMercator directly.  No multiply by _cached_scale, no
+            # axis flip (the HexSim path negates y to compensate for an
+            # HexSim-internal "y-up meters" convention that doesn't
+            # apply here).
+            mesh = sim.mesh
+            positions = np.column_stack(
+                [
+                    mesh.centroids[idx, 1],   # lon
+                    mesh.centroids[idx, 0],   # lat
+                ]
+            ).astype(np.float32)
+            rgb = _colorscale_rgb(z, cscale)
+            colors = np.column_stack(
+                [
+                    rgb[idx, 0],
+                    rgb[idx, 1],
+                    rgb[idx, 2],
+                    np.full(n, 220, dtype=np.uint8),
+                ]
+            ).astype(np.uint8)
+            water = layer(
+                "ScatterplotLayer",
+                "water",
+                data={"length": n},
+                getPosition=encode_binary_attribute(positions),
+                getFillColor=encode_binary_attribute(colors),
+                getRadius=0.0001,
+                radiusMinPixels=3,
+                radiusMaxPixels=8,
+                pickable=False,
+            )
+        elif is_hexsim:
             # ScatterplotLayer for hex grid — avoids SolidPolygonLayer WebGL
             # buffer issues with large polygon counts + startIndices
             mesh = sim.mesh
@@ -1443,12 +1501,43 @@ def server(input, output, session):
     async def _hex_color_update(sim, landscape=None):
         """Rebuild hex grid with new field colors — no set_style, no view state change."""
         nonlocal _cached_water_layer
+        is_h3 = hasattr(sim.mesh, "resolution")
         is_hexsim = hasattr(sim.mesh, "_edge")
         z, cscale = _resolve_field(sim)
         idx = _water_idx(sim)
         n = len(idx)
 
-        if is_hexsim:
+        if is_h3:
+            mesh = sim.mesh
+            positions = np.column_stack(
+                [
+                    mesh.centroids[idx, 1],   # lon
+                    mesh.centroids[idx, 0],   # lat
+                ]
+            ).astype(np.float32)
+            rgb = _colorscale_rgb(z, cscale)
+            colors = np.column_stack(
+                [
+                    rgb[idx, 0],
+                    rgb[idx, 1],
+                    rgb[idx, 2],
+                    np.full(n, 220, dtype=np.uint8),
+                ]
+            ).astype(np.uint8)
+            water = layer(
+                "ScatterplotLayer",
+                "water",
+                data={"length": n},
+                getPosition=encode_binary_attribute(positions),
+                getFillColor=encode_binary_attribute(colors),
+                getRadius=0.0001,
+                radiusMinPixels=3,
+                radiusMaxPixels=8,
+                pickable=False,
+            )
+            _cached_water_layer = water
+            layers = [water]
+        elif is_hexsim:
             mesh = sim.mesh
             scale = _cached_scale
             positions = np.column_stack(
@@ -1518,7 +1607,8 @@ def server(input, output, session):
             field_changed = field_name != _cached_field
 
             if landscape_changed:
-                is_hexsim = hasattr(sim.mesh, "n_cells")
+                is_h3 = hasattr(sim.mesh, "resolution")
+                is_hexsim = hasattr(sim.mesh, "n_cells") and not is_h3
                 if is_hexsim:
                     max_coord = max(
                         abs(sim.mesh.centroids[:, 0]).max(),
@@ -1526,6 +1616,7 @@ def server(input, output, session):
                     )
                     scale = 80.0 / max(max_coord, 1)
                 else:
+                    # TriMesh + H3Mesh both render in true lat/lon — no scale.
                     scale = 1.0
                 _cached_landscape = landscape
                 _cached_field = field_name

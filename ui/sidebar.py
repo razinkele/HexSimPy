@@ -20,42 +20,7 @@ def sidebar_panel():
             ),
             style="margin-bottom: 8px;",
         ),
-        # ── Run controls (vertical) ──
-        ui.div(
-            ui.div(
-                ui.input_action_button("btn_run", "Run", class_="btn-run"),
-                ui.input_action_button("btn_step", "Step", class_="btn-step"),
-                ui.input_action_button("btn_pause", "Pause", class_="btn-pause"),
-                ui.input_action_button("btn_reset", "Reset", class_="btn-reset"),
-                class_="btn-group sidebar-btn-group",
-            ),
-            ui.div(
-                ui.tags.label("Speed", **{"for": "speed"}),
-                ui.input_slider("speed", None, min=1, max=10, value=1, width="100%"),
-                class_="speed-control sidebar-speed",
-            ),
-            ui.div(
-                ui.input_switch("show_trails", "Trails", value=True),
-                class_="trail-toggle",
-            ),
-            ui.div(
-                ui.input_select(
-                    "map_field",
-                    None,
-                    choices={
-                        "depth": "Bathymetry",
-                        "temperature": "Temperature",
-                        "salinity": "Salinity",
-                        "ssh": "SSH",
-                    },
-                    selected="depth",
-                    width="100%",
-                ),
-                class_="field-selector",
-            ),
-            class_="sidebar-run-controls",
-        ),
-        # ── Status counters ──
+        # ── Status counters (always visible — small footprint, frequently checked) ──
         ui.div(
             ui.output_text("progress_text"),
             style="font-family: var(--font-mono); font-size: 0.82rem; color: var(--lagoon-shallow); margin: 6px 0;",
@@ -66,8 +31,44 @@ def sidebar_panel():
         ),
         ui.output_ui("live_stats"),
         ui.hr(),
-        # ── Parameter accordions (all closed by default) ──
+        # ── Accordion (Run open by default; parameter groups closed) ──
         ui.accordion(
+            ui.accordion_panel(
+                "Run",
+                ui.div(
+                    ui.input_action_button("btn_run", "Run", class_="btn-run"),
+                    ui.input_action_button("btn_step", "Step", class_="btn-step"),
+                    ui.input_action_button("btn_pause", "Pause", class_="btn-pause"),
+                    ui.input_action_button("btn_reset", "Reset", class_="btn-reset"),
+                    class_="btn-group sidebar-btn-group",
+                ),
+                ui.div(
+                    ui.tags.label("Speed", **{"for": "speed"}),
+                    ui.input_slider(
+                        "speed", None, min=1, max=10, value=1, width="100%"
+                    ),
+                    class_="speed-control sidebar-speed",
+                ),
+                ui.div(
+                    ui.input_switch("show_trails", "Trails", value=True),
+                    class_="trail-toggle",
+                ),
+                ui.div(
+                    ui.input_select(
+                        "map_field",
+                        "Map field",
+                        choices={
+                            "depth": "Bathymetry",
+                            "temperature": "Temperature",
+                            "salinity": "Salinity",
+                            "ssh": "SSH",
+                        },
+                        selected="depth",
+                        width="100%",
+                    ),
+                    class_="field-selector",
+                ),
+            ),
             ui.accordion_panel(
                 "Landscape",
                 ui.input_select(
@@ -137,7 +138,10 @@ def sidebar_panel():
                     "seiche_thresh", "dSSH/dt thresh. (m/15min)", value=0.02, step=0.005
                 ),
             ),
-            open=False,  # All panels closed by default
+            # Run panel open at startup so the user lands on action
+            # controls; parameter groups stay collapsed to save vertical
+            # real estate.
+            open=["Run"],
         ),
         width=290,
     )
