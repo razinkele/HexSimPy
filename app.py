@@ -1658,6 +1658,8 @@ def server(input, output, session):
                 )
         _cached_water_layer = water
         update_layers = [water, _build_trips_layer()]
+        _log.warning("about to map_widget.update with layer type=%s",
+                     water.get("type") if isinstance(water, dict) else type(water).__name__)
         try:
             await map_widget.update(
                 session,
@@ -1665,6 +1667,7 @@ def server(input, output, session):
                 view_state=_view_state(sim, landscape=landscape),
                 views=[map_view(controller=True)],
             )
+            _log.warning("map_widget.update returned ok")
         except Exception:
             import logging
             logging.getLogger(__name__).exception(
