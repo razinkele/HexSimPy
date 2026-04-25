@@ -168,3 +168,15 @@ class H3Environment:
         """Return ``fields[name]`` — convenience for callers that have
         a name in hand."""
         return self.fields[name]
+
+    def dSSH_dt_array(self) -> np.ndarray:
+        """Per-cell rate of SSH change (m/hour).
+
+        CMEMS BALTICSEA reanalysis doesn't ship SSH at hourly cadence,
+        so we synthesise a zero SSH field at construction time (see
+        ``__init__``).  The seiche-pause estuarine override therefore
+        sees zero everywhere → no agents are paused, which matches the
+        ecological expectation that mid-Baltic salmon don't experience
+        the harbour-seiche dynamics that motivated the override.
+        """
+        return np.zeros(self.mesh.n_cells, dtype=np.float32)
