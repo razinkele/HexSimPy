@@ -1513,10 +1513,17 @@ def server(input, output, session):
     async def _full_update(sim, landscape=None):
         """Send everything: positions + colors + agents (~3 MB)."""
         nonlocal _cached_water_n, _cached_water_layer
+        import logging
+        _log = logging.getLogger("hexsim.full_update")
+        _log.warning(
+            "_full_update: mesh=%s landscape=%s",
+            sim.mesh.__class__.__name__, landscape,
+        )
         z, cscale = _resolve_field(sim)
         idx = _water_idx(sim)
         n = len(idx)
         _cached_water_n = n
+        _log.warning("_full_update: idx=%d", n)
 
         is_h3 = hasattr(sim.mesh, "resolution")
         is_hexsim = hasattr(sim.mesh, "n_cells") and not is_h3
@@ -1606,9 +1613,22 @@ def server(input, output, session):
             forcing_nc = f"data/{forcing_cfg.get('file', '')}"
 
             field_name = input.map_field()
-            built = _build_trimesh_bitmap(
-                landscape_nc, forcing_nc, field_name, cscale, t_idx=sim.current_t,
+            _log.warning(
+                "_full_update TriMesh branch: landscape_nc=%s forcing_nc=%s field=%s",
+                landscape_nc, forcing_nc, field_name,
             )
+            try:
+                built = _build_trimesh_bitmap(
+                    landscape_nc, forcing_nc, field_name, cscale,
+                    t_idx=sim.current_t,
+                )
+                _log.warning(
+                    "_full_update TriMesh built=%s",
+                    "ok" if built is not None else "None",
+                )
+            except Exception:
+                _log.exception("_full_update _build_trimesh_bitmap raised")
+                built = None
             if built is not None:
                 data_uri, bounds = built
                 water = bitmap_layer(
