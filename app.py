@@ -1513,30 +1513,15 @@ def server(input, output, session):
     async def _full_update(sim, landscape=None):
         """Send everything: positions + colors + agents (~3 MB)."""
         nonlocal _cached_water_n, _cached_water_layer
-        import logging
-        _log = logging.getLogger("hexsim.full_update")
-        _log.warning(
-            "_full_update: mesh=%s landscape=%s",
-            sim.mesh.__class__.__name__, landscape,
-        )
         z, cscale = _resolve_field(sim)
         idx = _water_idx(sim)
-        n = len(idx)
-        _cached_water_n = n
-        _log.warning("_full_update: idx=%d", n)
-
         is_h3 = hasattr(sim.mesh, "resolution")
         is_hexsim = hasattr(sim.mesh, "n_cells") and not is_h3
-        # _build_water_binary is the legacy ScatterplotLayer-positions
-        # path used only for HexSim (n_cells without resolution) and
-        # the TriMesh fallback when BitmapLayer can't supply a field.
-        # Skip it for H3 + the BitmapLayer success path — those allocate
-        # tens of MB of binary data we never send.
-        pos_bin = col_bin = None
-        if is_hexsim or (not is_h3 and n > 0):
-            # We may need pos_bin/col_bin for the fallback branch below.
-            # Defer the heavy encoding until we know we'll use it.
-            pass
+        pos_bin, col_bin, n = _build_water_binary(
+            sim.mesh, z, cscale, idx,
+            scale=_cached_scale, landscape=landscape,
+        )
+        _cached_water_n = n
         if is_h3:
             # H3Mesh — render as actual hexagons via H3HexagonLayer (the
             # deck.gl layer that takes a hex ID string and tessellates
@@ -1596,100 +1581,29 @@ def server(input, output, session):
                 pickable=False,
             )
         else:
-            # TriMesh on a regular lat/lon grid → render as a single
-            # BitmapLayer image rather than 916 k scatter dots.  At
-            # zoom > 12 the dot path leaves visible gaps; the bitmap
-            # path covers the cell uniformly at any zoom because the
-            # GPU samples a real texture.
-            grid_cfg = sim.config.get("grid") or {}
-            landscape_nc = (
-                f"{sim.config.get('data_dir', 'data')}/{grid_cfg.get('file', '')}"
-                if "/" not in str(grid_cfg.get("file", ""))
-                else str(grid_cfg.get("file"))
+            # TriMesh — ScatterplotLayer with cell-sized dots.  At 100 m
+            # node spacing, getRadius=70 m + radiusMaxPixels=24 means
+            # the dots overlap to fill the cell at any zoom level
+            # (dot diameter ≈ cell width even at zoom 13+).
+            water = layer(
+                "ScatterplotLayer",
+                "water",
+                data={"length": n},
+                getPosition=pos_bin,
+                getFillColor=col_bin,
+                getRadius=70,
+                radiusMinPixels=3,
+                radiusMaxPixels=24,
+                pickable=False,
             )
-            forcing_cfg = (
-                sim.config.get("forcings", {}).get("physics_surface", {}) or {}
-            )
-            forcing_nc = f"data/{forcing_cfg.get('file', '')}"
-
-            field_name = input.map_field()
-            _log.warning(
-                "_full_update TriMesh branch: landscape_nc=%s forcing_nc=%s field=%s",
-                landscape_nc, forcing_nc, field_name,
-            )
-            try:
-                built = _build_trimesh_bitmap(
-                    landscape_nc, forcing_nc, field_name, cscale,
-                    t_idx=sim.current_t,
-                )
-                _log.warning(
-                    "_full_update TriMesh built=%s",
-                    "ok" if built is not None else "None",
-                )
-            except Exception:
-                _log.exception("_full_update _build_trimesh_bitmap raised")
-                built = None
-            if built is not None:
-                data_uri, bounds = built
-                # Write PNG to www/ and reference via URL.  BitmapLayer
-                # accepts URLs; we previously passed a data URI but the
-                # JSON envelope around it apparently isn't accepted by
-                # the deck.gl loader on the JS side (zero layers
-                # rendered with no client-console error).
-                import base64 as _b64
-                from pathlib import Path as _Path
-                png_bytes = _b64.b64decode(data_uri.split(",", 1)[1])
-                www_path = _Path("www") / "_trimesh_field.png"
-                www_path.parent.mkdir(parents=True, exist_ok=True)
-                www_path.write_bytes(png_bytes)
-                _log.warning(
-                    "_full_update wrote PNG (%d bytes) to www/_trimesh_field.png",
-                    len(png_bytes),
-                )
-                water = bitmap_layer(
-                    "water",
-                    image=f"_trimesh_field.png?t={sim.current_t}",
-                    bounds=bounds,
-                    pickable=False,
-                )
-            else:
-                # Fall back to the legacy ScatterplotLayer if the field
-                # isn't on the forcing NC for some reason.  Build the
-                # heavy binary buffers on demand (~15 MB at 916 k cells).
-                pb, cb, n2 = _build_water_binary(
-                    sim.mesh, z, cscale, idx,
-                    scale=_cached_scale, landscape=landscape,
-                )
-                water = layer(
-                    "ScatterplotLayer",
-                    "water",
-                    data={"length": n2},
-                    getPosition=pb,
-                    getFillColor=cb,
-                    getRadius=30,
-                    radiusMinPixels=2,
-                    radiusMaxPixels=6,
-                    pickable=False,
-                )
         _cached_water_layer = water
         update_layers = [water, _build_trips_layer()]
-        _log.warning("about to map_widget.update with layer type=%s",
-                     water.get("type") if isinstance(water, dict) else type(water).__name__)
-        try:
-            await map_widget.update(
-                session,
-                layers=update_layers,
-                view_state=_view_state(sim, landscape=landscape),
-                views=[map_view(controller=True)],
-            )
-            _log.warning("map_widget.update returned ok")
-        except Exception:
-            import logging
-            logging.getLogger(__name__).exception(
-                "map_widget.update failed (n=%d, layer=%s)", n,
-                getattr(water, "get", lambda k, d=None: d)("type"),
-            )
-            raise
+        await map_widget.update(
+            session,
+            layers=update_layers,
+            view_state=_view_state(sim, landscape=landscape),
+            views=[map_view(controller=True)],
+        )
 
     async def _hex_color_update(sim, landscape=None):
         """Rebuild hex grid with new field colors — no set_style, no view state change."""
@@ -1757,43 +1671,15 @@ def server(input, output, session):
             _cached_water_layer = water
             layers = [water]
         else:
-            # TriMesh: rebuild the BitmapLayer image with the new field.
-            # Faster than the binary-color path for SoA dots because the
-            # PNG encoder runs in ~50–150 ms even at 1000×948 px and
-            # produces a much cleaner-looking surface.
-            grid_cfg = sim.config.get("grid") or {}
-            grid_file = str(grid_cfg.get("file", ""))
-            landscape_nc = (
-                f"data/{grid_file}" if "/" not in grid_file else grid_file
-            )
-            forcing_cfg = (
-                sim.config.get("forcings", {}).get("physics_surface", {}) or {}
-            )
-            forcing_nc = f"data/{forcing_cfg.get('file', '')}"
-
-            field_name = input.map_field()
-            built = _build_trimesh_bitmap(
-                landscape_nc, forcing_nc, field_name, cscale, t_idx=sim.current_t,
-            )
-            if built is not None:
-                data_uri, bounds = built
-                water = bitmap_layer(
-                    "water",
-                    image=data_uri,
-                    bounds=bounds,
-                    pickable=False,
-                )
-                _cached_water_layer = water
-                layers = [water]
-            else:
-                col_bin = _build_color_binary(sim.mesh, z, cscale, idx)
-                water = {
-                    "id": "water",
-                    "getFillColor": col_bin,
-                    "data": {"length": _cached_water_n},
-                }
-                _cached_water_layer = water
-                layers = [water]
+            # TriMesh — partial color update.
+            col_bin = _build_color_binary(sim.mesh, z, cscale, idx)
+            water = {
+                "id": "water",
+                "getFillColor": col_bin,
+                "data": {"length": _cached_water_n},
+            }
+            _cached_water_layer = water
+            layers = [water]
 
         layers.append(_build_trips_layer())
         await map_widget.partial_update(session, layers)
