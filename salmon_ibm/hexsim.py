@@ -140,6 +140,14 @@ class HexMesh:
         _, idx = self._tree.query([y, x])
         return int(idx)
 
+    def metric_scale(self, lat: float) -> tuple[float, float]:
+        """Return (1.0, 1.0) — HexMesh centroids are already in meters so
+        no scaling correction is needed in ``_advection_numba``.
+
+        Duck-typed to match ``TriMesh.metric_scale`` / ``H3Mesh.metric_scale``.
+        """
+        return (1.0, 1.0)
+
     def gradient(self, field: np.ndarray, idx: int) -> tuple[float, float]:
         """Normalized gradient of field at cell idx.
 

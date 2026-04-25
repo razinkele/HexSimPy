@@ -112,6 +112,18 @@ class TriMesh:
     def find_triangle(self, lat, lon):
         return int(self._delaunay.find_simplex([lat, lon]))
 
+    def metric_scale(self, lat: float) -> tuple[float, float]:
+        """Return (metres per degree longitude at ``lat``, metres per degree latitude).
+
+        Used by ``movement._advection_numba`` to correct Euclidean dot-products
+        when centroids are in geographic degrees.  At lat=0 returns (111320, 110540);
+        at lat=55° returns (~63860, 110540).
+        """
+        import math
+        from .geomconst import M_PER_DEG_LAT, M_PER_DEG_LON_EQUATOR
+        return (M_PER_DEG_LON_EQUATOR * math.cos(math.radians(lat)),
+                M_PER_DEG_LAT)
+
     def gradient(self, field, tri_idx):
         nbrs = [n for n in self.neighbors[tri_idx] if n >= 0]
         if not nbrs:

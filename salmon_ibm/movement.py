@@ -214,8 +214,17 @@ def _advection_numba(
     v,
     speeds,
     rand_drift,
+    scale_x,
+    scale_y,
     speed_threshold=0.01,
 ):
+    """Nearest-neighbour advection in flow direction.
+
+    ``scale_x`` / ``scale_y`` convert centroid diffs from whatever units
+    the mesh uses (degrees for TriMesh/H3Mesh, meters for HexMesh) into
+    meters before the dot-product with the flow vector. See
+    ``Mesh.metric_scale(lat)`` — HexMesh returns (1.0, 1.0).
+    """
     n = len(tri_indices)
     for i in prange(n):
         if speeds[i] < speed_threshold:
@@ -233,8 +242,8 @@ def _advection_numba(
         cy = centroids[c, 0]
         for k in range(cnt):
             nbr = water_nbrs[c, k]
-            dx = centroids[nbr, 1] - cx
-            dy = centroids[nbr, 0] - cy
+            dx = (centroids[nbr, 1] - cx) * scale_x
+            dy = (centroids[nbr, 0] - cy) * scale_y
             dnorm = (dx**2 + dy**2) ** 0.5 + 1e-12
             dot = (dx / dnorm) * flow_x + (dy / dnorm) * flow_y
             if dot > best_dot:
@@ -352,6 +361,11 @@ def _apply_current_advection_vec(pool, mesh, fields, alive_mask, rng):
         tris = pool.tri_idx[alive_idx].copy()
         speeds = np.sqrt(u[tris] ** 2 + v[tris] ** 2)
         rand_drift = rng.random(len(tris))
+        # Derive metric scale from the mesh — converts centroid diffs to
+        # meters regardless of whether centroids are in degrees (TriMesh/H3)
+        # or meters (HexMesh).  See Mesh.metric_scale.
+        lat_mean = float(mesh.centroids[:, 0].mean())
+        scale_x, scale_y = mesh.metric_scale(lat_mean)
         _advection_numba(
             tris,
             mesh._water_nbrs,
@@ -361,6 +375,8 @@ def _apply_current_advection_vec(pool, mesh, fields, alive_mask, rng):
             v,
             speeds,
             rand_drift,
+            scale_x,
+            scale_y,
         )
         pool.tri_idx[alive_idx] = tris
     else:
