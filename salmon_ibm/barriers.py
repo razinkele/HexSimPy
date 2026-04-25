@@ -56,6 +56,31 @@ class BarrierMap:
         return cls()
 
     @classmethod
+    def from_csv_h3(cls, path, mesh) -> "BarrierMap":
+        """Load H3-native barriers from a CSV.
+
+        Requires a mesh exposing ``h3_ids`` and ``neighbors`` — i.e.
+        :class:`salmon_ibm.h3mesh.H3Mesh`.  Use
+        :func:`salmon_ibm.h3_barriers.line_barrier_to_h3_edges` to
+        generate the edge list from a lat/lon line and a writer to
+        emit the CSV.
+
+        See :mod:`salmon_ibm.h3_barriers` for the CSV schema and
+        validation rules (probabilities sum to 1.0, both endpoints
+        must be H3 neighbours, off-mesh rows are skipped with a
+        warning).
+        """
+        from .h3_barriers import load_h3_barrier_csv
+        if not hasattr(mesh, "h3_ids"):
+            raise TypeError(
+                f"BarrierMap.from_csv_h3 requires an H3Mesh; "
+                f"got {type(mesh).__name__}"
+            )
+        bmap = cls()
+        bmap._edges = load_h3_barrier_csv(Path(path), mesh)
+        return bmap
+
+    @classmethod
     def from_hbf_hexsim(cls, path, mesh, class_config=None):
         """Load barriers from HexSim ``.hbf`` file into compact mesh indices.
 
