@@ -15,6 +15,7 @@ from shiny_deckgl import (
     CARTO_DARK,
     CARTO_POSITRON,
     MapWidget,
+    bitmap_layer,
     encode_binary_attribute,
     h3_hexagon_layer,
     head_includes,
@@ -133,6 +134,88 @@ def _colorscale_rgb(z: np.ndarray, colorscale: list) -> np.ndarray:
     g = np.interp(z_norm, stops, colors[:, 1]).astype(np.uint8)
     b = np.interp(z_norm, stops, colors[:, 2]).astype(np.uint8)
     return np.column_stack([r, g, b])
+
+
+def _build_trimesh_bitmap(
+    landscape_nc: str,
+    forcing_nc: str,
+    field_name: str,
+    cscale: list,
+    t_idx: int = 0,
+) -> tuple[str, list[float]] | None:
+    """Render the TriMesh's regular grid as a base64-encoded PNG image.
+
+    Returning a single image instead of 916 k ScatterplotLayer dots is
+    the only practical way to render a 1000 × 948 grid as a continuous
+    surface — at zoom > 12 the dot path leaves visible gaps between
+    cells.  BitmapLayer hands the entire image to the GPU as one
+    texture.
+
+    Returns (data_uri, [west, south, east, north]) or None if the
+    requested field is not in the forcing NC.
+    """
+    import base64
+    import io
+
+    import xarray as _xr
+    from PIL import Image
+
+    ds = _xr.open_dataset(landscape_nc, engine="scipy")
+    lat = ds["lat"].values  # (rows, cols)
+    lon = ds["lon"].values
+    mask = ds["mask"].values  # (rows, cols)
+
+    if field_name == "depth":
+        field_2d = ds["depth"].values
+        ds.close()
+    else:
+        ds.close()
+        var_map = {"temperature": "tos", "salinity": "sos", "ssh": "zos"}
+        nc_var = var_map.get(field_name, "tos")
+        try:
+            fds = _xr.open_dataset(forcing_nc, engine="scipy")
+        except (FileNotFoundError, OSError):
+            return None
+        if nc_var not in fds:
+            fds.close()
+            return None
+        n_times = fds.sizes.get("time", 1)
+        t_use = int(t_idx) % max(1, n_times)
+        # Forcing arrays are (time, y, x) — index by time first.
+        field_2d = fds[nc_var].values[t_use]
+        fds.close()
+
+    # Land cells get NaN'd so their alpha goes to zero in the encoder.
+    field_masked = np.where(mask > 0, field_2d, np.nan).astype(np.float32)
+
+    rows, cols = field_2d.shape
+    flat = field_masked.ravel()
+    # Replace NaN with the field minimum just for the colorscale call —
+    # the alpha mask blanks these cells back out below.
+    if np.isnan(flat).all():
+        return None
+    safe_flat = np.where(np.isnan(flat), float(np.nanmin(flat)), flat)
+    rgb_flat = _colorscale_rgb(safe_flat, cscale)  # (n, 3) uint8
+    rgb = rgb_flat.reshape(rows, cols, 3)
+
+    alpha = np.where((mask > 0) & ~np.isnan(field_masked), 220, 0).astype(np.uint8)
+    rgba = np.dstack([rgb, alpha])  # (rows, cols, 4)
+
+    # Build script writes lat ascending (row 0 = south).  PIL row 0 is
+    # the top of the image and BitmapLayer's `bounds` interprets the
+    # image with row 0 = top = NORTH.  Flip vertically to align.
+    img = Image.fromarray(rgba[::-1, :, :], mode="RGBA")
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    data_uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+    bounds = [
+        float(lon.min()),
+        float(lat.min()),
+        float(lon.max()),
+        float(lat.max()),
+    ]
+    return data_uri, bounds
 
 
 # Hex vertex offsets — pointy-top (vertex at top/bottom, matching HexSim display)
@@ -1338,6 +1421,27 @@ def server(input, output, session):
             zoom = float(np.log2(3 * 156543.03 / max(edge_m, 1.0)))
             zoom = float(max(0.0, min(22.0, zoom)))
             return {"longitude": lon, "latitude": lat, "zoom": zoom}
+        # TriMesh — mesh.nodes stores [lat, lon] in degrees (degrees because
+        # the build script writes raw lat/lon arrays into the NC).  Centre
+        # on the bbox midpoint with a zoom that fits the whole bbox into
+        # the viewport with a small margin.
+        if not is_hexsim and hasattr(mesh, "nodes"):
+            try:
+                node_lat = mesh.nodes[:, 0]
+                node_lon = mesh.nodes[:, 1]
+                lat_lo, lat_hi = float(node_lat.min()), float(node_lat.max())
+                lon_lo, lon_hi = float(node_lon.min()), float(node_lon.max())
+                # Both arrays look like real lat/lon (within ±90/±180).
+                if -90 <= lat_lo <= 90 and -180 <= lon_lo <= 180:
+                    lat = 0.5 * (lat_lo + lat_hi)
+                    lon = 0.5 * (lon_lo + lon_hi)
+                    extent = max(lat_hi - lat_lo, lon_hi - lon_lo, 0.01)
+                    # Zoom = log2(360 / extent) gives full-globe at 1° extent.
+                    # Subtract 0.4 for a small margin around the bbox.
+                    zoom = float(max(0.0, min(15.0, np.log2(360.0 / extent) - 0.4)))
+                    return {"longitude": lon, "latitude": lat, "zoom": zoom}
+            except Exception:
+                pass
         if is_hexsim:
             cx = mesh.centroids[:, 1] * _cached_scale
             cy = -mesh.centroids[:, 0] * _cached_scale
@@ -1482,17 +1586,48 @@ def server(input, output, session):
                 pickable=False,
             )
         else:
-            water = layer(
-                "ScatterplotLayer",
-                "water",
-                data={"length": n},
-                getPosition=pos_bin,
-                getFillColor=col_bin,
-                getRadius=30,
-                radiusMinPixels=2,
-                radiusMaxPixels=6,
-                pickable=False,
+            # TriMesh on a regular lat/lon grid → render as a single
+            # BitmapLayer image rather than 916 k scatter dots.  At
+            # zoom > 12 the dot path leaves visible gaps; the bitmap
+            # path covers the cell uniformly at any zoom because the
+            # GPU samples a real texture.
+            grid_cfg = sim.config.get("grid") or {}
+            landscape_nc = (
+                f"{sim.config.get('data_dir', 'data')}/{grid_cfg.get('file', '')}"
+                if "/" not in str(grid_cfg.get("file", ""))
+                else str(grid_cfg.get("file"))
             )
+            forcing_cfg = (
+                sim.config.get("forcings", {}).get("physics_surface", {}) or {}
+            )
+            forcing_nc = f"data/{forcing_cfg.get('file', '')}"
+
+            field_name = input.map_field()
+            built = _build_trimesh_bitmap(
+                landscape_nc, forcing_nc, field_name, cscale, t_idx=sim.current_t,
+            )
+            if built is not None:
+                data_uri, bounds = built
+                water = bitmap_layer(
+                    "water",
+                    image=data_uri,
+                    bounds=bounds,
+                    pickable=False,
+                )
+            else:
+                # Fall back to the legacy ScatterplotLayer if the field
+                # isn't on the forcing NC for some reason.
+                water = layer(
+                    "ScatterplotLayer",
+                    "water",
+                    data={"length": n},
+                    getPosition=pos_bin,
+                    getFillColor=col_bin,
+                    getRadius=30,
+                    radiusMinPixels=2,
+                    radiusMaxPixels=6,
+                    pickable=False,
+                )
         _cached_water_layer = water
         update_layers = [water, _build_trips_layer()]
         await map_widget.update(
@@ -1568,14 +1703,43 @@ def server(input, output, session):
             _cached_water_layer = water
             layers = [water]
         else:
-            col_bin = _build_color_binary(sim.mesh, z, cscale, idx)
-            water = {
-                "id": "water",
-                "getFillColor": col_bin,
-                "data": {"length": _cached_water_n},
-            }
-            _cached_water_layer = water
-            layers = [water]
+            # TriMesh: rebuild the BitmapLayer image with the new field.
+            # Faster than the binary-color path for SoA dots because the
+            # PNG encoder runs in ~50–150 ms even at 1000×948 px and
+            # produces a much cleaner-looking surface.
+            grid_cfg = sim.config.get("grid") or {}
+            grid_file = str(grid_cfg.get("file", ""))
+            landscape_nc = (
+                f"data/{grid_file}" if "/" not in grid_file else grid_file
+            )
+            forcing_cfg = (
+                sim.config.get("forcings", {}).get("physics_surface", {}) or {}
+            )
+            forcing_nc = f"data/{forcing_cfg.get('file', '')}"
+
+            field_name = input.map_field()
+            built = _build_trimesh_bitmap(
+                landscape_nc, forcing_nc, field_name, cscale, t_idx=sim.current_t,
+            )
+            if built is not None:
+                data_uri, bounds = built
+                water = bitmap_layer(
+                    "water",
+                    image=data_uri,
+                    bounds=bounds,
+                    pickable=False,
+                )
+                _cached_water_layer = water
+                layers = [water]
+            else:
+                col_bin = _build_color_binary(sim.mesh, z, cscale, idx)
+                water = {
+                    "id": "water",
+                    "getFillColor": col_bin,
+                    "data": {"length": _cached_water_n},
+                }
+                _cached_water_layer = water
+                layers = [water]
 
         layers.append(_build_trips_layer())
         await map_widget.partial_update(session, layers)
