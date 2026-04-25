@@ -194,6 +194,16 @@ header > span, nav > span {
     padding: 12px 20px !important;
 }
 
+/* --- Navbar icon (salmon emoji, lifted from the old sidebar header) --- */
+.navbar-icon {
+    font-size: 1.4rem;
+    margin-right: 8px;
+    line-height: 1;
+    /* Slight vertical nudge — the emoji glyph's baseline sits slightly
+     * above the surrounding text otherwise. */
+    transform: translateY(1px);
+}
+
 /* --- Navbar title text --- */
 .navbar-title {
     font-family: var(--font-display);
@@ -567,6 +577,28 @@ input[type="number"]:focus, select:focus {
     border-radius: var(--radius-lg) !important;
     box-shadow: var(--shadow-card) !important;
     color: var(--text-primary) !important;
+}
+
+/* --- Sidebar status strip — single tight row above the accordion ---
+ * Holds progress_text + status_text on one line with `gap` separating
+ * them.  Replaces the old vertical stack of two divs (each with
+ * margin: 6px 0) plus a hr separator. */
+.sidebar-status-strip {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 12px;
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    color: var(--lagoon-shallow);
+    padding: 4px 6px;
+    margin-bottom: 6px;
+    border-bottom: 1px solid var(--card-border);
+}
+
+.sidebar-status-strip > * {
+    /* Shiny output_text() wraps in a <div>; collapse it into the flex line. */
+    display: inline;
 }
 
 /* --- Status & Progress Display --- */

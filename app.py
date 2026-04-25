@@ -646,6 +646,10 @@ app_ui = ui.page_sidebar(
     ),
     title=ui.div(
         ui.tags.span(
+            ui.HTML("&#127843;"),  # \ud83c\udf63 \u2014 landed in the navbar; previously
+            class_="navbar-icon",  # duplicated as a sidebar header.
+        ),
+        ui.tags.span(
             "Salmon IBM",
             class_="navbar-title",
         ),

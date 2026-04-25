@@ -10,29 +10,35 @@ def _hint(text):
 
 def sidebar_panel():
     return ui.sidebar(
-        # ── App title ──
-        ui.div(
-            ui.tags.span(
-                ui.HTML("&#127843;"),
-                " ",
-                ui.tags.strong("Salmon IBM"),
-                style="font-family: var(--font-display); font-size: 1.1rem; color: var(--sediment-light);",
-            ),
-            style="margin-bottom: 8px;",
-        ),
-        # ── Status counters (always visible — small footprint, frequently checked) ──
+        # ── Status strip — single tight row, no duplicate app title (the
+        # navbar already shows it).  progress_text shows simulation hour;
+        # status_text shows alive/arrived counts.  live_stats fills in
+        # behaviour breakdown once the sim is stepping. ──
         ui.div(
             ui.output_text("progress_text"),
-            style="font-family: var(--font-mono); font-size: 0.82rem; color: var(--lagoon-shallow); margin: 6px 0;",
-        ),
-        ui.div(
             ui.output_text("status_text"),
-            class_="status-badge",
+            class_="sidebar-status-strip",
         ),
         ui.output_ui("live_stats"),
-        ui.hr(),
-        # ── Accordion (Run open by default; parameter groups closed) ──
+        # ── Accordion ── Landscape opens first so the user picks a study
+        # area before anything else; Run + parameter groups stay collapsed.
         ui.accordion(
+            ui.accordion_panel(
+                "Landscape",
+                ui.input_select(
+                    "landscape",
+                    "Study area",
+                    choices={
+                        "columbia": "Columbia River",
+                        "curonian": "Curonian Lagoon",
+                        "nemunas": "Nemunas Delta (H3)",
+                    },
+                ),
+                ui.input_numeric("n_agents", "Agents", value=50, min=1, max=1000),
+                ui.input_numeric("n_steps", "Hours", value=480, min=1, max=8760),
+                ui.input_numeric("rng_seed", "Seed", value=42),
+                _hint("Parameter changes take effect on Reset."),
+            ),
             ui.accordion_panel(
                 "Run",
                 ui.div(
@@ -70,22 +76,6 @@ def sidebar_panel():
                 ),
             ),
             ui.accordion_panel(
-                "Landscape",
-                ui.input_select(
-                    "landscape",
-                    "Study area",
-                    choices={
-                        "columbia": "Columbia River",
-                        "curonian": "Curonian Lagoon",
-                        "nemunas": "Nemunas Delta (H3)",
-                    },
-                ),
-                ui.input_numeric("n_agents", "Agents", value=50, min=1, max=1000),
-                ui.input_numeric("n_steps", "Hours", value=480, min=1, max=8760),
-                ui.input_numeric("rng_seed", "Seed", value=42),
-                _hint("Parameter changes take effect on Reset."),
-            ),
-            ui.accordion_panel(
                 "Bioenergetics",
                 _hint(
                     "Wisconsin model (Forseth et al. 2001, Salmo salar). "
@@ -95,13 +85,13 @@ def sidebar_panel():
                 ui.input_numeric("rb", "RB allometric", value=-0.217, step=0.01),
                 ui.input_numeric("rq", "RQ thermal", value=0.06818, step=0.001),
                 _hint(
-                    "RA \u00d7 mass^RB \u00d7 exp(RQ \u00d7 T) \u00d7 OXY_CAL \u00d7 activity"
+                    "RA × mass^RB × exp(RQ × T) × OXY_CAL × activity"
                 ),
                 ui.input_numeric("ed_init", "Init. ED (kJ/g)", value=6.5, step=0.1),
                 ui.input_numeric("ed_mortal", "Lethal ED (kJ/g)", value=4.0, step=0.1),
                 _hint("Death at ED < 4.0 kJ/g (Snyder et al. 2019)."),
-                ui.input_numeric("t_opt", "T optimal (\u00b0C)", value=16.0, step=0.5),
-                ui.input_numeric("t_max", "T lethal (\u00b0C)", value=26.0, step=0.5),
+                ui.input_numeric("t_opt", "T optimal (°C)", value=16.0, step=0.5),
+                ui.input_numeric("t_max", "T lethal (°C)", value=26.0, step=0.5),
                 _hint(
                     "Monotonic R(T): exponential increase with temperature (Wisconsin model)."
                 ),
@@ -109,8 +99,8 @@ def sidebar_panel():
             ui.accordion_panel(
                 "Osmoregulation",
                 _hint(
-                    "Brackish inflows in Klaip\u0117da Strait impose osmoregulatory costs. "
-                    "m_osmo(S) = 1 + k \u00d7 max(0, S \u2212 (S_opt + S_tol)). "
+                    "Brackish inflows in Klaipėda Strait impose osmoregulatory costs. "
+                    "m_osmo(S) = 1 + k × max(0, S − (S_opt + S_tol)). "
                     "Salinity intrusions decay ~20 km from the sea."
                 ),
                 ui.input_numeric("s_opt", "S optimum (PSU)", value=0.5, step=0.1),
@@ -130,7 +120,7 @@ def sidebar_panel():
             ui.accordion_panel(
                 "Seiches & Long Waves",
                 _hint(
-                    "Klaip\u0117da port experiences harbor seiches and meteotsunami-like "
+                    "Klaipėda port experiences harbor seiches and meteotsunami-like "
                     "events with rapid current reversals. Movement pauses when "
                     "|dSSH/dt| exceeds threshold."
                 ),
@@ -138,10 +128,9 @@ def sidebar_panel():
                     "seiche_thresh", "dSSH/dt thresh. (m/15min)", value=0.02, step=0.005
                 ),
             ),
-            # Run panel open at startup so the user lands on action
-            # controls; parameter groups stay collapsed to save vertical
-            # real estate.
-            open=["Run"],
+            # Landscape opens by default — picking the study area is the
+            # first decision; everything else has sensible defaults.
+            open=["Landscape"],
         ),
         width=290,
     )
