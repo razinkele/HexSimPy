@@ -1,0 +1,242 @@
+"""H3-native mesh backend for the Salmon IBM.
+
+``H3Mesh`` duck-types :class:`salmon_ibm.mesh.TriMesh` and
+:class:`salmon_ibm.hexsim.HexMesh` — same attribute names and shapes —
+so the Numba movement / accumulator kernels work unchanged.  Cells are
+addressed by compact integer indices ``0..N-1``; their globally-unique
+H3 IDs are carried in :attr:`h3_ids` as ``uint64`` for environment
+binding and viewer rendering.
+
+Phase 1 of ``docs/superpowers/plans/2026-04-24-h3mesh-backend.md``.
+"""
+from __future__ import annotations
+
+import math
+from typing import Sequence
+
+import numpy as np
+import h3
+
+
+class H3Mesh:
+    """Hexagonal mesh built from explicit H3 cell IDs.
+
+    Parameters
+    ----------
+    h3_ids
+        ``(N,)`` ``uint64`` — H3 cell IDs as integers.
+    centroids
+        ``(N, 2)`` ``float64`` — ``[lat, lon]`` per cell.
+    neighbors
+        ``(N, 6)`` ``int32`` — compact mesh-index of each ring-1
+        neighbour, with ``-1`` sentinel for missing slots (pentagons
+        have 5; cells at the mesh boundary may have fewer).
+    water_mask
+        ``(N,)`` ``bool`` — True where the cell is water.
+    depth
+        ``(N,)`` ``float32`` — per-cell depth in metres.
+    areas
+        ``(N,)`` ``float32`` — per-cell area in m² (from
+        :func:`h3.cell_area`).
+    resolution
+        H3 resolution (0–15) — same for every cell.
+    """
+
+    MAX_NBRS = 6  # pentagons fit with a -1 sentinel in the 6th slot
+
+    def __init__(
+        self,
+        h3_ids: np.ndarray,
+        centroids: np.ndarray,
+        neighbors: np.ndarray,
+        water_mask: np.ndarray,
+        depth: np.ndarray,
+        areas: np.ndarray,
+        resolution: int,
+    ) -> None:
+        self.h3_ids = h3_ids
+        self.centroids = centroids
+        self.neighbors = neighbors
+        self.water_mask = water_mask
+        self.depth = depth
+        self.areas = areas
+        self.resolution = resolution
+
+        # Numba caches — same layout as TriMesh / HexMesh.
+        self.centroids_c = np.ascontiguousarray(centroids)
+        self._water_nbrs = neighbors
+        self._water_nbr_count = (neighbors >= 0).sum(axis=1).astype(np.int32)
+
+    # --- duck-typed properties ---------------------------------------
+
+    @property
+    def n_cells(self) -> int:
+        return len(self.h3_ids)
+
+    @property
+    def n_triangles(self) -> int:
+        """Alias for ``n_cells`` — duck-types :class:`TriMesh`."""
+        return self.n_cells
+
+    # --- duck-typed methods ------------------------------------------
+
+    def water_neighbors(self, idx: int) -> list[int]:
+        row = self.neighbors[idx]
+        return [int(n) for n in row if n >= 0]
+
+    def find_triangle(self, lat: float, lon: float) -> int:
+        """Return the compact mesh index containing ``(lat, lon)``, or ``-1``."""
+        hid = h3.latlng_to_cell(float(lat), float(lon), self.resolution)
+        hid_int = np.uint64(int(h3.str_to_int(hid)))
+        hits = np.where(self.h3_ids == hid_int)[0]
+        return int(hits[0]) if len(hits) else -1
+
+    def metric_scale(self, lat: float) -> tuple[float, float]:
+        """Return ``(metres / deg lon at lat, metres / deg lat)``.
+
+        Mirrors :meth:`TriMesh.metric_scale` so the Phase-0 advection
+        kernel works identically on H3 landscapes.
+        """
+        from .geomconst import M_PER_DEG_LAT, M_PER_DEG_LON_EQUATOR
+        return (M_PER_DEG_LON_EQUATOR * math.cos(math.radians(lat)),
+                M_PER_DEG_LAT)
+
+    def gradient(self, field: np.ndarray, idx: int) -> tuple[float, float]:
+        """Approximate normalised ``(dlat, dlon)`` gradient of ``field`` at ``idx``.
+
+        Centroid diffs are scaled by :meth:`metric_scale` so a degree of
+        longitude doesn't outweigh a degree of latitude at mid-latitude
+        — same correction Task 0.1 applies to ``_advection_numba``.
+        Returns the zero vector when the cell has no valid neighbours
+        or when the gradient magnitude is below ``1e-12``.
+        """
+        row = self.neighbors[idx]
+        valid = row[row >= 0]
+        if len(valid) == 0:
+            return (0.0, 0.0)
+        here = self.centroids[idx]
+        scale_x, scale_y = self.metric_scale(float(here[0]))
+        dlat = dlon = 0.0
+        for n in valid:
+            there = self.centroids[n]
+            df = field[n] - field[idx]
+            dlat += df * (there[0] - here[0]) * scale_y
+            dlon += df * (there[1] - here[1]) * scale_x
+        norm = (dlat * dlat + dlon * dlon) ** 0.5
+        if norm < 1e-12:
+            return (0.0, 0.0)
+        return (dlat / norm, dlon / norm)
+
+    # --- factories ---------------------------------------------------
+
+    @classmethod
+    def from_h3_cells(
+        cls,
+        h3_cells: Sequence[str],
+        *,
+        depth: np.ndarray | None = None,
+        water_mask: np.ndarray | None = None,
+        pentagon_policy: str = "raise",
+    ) -> "H3Mesh":
+        """Build a mesh from an explicit list of H3 cell IDs.
+
+        Parameters
+        ----------
+        h3_cells
+            Iterable of H3 cell strings (e.g. ``"891f7396c8fffff"``).
+            Must be non-empty, must all share the same resolution.
+        depth
+            Optional ``(N,)`` per-cell depth in metres.  Defaults to zeros.
+        water_mask
+            Optional ``(N,)`` bool mask.  Defaults to all True.
+        pentagon_policy
+            * ``"raise"`` (default): refuse if any cell is an H3
+              pentagon — pentagons have 5 neighbours and break some
+              downstream invariants that assume exactly 6.
+            * ``"skip"``: drop pentagon cells from the mesh; ``depth``
+              and ``water_mask`` are sliced consistently.
+            * ``"allow"``: include pentagons; their row in
+              :attr:`neighbors` has 5 valid entries and one ``-1``
+              sentinel.
+        """
+        if pentagon_policy not in ("raise", "skip", "allow"):
+            raise ValueError(
+                f"pentagon_policy must be 'raise', 'skip', or 'allow'; "
+                f"got {pentagon_policy!r}"
+            )
+        if len(h3_cells) == 0:
+            raise ValueError("H3Mesh.from_h3_cells: empty cell list")
+
+        # Pentagon guard. Compute the keep-mask BEFORE mutating h3_cells
+        # so depth/water_mask get filtered against the original ordering.
+        h3_cells = list(h3_cells)
+        is_penta = [h3.is_pentagon(c) for c in h3_cells]
+        if any(is_penta):
+            if pentagon_policy == "raise":
+                n_pentas = sum(is_penta)
+                raise ValueError(
+                    f"{n_pentas} pentagon cell(s) in input; pass "
+                    f"pentagon_policy='skip' or 'allow' to proceed."
+                )
+            elif pentagon_policy == "skip":
+                keep = np.array([not p for p in is_penta], dtype=bool)
+                h3_cells = [c for c, k in zip(h3_cells, keep) if k]
+                if depth is not None:
+                    depth = np.asarray(depth)[keep]
+                if water_mask is not None:
+                    water_mask = np.asarray(water_mask)[keep]
+            # "allow": fall through deliberately — pentagons stay in the
+            # cell list and get 5 valid neighbours + a -1 sentinel in
+            # the 6th slot.
+
+        n = len(h3_cells)
+        # Use Python int consistently at the dict boundary — numpy uint64
+        # hash-equals Python int but mixing them in dict keys has bitten
+        # people before, so be explicit.
+        h3_ids_pyint = [int(h3.str_to_int(c)) for c in h3_cells]
+        h3_ids = np.array(h3_ids_pyint, dtype=np.uint64)
+
+        resolution = h3.get_resolution(h3_cells[0])
+        centroids = np.array(
+            [h3.cell_to_latlng(c) for c in h3_cells],
+            dtype=np.float64,
+        )
+
+        # Reverse lookup: H3 ID (Python int) → compact index.
+        id_to_idx = {cid: i for i, cid in enumerate(h3_ids_pyint)}
+
+        # Neighbours from H3's ring-1 query.  Rows for cells at the
+        # mesh boundary or for pentagons may have fewer than 6 entries
+        # — fill the unused slots with -1.
+        neighbours = np.full((n, cls.MAX_NBRS), -1, dtype=np.int32)
+        for i, cell in enumerate(h3_cells):
+            for j, nb in enumerate(h3.grid_ring(cell, 1)):
+                nb_int = int(h3.str_to_int(nb))
+                idx = id_to_idx.get(nb_int)
+                if idx is not None:
+                    neighbours[i, j] = idx
+
+        if water_mask is None:
+            water_mask = np.ones(n, dtype=bool)
+        else:
+            water_mask = np.asarray(water_mask, dtype=bool)
+
+        if depth is None:
+            depth = np.zeros(n, dtype=np.float32)
+        else:
+            depth = np.asarray(depth, dtype=np.float32)
+
+        areas = np.array(
+            [h3.cell_area(c, unit="m^2") for c in h3_cells],
+            dtype=np.float32,
+        )
+
+        return cls(
+            h3_ids=h3_ids,
+            centroids=centroids,
+            neighbors=neighbours,
+            water_mask=water_mask,
+            depth=depth,
+            areas=areas,
+            resolution=resolution,
+        )
