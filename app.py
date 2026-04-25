@@ -684,9 +684,10 @@ def server(input, output, session):
 
         # Show loading overlay on the map
         try:
-            grid_name = (
-                "Columbia River" if landscape == "columbia" else "Curonian Lagoon"
-            )
+            grid_name = {
+                "columbia": "Columbia River",
+                "nemunas": "Nemunas Delta (H3)",
+            }.get(landscape, "Curonian Lagoon")
             await session.send_custom_message(
                 "map_loader_show", {"text": f"Loading {grid_name} grid..."}
             )
@@ -699,6 +700,8 @@ def server(input, output, session):
 
         if landscape == "columbia":
             cfg = load_config("config_columbia.yaml")
+        elif landscape == "nemunas":
+            cfg = load_config("configs/config_nemunas_h3.yaml")
         else:
             cfg = load_config("config_curonian_hexsim.yaml")
 

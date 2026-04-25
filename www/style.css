@@ -289,6 +289,89 @@ aside.sidebar hr {
     opacity: 0.7;
 }
 
+/* --- Accordion (parameter groups: Landscape / Bioenergetics / …) ---
+ * Bootstrap's default accordion renders white-on-light, which jars
+ * against the dark lagoon sidebar.  Override every layer that bslib
+ * uses (bslib wraps Bootstrap's .accordion-* classes verbatim). */
+aside.sidebar .accordion,
+.bslib-sidebar-layout .accordion {
+    --bs-accordion-bg: transparent;
+    --bs-accordion-color: var(--text-primary);
+    --bs-accordion-border-color: var(--card-border);
+    --bs-accordion-border-radius: var(--radius-md);
+    --bs-accordion-btn-color: var(--sediment-light);
+    --bs-accordion-btn-bg: var(--lagoon-mid);
+    --bs-accordion-btn-focus-border-color: var(--lagoon-teal);
+    --bs-accordion-btn-focus-box-shadow: 0 0 0 2px rgba(42, 122, 122, 0.25);
+    --bs-accordion-active-color: var(--sediment-light);
+    --bs-accordion-active-bg: var(--lagoon-surface);
+    background: transparent !important;
+    border: none !important;
+}
+
+aside.sidebar .accordion-item,
+.bslib-sidebar-layout .accordion-item {
+    background: transparent !important;
+    border: 1px solid var(--card-border) !important;
+    border-radius: var(--radius-md) !important;
+    margin-bottom: 6px !important;
+    overflow: hidden;
+}
+
+aside.sidebar .accordion-button,
+.bslib-sidebar-layout .accordion-button {
+    background: var(--lagoon-mid) !important;
+    color: var(--sediment-light) !important;
+    font-family: var(--font-body) !important;
+    font-size: 0.85rem !important;
+    font-weight: 500 !important;
+    letter-spacing: 0.04em !important;
+    padding: 8px 12px !important;
+    box-shadow: none !important;
+    border: none !important;
+}
+
+aside.sidebar .accordion-button:not(.collapsed),
+.bslib-sidebar-layout .accordion-button:not(.collapsed) {
+    background: var(--lagoon-surface) !important;
+    color: var(--lagoon-shallow) !important;
+    box-shadow: inset 0 -1px 0 var(--card-border) !important;
+}
+
+aside.sidebar .accordion-button:focus,
+.bslib-sidebar-layout .accordion-button:focus {
+    box-shadow: 0 0 0 2px rgba(42, 122, 122, 0.25) !important;
+    border-color: var(--lagoon-teal) !important;
+    outline: none !important;
+}
+
+/* Bootstrap's default chevron is a hard-coded SVG with a near-black
+ * fill, invisible against the dark header.  Replace it with a teal
+ * version inline (data-URI) so it stays crisp at any zoom level. */
+aside.sidebar .accordion-button::after,
+.bslib-sidebar-layout .accordion-button::after {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='%233d9b8f'%3E%3Cpath d='M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 1 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708z'/%3E%3C/svg%3E") !important;
+}
+
+aside.sidebar .accordion-body,
+.bslib-sidebar-layout .accordion-body {
+    background: var(--lagoon-dark) !important;
+    color: var(--text-primary) !important;
+    padding: 10px 12px !important;
+    border-top: 1px solid var(--card-border) !important;
+}
+
+/* Hint text under input groups */
+aside.sidebar .param-hint,
+.bslib-sidebar-layout .param-hint {
+    color: var(--text-muted) !important;
+    font-family: var(--font-body) !important;
+    font-size: 0.72rem !important;
+    font-style: italic;
+    margin: 4px 0 8px 0;
+    line-height: 1.35;
+}
+
 /* --- Form Controls (sidebar inputs) --- */
 .form-group > label, .control-label,
 .shiny-input-container > label {
@@ -914,6 +997,75 @@ button[aria-label="Toggle sidebar"] {
 
 .viewer-meta-hr {
     border-color: var(--card-border);
+}
+
+/* --- Viewer progress overlay --- */
+.viewer-progress-box {
+    position: absolute;
+    left: 50%;
+    bottom: 18px;
+    transform: translateX(-50%);
+    min-width: 320px;
+    max-width: 80%;
+    padding: 10px 14px;
+    background: rgba(11, 31, 44, 0.92);
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+    z-index: 10;
+    animation: viewer-progress-fade-in 160ms ease-out;
+}
+
+.viewer-progress-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 6px;
+}
+
+.viewer-progress-stage {
+    color: var(--text-primary);
+}
+
+.viewer-progress-pct {
+    color: var(--sediment-light);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+
+.viewer-progress-bar {
+    height: 6px;
+    width: 100%;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.viewer-progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg,
+        var(--sediment-light, #e8d5b7) 0%,
+        #3d9b8f 100%);
+    border-radius: 3px;
+    transition: width 220ms ease-out;
+}
+
+.viewer-progress-error {
+    border-color: #d4826a;
+    background: rgba(60, 18, 10, 0.92);
+}
+
+.viewer-progress-error .viewer-progress-stage {
+    color: #ffd6c8;
+}
+
+@keyframes viewer-progress-fade-in {
+    from { opacity: 0; transform: translate(-50%, 8px); }
+    to   { opacity: 1; transform: translate(-50%, 0); }
 }
 
 /* Live stats bar */

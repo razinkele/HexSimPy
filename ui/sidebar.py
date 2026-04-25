@@ -76,6 +76,7 @@ def sidebar_panel():
                     choices={
                         "columbia": "Columbia River",
                         "curonian": "Curonian Lagoon",
+                        "nemunas": "Nemunas Delta (H3)",
                     },
                 ),
                 ui.input_numeric("n_agents", "Agents", value=50, min=1, max=1000),
