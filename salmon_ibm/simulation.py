@@ -130,8 +130,12 @@ class Simulation:
         self.population = Population(name="salmon", pool=self.pool)
 
         # --- Optional Phase 2-3 components ---
-        # Barriers
+        # Barriers — three loader paths depending on mesh backend:
+        #   * grid.type == "hexsim": HexSim .hbf file
+        #   * mesh_backend == "h3":  CSV via from_csv_h3
+        #   * neither:               no barriers
         barrier_cfg = self.config.get("barriers")
+        h3_barriers_csv = self.config.get("barriers_csv")
         self._barrier_arrays = None
         if barrier_cfg and grid_type == "hexsim":
             from salmon_ibm.barriers import BarrierMap
@@ -141,6 +145,12 @@ class Simulation:
                 bmap = BarrierMap.from_hbf_hexsim(hbf_path, self.mesh)
                 if bmap.has_barriers():
                     self._barrier_arrays = bmap.to_arrays(self.mesh)
+        elif h3_barriers_csv and mesh_backend == "h3":
+            from salmon_ibm.barriers import BarrierMap
+
+            bmap = BarrierMap.from_csv_h3(h3_barriers_csv, self.mesh)
+            if bmap.has_barriers():
+                self._barrier_arrays = bmap.to_arrays(self.mesh)
 
         # Genome
         self._genome = genome_from_config(config, n_agents)

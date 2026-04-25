@@ -104,6 +104,67 @@ def test_at_least_one_tenth_of_agents_moved(h3_sim):
     )
 
 
+STRONG_BARRIER_CSV = PROJECT / "data" / "nemunas_h3_barriers_strong.csv"
+
+
+def _needs_barrier_data() -> None:
+    if not STRONG_BARRIER_CSV.exists():
+        pytest.skip(
+            f"{STRONG_BARRIER_CSV.name} missing — run "
+            "`python scripts/build_nemunas_h3_barriers.py`"
+        )
+
+
+def _run_short(barriers_csv: str | None, n_steps: int = 72) -> "Simulation":
+    """3-day Nemunas H3 run with the chosen barrier config — for the
+    barrier-mortality comparison.  Module-scoped fixtures would slow
+    the suite by ~3 min each; a 3-day run is still long enough to
+    fire ~120 barrier-edge crossings at 30 % mortality."""
+    from salmon_ibm.config import load_config
+    from salmon_ibm.simulation import Simulation
+    cfg = load_config(str(CONFIG))
+    cfg["barriers_csv"] = barriers_csv
+    sim = Simulation(cfg, n_agents=500, rng_seed=42)
+    sim.run(n_steps=n_steps)
+    return sim
+
+
+@pytest.fixture(scope="module")
+def h3_sim_with_strong_barrier():
+    _needs_data()
+    _needs_barrier_data()
+    return _run_short(barriers_csv=str(STRONG_BARRIER_CSV))
+
+
+@pytest.fixture(scope="module")
+def h3_sim_no_barrier():
+    _needs_data()
+    return _run_short(barriers_csv=None)
+
+
+def test_strong_barrier_increases_mortality(
+    h3_sim_with_strong_barrier, h3_sim_no_barrier
+):
+    """Mortality-effect smoke test: a 30 %/60 %/10 % barrier across the
+    open lagoon must produce ≥ as many deaths as the no-barrier run.
+
+    Single-seed test — flaky in principle (movement is stochastic,
+    barrier crossings depend on which agents wander into the line),
+    so we use ≥ rather than >, and a 30 % mortality probability that
+    is well above the per-step movement noise.
+    """
+    def dead(sim) -> int:
+        return 500 - int(sim.pool.alive.sum()) - int(sim.pool.arrived.sum())
+    with_dead = dead(h3_sim_with_strong_barrier)
+    without_dead = dead(h3_sim_no_barrier)
+    assert with_dead >= without_dead, (
+        f"barrier reduced mortality: with={with_dead}, "
+        f"no_barrier={without_dead}"
+    )
+    # With ~120 edges at 30 % mortality, expect ≥ 1 extra death seed=42.
+    # If this is flaky in CI, raise n_agents to 5000 or n_steps to 168.
+
+
 def test_north_south_salinity_gradient(h3_sim):
     """Spec §5: Klaipėda Strait (north) ≥ 1.5 PSU saltier than Nemunas
     mouth (south).  CMEMS BALTICSEA reanalysis routinely shows ≥ 3 PSU

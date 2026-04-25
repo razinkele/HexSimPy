@@ -19,3 +19,8 @@ species_config: "configs/baltic_salmon_species.yaml"
 # see Simulation._place_agents_uniform_random_water docstring.
 initial_state:
   initial_cell_strategy: "uniform_random_water"
+
+# Synthetic mid-lagoon barrier — illustrative, not calibrated.  Set to
+# null to disable.  See scripts/build_nemunas_h3_barriers.py for how
+# the CSV is generated.
+barriers_csv: "data/nemunas_h3_barriers.csv"
