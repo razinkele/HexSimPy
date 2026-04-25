@@ -16,11 +16,15 @@ from shiny_deckgl import (
     CARTO_POSITRON,
     MapWidget,
     encode_binary_attribute,
+    h3_hexagon_layer,
     head_includes,
     layer,
+    loading_widget,
     map_view,
+    reset_view_widget,
     trips_layer,
 )
+import h3
 
 from salmon_ibm.config import load_config
 from salmon_ibm.bioenergetics import BioParams
@@ -387,22 +391,89 @@ viewer_map_widget = MapWidget(
 # ── HexSim workspace discovery ───────────────────────────────────────────────
 
 
+def _pick_h3_resolution(hexsim_edge_m: float) -> int:
+    """Choose the highest H3 resolution whose cells are ≤ hexsim_edge_m.
+
+    This oversamples: every HexSim cell maps to 1–2 H3 cells, preserving
+    fine detail (narrow rivers, patch boundaries). For typical inputs:
+      - HexSim 13.87 m → H3 res 12 (edge 10.83 m)
+      - HexSim 100 m   → H3 res 10 (edge 75.86 m)
+      - HexSim 500 m   → H3 res 9  (edge 200.79 m)
+    """
+    for res in range(16):
+        if h3.average_hexagon_edge_length(res, unit="m") <= hexsim_edge_m:
+            return res
+    return 15
+
+
+_H3_LANDSCAPE_PREFIX = "h3:"
+
+
 def _find_workspaces() -> dict[str, str]:
-    """Find HexSim workspace directories (contain .grid files)."""
+    """Find viewable workspaces.
+
+    Two kinds:
+      * HexSim — directories containing a ``.grid`` file.  Path = dir.
+      * H3 landscape — ``data/*_h3_landscape.nc`` produced by
+        ``scripts/build_*_h3_landscape.py``.  Path is prefixed with
+        ``"h3:"`` so the layer-loader can branch on it.
+    """
     base = Path(".")
-    workspaces = {}
+    workspaces: dict[str, str] = {}
     for grid_file in base.rglob("*.grid"):
         ws_dir = grid_file.parent
-        name = ws_dir.name
-        workspaces[str(ws_dir)] = name
+        workspaces[str(ws_dir)] = ws_dir.name
+    for nc in sorted((base / "data").glob("*_h3_landscape.nc")):
+        # Display name: "Nemunas H3 (res 9)" — try to read resolution
+        # attribute, fall back to filename if attrs aren't readable.
+        try:
+            import xarray as xr
+            ds = xr.open_dataset(nc, engine="h5netcdf")
+            res = int(ds.attrs.get("h3_resolution", -1))
+            ds.close()
+            stem = nc.stem.replace("_h3_landscape", "")
+            display = f"{stem.title()} H3 (res {res})" if res >= 0 else stem
+        except Exception:
+            display = nc.stem
+        workspaces[f"{_H3_LANDSCAPE_PREFIX}{nc}"] = display
     return workspaces
 
 
 def _list_hxn_layers(ws_path: str) -> dict[str, str]:
-    """List .hxn layers in a workspace's Spatial Data/Hexagons/ folder."""
+    """List displayable layers in a workspace.
+
+    For HexSim workspaces: ``.hxn`` files under ``Spatial Data/Hexagons``.
+    For H3 landscapes (``ws_path`` starts with ``h3:``): the variables
+    in the NetCDF — ``depth`` plus the first-day snapshot of each
+    forcing var (``tos``/``sos``/``uo``/``vo``).  Layer keys are
+    ``h3:<nc_path>:<varname>[:<time_idx>]``.
+    """
+    layers: dict[str, str] = {}
+    if ws_path.startswith(_H3_LANDSCAPE_PREFIX):
+        nc_path = ws_path[len(_H3_LANDSCAPE_PREFIX):]
+        layers[f"{_H3_LANDSCAPE_PREFIX}{nc_path}:depth"] = (
+            "Depth (EMODnet bathymetry)"
+        )
+        try:
+            import xarray as xr
+            ds = xr.open_dataset(nc_path, engine="h5netcdf")
+            data_vars = set(ds.data_vars) if hasattr(ds, "data_vars") else set()
+            ds.close()
+            for var, label in [
+                ("tos", "Surface temperature (day 0)"),
+                ("sos", "Surface salinity (day 0)"),
+                ("uo",  "Eastward current (day 0)"),
+                ("vo",  "Northward current (day 0)"),
+            ]:
+                if var in data_vars:
+                    key = f"{_H3_LANDSCAPE_PREFIX}{nc_path}:{var}:0"
+                    layers[key] = label
+        except Exception:
+            pass
+        return layers
+
     ws = Path(ws_path)
     hex_dir = ws / "Spatial Data" / "Hexagons"
-    layers = {}
     if hex_dir.exists():
         for subdir in sorted(hex_dir.iterdir()):
             if not subdir.is_dir():
@@ -410,7 +481,6 @@ def _list_hxn_layers(ws_path: str) -> dict[str, str]:
             hxn_files = list(subdir.glob("*.hxn"))
             if hxn_files:
                 layers[str(hxn_files[0])] = subdir.name
-    # Also check for .hxn files directly in the workspace
     for hxn in sorted(ws.glob("*.hxn")):
         layers[str(hxn)] = hxn.stem
     return layers
@@ -1657,13 +1727,211 @@ def server(input, output, session):
         layers = await asyncio.to_thread(_list_hxn_layers, ws)
         ui.update_select("viewer_layer", choices=layers)
 
+    _viewer_progress = reactive.Value(
+        {"pct": 0, "stage": "", "active": False, "error": None}
+    )
+
+    async def _set_progress(pct: int, stage: str) -> None:
+        _viewer_progress.set(
+            {"pct": pct, "stage": stage, "active": True, "error": None}
+        )
+        # Yield to the event loop so the reactive update flushes to the
+        # browser before the next CPU-heavy stage runs.
+        await asyncio.sleep(0)
+
     @render.ui
     def viewer_map_container():
         return ui.div(
             viewer_map_widget.ui(height="520px"),
             ui.output_ui("viewer_legend"),
+            ui.output_ui("viewer_progress"),
             style="position: relative;",
         )
+
+    @render.ui
+    def viewer_progress():
+        p = _viewer_progress.get()
+        if p.get("error"):
+            return ui.HTML(
+                f'<div class="viewer-progress-box viewer-progress-error">'
+                f'<span class="viewer-progress-stage">⚠ {p["error"]}</span>'
+                f"</div>"
+            )
+        if not p.get("active"):
+            return ui.HTML("")
+        pct = max(0, min(100, int(p["pct"])))
+        stage = p["stage"] or "Loading…"
+        return ui.HTML(
+            f'<div class="viewer-progress-box">'
+            f'  <div class="viewer-progress-head">'
+            f'    <span class="viewer-progress-stage">{stage}</span>'
+            f'    <span class="viewer-progress-pct">{pct}%</span>'
+            f"  </div>"
+            f'  <div class="viewer-progress-bar">'
+            f'    <div class="viewer-progress-fill" style="width:{pct}%"></div>'
+            f"  </div>"
+            f"</div>"
+        )
+
+    async def _load_viewer_h3_landscape(layer_key: str):
+        """Render an H3 landscape NetCDF directly via h3_hexagon_layer.
+
+        ``layer_key`` is ``"h3:<nc_path>:<var>[:<time_idx>]"``.  The
+        NetCDF already carries ``h3_id`` (uint64) + per-cell field
+        arrays — no HexSim conversion needed.
+        """
+        nonlocal _viewer_initialized
+        # Parse the key: skip prefix, split on ":" — first piece is path.
+        body = layer_key[len(_H3_LANDSCAPE_PREFIX):]
+        parts = body.split(":")
+        if len(parts) < 2:
+            ui.notification_show(
+                f"Bad H3 layer key: {layer_key}", type="error", duration=10,
+            )
+            return
+        nc_path = parts[0]
+        var = parts[1]
+        time_idx = int(parts[2]) if len(parts) > 2 else None
+
+        await _set_progress(5, f"Reading {Path(nc_path).name}:{var}…")
+
+        def _read_h3_landscape() -> dict:
+            import xarray as xr
+            with xr.open_dataset(nc_path, engine="h5netcdf") as ds:
+                if var not in ds:
+                    raise KeyError(f"variable {var!r} not in {nc_path}")
+                arr = ds[var].values
+                if arr.ndim == 2:  # (time, cell)
+                    if time_idx is None:
+                        raise ValueError(
+                            f"{var} is time-varying; layer key must include "
+                            f"a time index"
+                        )
+                    arr = arr[time_idx]
+                h3_ids = ds["h3_id"].values
+                water_mask = ds["water_mask"].values.astype(bool)
+                res = int(ds.attrs.get("h3_resolution", -1))
+            return {
+                "h3_ids": h3_ids,
+                "values": arr.astype(np.float32),
+                "water_mask": water_mask,
+                "resolution": res,
+            }
+
+        try:
+            data = await asyncio.to_thread(_read_h3_landscape)
+        except Exception as e:
+            _viewer_progress.set(
+                {"pct": 0, "stage": "", "active": False,
+                 "error": f"H3 landscape read error: {e}"}
+            )
+            ui.notification_show(
+                f"H3 landscape read error: {e}", type="error", duration=10,
+            )
+            return
+
+        await _set_progress(40, "Filtering water cells…")
+        h3_ids = data["h3_ids"]
+        values = data["values"]
+        water_mask = data["water_mask"]
+        valid = water_mask & np.isfinite(values)
+        h3_ids = h3_ids[valid]
+        values = values[valid]
+        n_cells = len(h3_ids)
+        if n_cells == 0:
+            _viewer_progress.set(
+                {"pct": 0, "stage": "", "active": False,
+                 "error": "no water cells in this layer"}
+            )
+            return
+
+        await _set_progress(70, f"Colorizing {n_cells:,} hexagons…")
+        rgb = _colorscale_rgb(values, TEMP_COLORSCALE)
+        # h3_hexagon_layer expects per-feature dicts with `hex` (str) +
+        # `color`.  Convert h3_ids (uint64) → strings via h3.int_to_str.
+        import h3
+        data_rows = [
+            {"hex": h3.int_to_str(int(h)),
+             "color": [int(r), int(g), int(b), 220]}
+            for h, (r, g, b) in zip(h3_ids.tolist(), rgb.tolist())
+        ]
+
+        await _set_progress(85, "Computing camera target…")
+        # Centre on the median water cell (same anchor strategy as the
+        # existing H3 viewer path) — guarantees the initial view lands
+        # on real hexes, not on an empty bbox-midpoint bend interior.
+        mid = n_cells // 2
+        mid_lat, mid_lon = h3.cell_to_latlng(h3.int_to_str(int(h3_ids[mid])))
+        # Zoom: the existing viewer code pins ≥ 2 px per H3 cell using
+        # h3.average_hexagon_edge_length(res).  Reproduce that here.
+        h3_edge_m = h3.average_hexagon_edge_length(data["resolution"], unit="m")
+        min_hex_px = 3
+        zoom = float(np.log2(min_hex_px * 156543.03 / max(h3_edge_m, 1.0)))
+        zoom = max(0.0, min(22.0, zoom))
+
+        water_layer = h3_hexagon_layer(
+            "viewer_water",
+            data=data_rows,
+            getHexagon="@@=d.hex",
+            getFillColor="@@=d.color",
+            stroked=False,
+            filled=True,
+            extruded=False,
+            pickable=False,
+            highPrecision=True,
+        )
+
+        try:
+            await _set_progress(92, "Uploading to deck.gl…")
+            await viewer_map_widget.update(
+                session,
+                layers=[water_layer],
+                view_state={
+                    "longitude": float(mid_lon),
+                    "latitude": float(mid_lat),
+                    "zoom": zoom,
+                },
+            )
+            _viewer_initialized = True
+            _viewer_meta.set({
+                "format": "h3_landscape",
+                "version": "—",
+                "ncols": 1,
+                "nrows": n_cells,
+                "total_cells": n_cells,
+                "water_cells": n_cells,
+                "cell_size": None,
+                "edge": h3_edge_m,
+                "origin": (mid_lat, mid_lon),
+                "nodata": None,
+                "vmin": float(values.min()),
+                "vmax": float(values.max()),
+                "vmean": float(values.mean()),
+                "n_unique": int(len(np.unique(values))),
+                "layer_name": f"{Path(nc_path).stem}:{var}",
+            })
+            ui.notification_show(
+                f"Loaded {n_cells:,} H3 cells (res {data['resolution']}, "
+                f"zoom={zoom:.1f})",
+                type="message", duration=5,
+            )
+            await _set_progress(100, f"Loaded {n_cells:,} H3 cells")
+            await asyncio.sleep(0.6)
+            _viewer_progress.set(
+                {"pct": 0, "stage": "", "active": False, "error": None}
+            )
+        except Exception as e:
+            _viewer_progress.set(
+                {"pct": 0, "stage": "", "active": False,
+                 "error": f"Map update failed: {e}"}
+            )
+            ui.notification_show(
+                f"Map update failed: {e}", type="error", duration=10,
+            )
+            import logging
+            logging.getLogger(__name__).exception(
+                "H3 landscape viewer update failed"
+            )
 
     @reactive.effect
     @reactive.event(input.viewer_load)
@@ -1675,9 +1943,22 @@ def server(input, output, session):
             ui.notification_show("No layer selected", type="warning")
             return
 
+        # H3 landscape branch: layer key is "h3:<nc>:<var>[:<time_idx>]".
+        # Skip the HexSim hexmap-parsing and georef-meters dance —
+        # the NetCDF already has h3_id + lat/lon and the rendering
+        # path below uses h3_hexagon_layer which consumes H3 IDs
+        # directly.
+        if hxn_path.startswith(_H3_LANDSCAPE_PREFIX):
+            await _load_viewer_h3_landscape(hxn_path)
+            return
+
+        await _set_progress(5, f"Reading {Path(hxn_path).name} …")
         try:
             hm = await asyncio.to_thread(HxnHexMap.from_file, hxn_path)
         except Exception as e:
+            _viewer_progress.set(
+                {"pct": 0, "stage": "", "active": False, "error": f"Read error: {e}"}
+            )
             ui.notification_show(f"Read error: {e}", type="error", duration=10)
             return
 
@@ -1689,9 +1970,16 @@ def server(input, output, session):
         n_water = len(water_flat)
 
         if n_water == 0:
+            _viewer_progress.set(
+                {"pct": 0, "stage": "", "active": False,
+                 "error": "No non-zero cells found"}
+            )
             ui.notification_show("No non-zero cells found", type="warning")
             return
 
+        await _set_progress(
+            25, f"Reading georef · {n_water:,} water cells of {len(values):,}"
+        )
         # Get georef from .grid file
         ws = Path(ws_path)
         grid_files = list(ws.glob("*.grid"))
@@ -1709,6 +1997,7 @@ def server(input, output, session):
             grid_x_extent = hm.height * 1.5 * edge
             grid_y_extent = hm.width * np.sqrt(3.0) * edge
 
+        await _set_progress(40, "Building hex row/col indices…")
         # Build row/col arrays properly (handles narrow grids where odd
         # rows have width-1 cells — simple flat//width is WRONG for those).
         # This matches hxn_viewer.py _hex_centers() exactly.
@@ -1732,79 +2021,113 @@ def server(input, output, session):
         data_cols = all_cols[water_flat]
         water_values = values[water_flat]
 
+        await _set_progress(55, "Computing hex centers…")
         # Hex center coordinates (matches hxnparser.HexMap.hex_to_xy)
         # Pointy-top spacing (verified against HexSim 4.0.20)
         cx = (
             np.sqrt(3.0) * edge * (data_cols.astype(np.float64) + 0.5 * (data_rows % 2))
         )
-        cy = 1.5 * edge * data_rows.astype(np.float64)
+        # Flip y so row 0 is at the top (screen convention matches HexSim viewer).
+        cy = -1.5 * edge * data_rows.astype(np.float64)
 
-        # Subsample for deck.gl — stride-based to preserve spatial tiling
-        max_pts = 500_000
+        # Subsample HexSim cells BEFORE H3 conversion — stride-based so the
+        # river shape is preserved. 300k is enough after H3 dedup to fill
+        # most of the visible area without oversized JSON.
+        max_pts = 300_000
         if n_water > max_pts:
             step = max(1, n_water // max_pts)
             idx = np.arange(0, n_water, step)
         else:
             idx = np.arange(n_water)
 
-        # Scale to keep pseudo-lat/lon within ±80 degrees
-        max_coord = max(abs(cy).max(), abs(cx).max(), 1)
-        viewer_scale = 80.0 / max_coord
-        sx = cx[idx] * viewer_scale
-        sy = -cy[idx] * viewer_scale
-        n_pts = len(idx)
+        # Center on a real water cell — the middle one in flat-index order.
+        cx_sub = cx[idx]
+        cy_sub = cy[idx]
+        mid = len(cx_sub) // 2
+        cx_center = float(cx_sub[mid])
+        cy_center = float(cy_sub[mid])
 
-        # Hex polygon vertices
-        edge_s = edge * viewer_scale
-        verts, start_idx = _build_hex_polygons(sx, sy, edge_s)
+        # Pseudo-geography: place the anchor hex at (lat=0, lng=0) on the
+        # equator so meters→degrees is locally isotropic (1° ≈ 111,320 m in
+        # both axes). HexSim's native CRS isn't carried in .grid/.hxn, so
+        # anchoring at equator-prime-meridian is the neutral choice.
+        m_to_deg = 1.0 / 111320.0
+        lons = ((cx_sub - cx_center) * m_to_deg).astype(np.float64)
+        lats = ((cy_sub - cy_center) * m_to_deg).astype(np.float64)
 
-        # Color by value
-        z = water_values[idx]
-        rgb = _colorscale_rgb(z, TEMP_COLORSCALE)
-        colors = np.column_stack(
-            [
-                rgb[:, 0],
-                rgb[:, 1],
-                rgb[:, 2],
-                np.full(n_pts, 220, dtype=np.uint8),
-            ]
-        ).astype(np.uint8)
+        await _set_progress(72, "Converting cells to H3…")
+        # Pick the highest H3 resolution whose cells fit inside a HexSim cell
+        # — oversamples ~1.5× so every HexSim cell spawns 1–2 H3 cells and
+        # fine features (narrow rivers) survive.
+        h3_res = _pick_h3_resolution(float(edge))
+        h3_edge_m = h3.average_hexagon_edge_length(h3_res, unit="m")
 
-        center_x = float(np.mean(sx))
-        center_y = float(np.mean(sy))
-        # Compute zoom so hexagons are visible (~4 pixels per edge)
-        # At zoom Z, 1 degree ≈ 256 * 2^Z / 360 pixels
-        # For edge_s degrees to be 4px: zoom = log2(4 * 360 / (256 * edge_s))
-        min_hex_pixels = 4
-        zoom_for_hex = float(np.log2(min_hex_pixels * 360 / (256 * max(edge_s, 1e-6))))
-        # Also compute zoom to fit extent
-        extent = max(float(sx.max() - sx.min()), float(sy.max() - sy.min()), 0.01)
-        zoom_for_extent = float(np.log2(360 / extent))
-        # Use the LARGER zoom (closer in) — show hex detail, user can zoom out
-        zoom = max(zoom_for_hex, zoom_for_extent)
+        # Scalar h3 call × N — ~5 μs each; 300k cells ≈ 1.5 s. No vectorized
+        # C entry point in h3-py 4.x yet, so we loop.
+        h3_ids = [
+            h3.latlng_to_cell(float(la), float(lo), h3_res)
+            for la, lo in zip(lats, lons)
+        ]
+        h3_ids_arr = np.array(h3_ids)
 
-        water_layer = layer(
-            "SolidPolygonLayer",
+        await _set_progress(82, "Aggregating into H3 cells…")
+        # Dedup: multiple HexSim cells can land in one H3 cell. Average their
+        # values so the legend/colorbar still matches the data distribution.
+        z = water_values[idx].astype(np.float64)
+        unique_h3, inverse = np.unique(h3_ids_arr, return_inverse=True)
+        sums = np.bincount(inverse, weights=z)
+        counts = np.bincount(inverse)
+        h3_values = sums / counts  # mean per H3 cell
+        n_h3 = len(unique_h3)
+
+        # Colors per unique H3 cell
+        rgb = _colorscale_rgb(h3_values.astype(np.float32), TEMP_COLORSCALE)
+
+        await _set_progress(88, f"Building {n_h3:,} H3 hexagons…")
+        # deck.gl's H3HexagonLayer takes a per-feature dict with `hex` + `color`.
+        # Binary attributes aren't practical here because hex IDs are strings.
+        data_rows = [
+            {"hex": str(h), "color": [int(r), int(g), int(b), 220]}
+            for h, (r, g, b) in zip(unique_h3.tolist(), rgb.tolist())
+        ]
+
+        water_layer = h3_hexagon_layer(
             "viewer_water",
-            data={"length": n_pts, "startIndices": start_idx},
-            getPolygon=encode_binary_attribute(verts),
-            getFillColor=encode_binary_attribute(colors),
+            data=data_rows,
+            getHexagon="@@=d.hex",
+            getFillColor="@@=d.color",
+            stroked=False,
             filled=True,
             extruded=False,
             pickable=False,
+            highPrecision=True,
         )
 
+        # Zoom fit. At zoom Z on the equator: meters/pixel = 156543.03 / 2^Z.
+        extent_m = max(
+            float(cx_sub.max() - cx_sub.min()),
+            float(cy_sub.max() - cy_sub.min()),
+            1.0,
+        )
+        pixels_target = 500
+        zoom_fit = np.log2(pixels_target * 156543.03 / extent_m)
+        # Clamp so each H3 cell is ≥ 2 px, using the actual H3 edge (not the
+        # HexSim edge, since H3 cell size is what the user actually sees).
+        min_hex_px = 2
+        zoom_hex = np.log2(min_hex_px * 156543.03 / max(h3_edge_m, 1.0))
+        zoom = float(max(zoom_fit, zoom_hex))
+        zoom = max(0.0, min(22.0, zoom))
+
         try:
-            await viewer_map_widget.set_style(session, BLANK_STYLE)
+            await _set_progress(92, "Uploading to deck.gl…")
             await viewer_map_widget.update(
                 session,
                 layers=[water_layer],
                 view_state={
-                    "longitude": center_x,
-                    "latitude": center_y,
+                    "longitude": 0.0,
+                    "latitude": 0.0,
                     "zoom": float(zoom),
                 },
-                views=[map_view(controller=True)],
             )
             _viewer_initialized = True
             # Store metadata only on success (map and legend stay in sync)
@@ -1828,11 +2151,21 @@ def server(input, output, session):
                 }
             )
             ui.notification_show(
-                f"Loaded {n_pts:,} hexagons (zoom={zoom:.1f})",
+                f"Loaded {n_h3:,} hexagons (zoom={zoom:.1f})",
                 type="message",
                 duration=5,
             )
+            await _set_progress(100, f"Loaded {n_h3:,} hexagons")
+            # Brief pause at 100% so the user registers completion, then hide.
+            await asyncio.sleep(0.6)
+            _viewer_progress.set(
+                {"pct": 0, "stage": "", "active": False, "error": None}
+            )
         except Exception as e:
+            _viewer_progress.set(
+                {"pct": 0, "stage": "", "active": False,
+                 "error": f"Map update failed: {e}"}
+            )
             ui.notification_show(f"Map update failed: {e}", type="error", duration=10)
             import logging
 
