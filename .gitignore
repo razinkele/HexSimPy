@@ -32,6 +32,9 @@ data/curonian_trimesh_forcing_stub.nc
 data/nemunas_water_union.geojson
 data/naturalearth_ocean/
 h3_outside_water_suspects.csv
+# inSTREAM example_baltic shapefile (copied from inSTREAM repo for use as
+# the H3 water-mask source — bundled separately, not committed here)
+data/instream_baltic_polygons/
 
 # OS
 Thumbs.db

@@ -29,20 +29,19 @@ def sidebar_panel():
                     "landscape",
                     "Study area",
                     choices={
-                        # TriMesh-backed Curonian — default since v1.2.1.
-                        # Regular 100 m lat/lon grid, EMODnet bathymetry,
-                        # OSM∪NE polygon water mask, geographic coverage
-                        # mirrors the inSTREAM example_baltic tutorial.
+                        # Curonian Lagoon H3 is now the default
+                        # (v1.2.6).  Internal key stays "nemunas"
+                        # (matches configs/config_nemunas_h3.yaml +
+                        # data/nemunas_h3_*.nc filenames).  Water
+                        # mask now uses inSTREAM example_baltic
+                        # polygons + NE ocean — tighter inland than
+                        # the prior OSM source, eliminates the
+                        # ~1 000-cell Nemunas-Delta-polderland leak.
+                        "nemunas": "Curonian Lagoon H3",
                         "curonian_trimesh": "Curonian Lagoon TriMesh",
                         "columbia": "Columbia River",
-                        # Internal key stays "nemunas" (matches
-                        # configs/config_nemunas_h3.yaml + data/
-                        # nemunas_h3_*.nc filenames); only the
-                        # user-visible label is "Curonian Lagoon H3"
-                        # since the H3 bbox covers the lagoon proper.
-                        "nemunas": "Curonian Lagoon H3",
                     },
-                    selected="curonian_trimesh",
+                    selected="nemunas",
                 ),
                 ui.input_numeric("n_agents", "Agents", value=50, min=1, max=1000),
                 ui.input_numeric("n_steps", "Hours", value=480, min=1, max=8760),

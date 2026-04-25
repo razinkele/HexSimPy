@@ -45,6 +45,14 @@ NE_OCEAN_URL = "https://naciscdn.org/naturalearth/10m/physical/ne_10m_ocean.zip"
 NE_DIR = PROJECT / "data" / "naturalearth_ocean"
 NE_SHP = NE_DIR / "ne_10m_ocean.shp"
 
+# inSTREAM example_baltic shapefile — copied from
+# inSTREAM/instream-py/tests/fixtures/example_baltic/Shapefile/.
+# 9 reaches: Nemunas, Atmata, Minija, Sysa, Skirvyte, Leite, Gilija,
+# CuronianLagoon, BalticCoast.  EPSG:3035 in the file; we reproject
+# to 4326 at load time.  Far tighter inland coverage than OSM —
+# OSM polygons over-include floodplain that's actually farmland.
+INSTREAM_SHP = PROJECT / "data" / "instream_baltic_polygons" / "BalticExample.shp"
+
 # Cached fused water-polygon union (regenerable; safe to delete).
 WATER_UNION_GEOJSON = PROJECT / "data" / "nemunas_water_union.geojson"
 
@@ -171,13 +179,46 @@ def fetch_natural_earth_ocean() -> gpd.GeoDataFrame:
     return gpd.GeoDataFrame(geometry=list(clipped), crs="EPSG:4326")
 
 
-def get_water_union(refresh: bool = False):
-    """Return the OSM ∪ NE water multi-polygon, cached on disk.
+def fetch_instream_polygons() -> gpd.GeoDataFrame:
+    """Return the inSTREAM example_baltic 9-reach polygons in EPSG:4326.
 
-    First call (or with ``refresh=True``) hits Overpass + downloads
-    Natural Earth, then writes the union to
-    ``data/nemunas_water_union.geojson``.  Subsequent calls just
-    re-read the cache (~50 ms).
+    Loads ``data/instream_baltic_polygons/BalticExample.shp`` and
+    reprojects from EPSG:3035 (LAEA Europe, metric) to EPSG:4326
+    (lat/lon).  Tighter inland coverage than OSM — OSM `natural=water`
+    polygons over-include floodplain that's actually farmland and
+    polderland.  inSTREAM polygons came from a hand-curated combination
+    of OSM rivers (clipped to channel widths) plus a published Curonian
+    Lagoon outline plus a Baltic-coast strip.
+    """
+    if not INSTREAM_SHP.exists():
+        raise FileNotFoundError(
+            f"inSTREAM shapefile not found: {INSTREAM_SHP}\n"
+            f"Copy it from inSTREAM/instream-py/tests/fixtures/"
+            f"example_baltic/Shapefile/."
+        )
+    gdf = gpd.read_file(INSTREAM_SHP)
+    if gdf.crs is None:
+        # The .prj should make this never happen, but be defensive.
+        gdf = gdf.set_crs("EPSG:3035")
+    if gdf.crs.to_epsg() != 4326:
+        gdf = gdf.to_crs("EPSG:4326")
+    return gdf
+
+
+def get_water_union(refresh: bool = False, source: str = "instream"):
+    """Return the cached water multi-polygon for the H3 build mask.
+
+    ``source`` selects which inland polygons to combine with the
+    Natural Earth ocean:
+
+    * ``"instream"`` (default since v1.2.6) — inSTREAM example_baltic
+      9-reach shapefile.  Tightest inland coverage; the H3 build's
+      previous OSM-based mask leaked ~1 000 cells onto Nemunas-Delta
+      farmland.
+    * ``"osm"`` — OpenStreetMap Overpass query (legacy default).
+
+    The cached GeoJSON is keyed to a single source, so switching
+    sources requires ``refresh=True`` to rebuild.
 
     Returns the shapely geometry directly — callers usually want
     ``.contains(point)`` rather than a GeoDataFrame.
@@ -186,9 +227,23 @@ def get_water_union(refresh: bool = False):
         gdf = gpd.read_file(WATER_UNION_GEOJSON)
         return unary_union(gdf.geometry.values)
 
-    osm = fetch_osm_water()
-    ne_ocean = fetch_natural_earth_ocean()
-    union = unary_union(list(osm.geometry.values) + list(ne_ocean.geometry.values))
+    if source == "instream":
+        instream = fetch_instream_polygons()
+        ne_ocean = fetch_natural_earth_ocean()
+        inland_geoms = list(instream.geometry.values)
+        union = unary_union(inland_geoms + list(ne_ocean.geometry.values))
+        print(f"  built water union from inSTREAM ({len(instream)} polygons) "
+              f"+ NE ocean ({len(ne_ocean)} polygon)")
+    elif source == "osm":
+        osm = fetch_osm_water()
+        ne_ocean = fetch_natural_earth_ocean()
+        union = unary_union(
+            list(osm.geometry.values) + list(ne_ocean.geometry.values),
+        )
+        print(f"  built water union from OSM ({len(osm)} polygons) "
+              f"+ NE ocean ({len(ne_ocean)} polygon)")
+    else:
+        raise ValueError(f"unknown source: {source!r}")
 
     WATER_UNION_GEOJSON.parent.mkdir(parents=True, exist_ok=True)
     gpd.GeoDataFrame(geometry=[union], crs="EPSG:4326").to_file(
