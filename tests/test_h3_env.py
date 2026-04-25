@@ -60,7 +60,9 @@ def _write_synthetic_landscape(tmp_path, cells, n_time=3):
 
 
 def test_h3_env_loads_canonical_field_names(tmp_path):
-    """Canonical keys: tos→temperature, sos→salinity, uo→u_current, vo→v_current.
+    """Canonical keys: tos→temperature, sos→salinity, uo→u_current,
+    vo→v_current, plus a zero-filled ``ssh`` (movement.py reads it
+    for upstream/downstream behaviour, see h3_env.py docstring).
 
     ``env.fields`` is the per-cell snapshot at the current timestep;
     the full time-series lives on ``env._full_fields``.
@@ -72,13 +74,15 @@ def test_h3_env_loads_canonical_field_names(tmp_path):
     env = H3Environment.from_netcdf(nc, mesh)
 
     assert set(env.fields.keys()) == {
-        "temperature", "salinity", "u_current", "v_current",
+        "temperature", "salinity", "u_current", "v_current", "ssh",
     }
     for arr in env.fields.values():
         assert arr.shape == (mesh.n_cells,)
         assert arr.dtype == np.float32
     for arr in env._full_fields.values():
         assert arr.shape == (3, mesh.n_cells)
+    # ssh is synthesised (zero-filled) — confirm it is.
+    np.testing.assert_array_equal(env.fields["ssh"], np.zeros(mesh.n_cells))
 
 
 def test_h3_env_aligns_field_columns_with_mesh_h3_ids(tmp_path):
