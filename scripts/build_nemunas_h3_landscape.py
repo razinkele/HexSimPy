@@ -8,7 +8,16 @@ Output: ``data/nemunas_h3_landscape.nc`` with variables:
     - h3_id      (cell,)        uint64    — H3 cell index
     - lat, lon   (cell,)        float64   — cell centroid
     - depth      (cell,)        float32   — EMODnet, positive down (m)
-    - water_mask (cell,)        uint8     — 1 = water (depth > 0)
+    - water_mask (cell,)        uint8     — 1 = (depth > 0) ∧ inside
+                                              an OSM/NE water polygon.
+                                              The polygon AND-mask is
+                                              required because EMODnet
+                                              reports negative
+                                              elevation across
+                                              below-sea-level land
+                                              (Nemunas Delta polders),
+                                              which would otherwise
+                                              leak in as 'water'.
     - tos        (time, cell)   float32   — sea-surface temperature (°C)
     - sos        (time, cell)   float32   — salinity (PSU)
     - uo, vo     (time, cell)   float32   — currents (m/s) east / north
@@ -26,6 +35,10 @@ import numpy as np
 import rioxarray  # noqa: F401  — registers .rio accessor on xarray
 import xarray as xr
 from scipy.interpolate import NearestNDInterpolator, RegularGridInterpolator
+from shapely.geometry import Point
+from shapely.strtree import STRtree
+
+from _water_polygons import get_water_union
 
 
 BBOX = {"minlon": 20.4, "maxlon": 21.9, "minlat": 54.9, "maxlat": 55.8}
@@ -159,6 +172,37 @@ def sample_cmems(
 
 
 # ---------------------------------------------------------------------------
+# Stage 3.5: clip the depth>0 mask to authoritative water polygons
+# ---------------------------------------------------------------------------
+
+
+def polygon_water_mask(lats: np.ndarray, lons: np.ndarray) -> np.ndarray:
+    """For each (lat, lon) centroid, True if it lies inside the OSM ∪ NE
+    water polygon union.  Uses an STRtree spatial index so 100k points
+    over a polygon with thousands of rings still runs in a few seconds.
+    """
+    union = get_water_union()
+    # The union is typically a MultiPolygon; STRtree wants a flat list of
+    # polygons.  ``.geoms`` returns the components for both Polygon and
+    # MultiPolygon (after we wrap a Polygon in a 1-element list).
+    parts = list(getattr(union, "geoms", [union]))
+    tree = STRtree(parts)
+
+    mask = np.zeros(len(lats), dtype=bool)
+    for i, (la, lo) in enumerate(zip(lats, lons)):
+        pt = Point(lo, la)
+        # `.query(pt)` returns *indices* into ``parts`` whose envelopes
+        # intersect the point.  For each candidate, do the precise
+        # ``.contains`` test.  This is dramatically faster than
+        # ``union.contains(pt)`` for large unions.
+        for idx in tree.query(pt):
+            if parts[idx].contains(pt):
+                mask[i] = True
+                break
+    return mask
+
+
+# ---------------------------------------------------------------------------
 # Stage 4: write the consolidated NetCDF
 # ---------------------------------------------------------------------------
 
@@ -181,7 +225,24 @@ def write_landscape_nc(
 
     lats = np.array([h3.cell_to_latlng(c)[0] for c in cells_sorted])
     lons = np.array([h3.cell_to_latlng(c)[1] for c in cells_sorted])
-    water_mask = (depth_sorted > 0.0).astype(np.uint8)
+
+    # Water = bathymetry says wet AND coastline-authority says wet.
+    # Either condition alone has a known failure mode:
+    #   * depth>0 alone: false positives in below-sea-level polderland
+    #     (Nemunas Delta — EMODnet reports negative elevation there).
+    #   * polygon alone: NE ocean polygon is coarse near the spit, OSM
+    #     misses small streams.  Bathymetry filters those out.
+    print(f"  applying coastline polygon mask…")
+    in_polygon = polygon_water_mask(lats, lons)
+    water_mask = ((depth_sorted > 0.0) & in_polygon).astype(np.uint8)
+    n_water = int(water_mask.sum())
+    n_total = len(water_mask)
+    n_dropped = int((depth_sorted > 0.0).sum() - n_water)
+    print(
+        f"  water_mask: {n_water:,}/{n_total:,} cells "
+        f"({100*n_water/n_total:.1f}% water); "
+        f"polygon-mask dropped {n_dropped:,} below-sea-level land cells"
+    )
 
     forcing_sorted = {k: v[:, order] for k, v in forcing.items()}
 

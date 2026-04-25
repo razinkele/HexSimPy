@@ -26,6 +26,10 @@ data/curonian_forcing_cmems_raw.nc
 data/curonian_forcing_shyfem.nc
 data/curonian_bathymetry_raw.tif
 data/nemunas_h3_landscape.nc
+# Coastline-validation caches (regenerable from Overpass + Natural Earth)
+data/nemunas_water_union.geojson
+data/naturalearth_ocean/
+h3_outside_water_suspects.csv
 
 # OS
 Thumbs.db
