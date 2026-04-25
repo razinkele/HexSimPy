@@ -30,8 +30,12 @@ def sidebar_panel():
                     "Study area",
                     choices={
                         "columbia": "Columbia River",
-                        "curonian": "Curonian Lagoon",
-                        "nemunas": "Nemunas Delta (H3)",
+                        # Internal key stays "nemunas" (matches
+                        # configs/config_nemunas_h3.yaml + data/
+                        # nemunas_h3_*.nc filenames); only the
+                        # user-visible label is "Curonian Lagoon H3"
+                        # since the H3 bbox covers the lagoon proper.
+                        "nemunas": "Curonian Lagoon H3",
                     },
                 ),
                 ui.input_numeric("n_agents", "Agents", value=50, min=1, max=1000),
