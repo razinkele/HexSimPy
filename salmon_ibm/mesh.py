@@ -12,7 +12,7 @@ class TriMesh:
     """Unstructured triangular mesh over the Curonian Lagoon domain."""
 
     def __init__(self, nodes, triangles, mask_per_node, depth_per_node,
-                 delaunay=None):
+                 delaunay=None, neighbors=None):
         self.nodes = nodes
         self.triangles = triangles
         self.n_triangles = len(triangles)
@@ -25,9 +25,15 @@ class TriMesh:
         self.water_mask = tri_mask_sum == 3
         self.depth = depth_per_node[triangles].mean(axis=1)
 
-        # Use Delaunay object directly instead of slow _build_neighbors()
-        self._delaunay = delaunay if delaunay is not None else Delaunay(nodes)
-        self.neighbors = self._neighbors_from_delaunay(self._delaunay)
+        if neighbors is not None:
+            # Caller supplied a precomputed neighbor table (read from a
+            # cache embedded in the landscape NC) — skip Delaunay
+            # entirely.  Saves ~60 s on a 1 M-node mesh.
+            self._delaunay = None
+            self.neighbors = neighbors.astype(int)
+        else:
+            self._delaunay = delaunay if delaunay is not None else Delaunay(nodes)
+            self.neighbors = self._neighbors_from_delaunay(self._delaunay)
 
         # Precompute water neighbor padded array for O(1) lookup
         self._precompute_water_neighbors()
@@ -42,6 +48,20 @@ class TriMesh:
         nodes = np.column_stack([lat.ravel(), lon.ravel()])
         mask_flat = mask.ravel()
         depth_flat = depth.ravel()
+
+        # If the NC carries a cached Delaunay (`triangles` +
+        # `neighbors` variables), use it.  Builders that produce big
+        # meshes — see scripts/build_curonian_trimesh.py — should
+        # pre-compute and embed the cache so the runtime open is
+        # I/O-bound, not CPU-bound.
+        if "triangles" in ds.variables and "neighbors" in ds.variables:
+            triangles = ds["triangles"].values
+            neighbors = ds["neighbors"].values
+            ds.close()
+            return cls(
+                nodes, triangles, mask_flat, depth_flat, neighbors=neighbors,
+            )
+
         ds.close()
         tri = Delaunay(nodes)
         return cls(nodes, tri.simplices, mask_flat, depth_flat, delaunay=tri)

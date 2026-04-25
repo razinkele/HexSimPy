@@ -1,0 +1,65 @@
+# Curonian Lagoon — TriMesh-backed scenario.
+#
+# Reproduces the Curonian + Nemunas Delta + Baltic-coast strip from the
+# inSTREAM example_baltic tutorial (configs/example_baltic.yaml in
+# instream-py) but on HexSimPy's regular-lat/lon-grid TriMesh backend.
+#
+# The TriMesh path triangulates the regular grid via Delaunay at load
+# time inside salmon_ibm.mesh.TriMesh.from_netcdf — same call shape as
+# the existing config_curonian_minimal.yaml, just with a finer grid
+# and a wider domain that covers the delta channels.
+#
+# Geographic coverage: 20.4–21.9 °E, 54.9–55.8 °N (same bbox as the H3
+# Curonian Lagoon backend; reuses the EMODnet bathymetry TIF and the
+# OSM ∪ Natural Earth water polygon union).
+#
+# Resolution: 100 m node spacing — fine enough that the Atmata, Minija,
+# Šyša and Skirvytė delta channels are all resolved as 1-3 cells wide.
+# Rebuild the NC with a different --resolution if you want a coarser
+# faster grid (see scripts/build_curonian_trimesh.py).
+
+grid:
+  file: curonian_trimesh_landscape.nc
+  lat_var: lat
+  lon_var: lon
+  mask_var: mask
+  depth_var: depth
+
+# CMEMS forcing inherited from the existing minimal/H3 setup — same
+# bbox so the cached re-grid is reusable.  Stub forcings keep this
+# config self-contained for testing; real CMEMS data via
+# scripts/fetch_cmems_forcing.py.
+forcings:
+  # Stub forcing matched to the 100 m lat/lon grid (1000 × 948 nodes,
+  # so Environment.advance can index by mesh.triangles).  Built
+  # alongside the landscape NC by scripts/build_curonian_trimesh.py.
+  # Replace with regridded CMEMS via scripts/fetch_cmems_forcing.py
+  # for real runs.
+  physics_surface:
+    file: curonian_trimesh_forcing_stub.nc
+    time_var: time
+    u_var: uo
+    v_var: vo
+    ssh_var: zos
+    temp_var: tos
+    salt_var: sos
+  river_discharge:
+    file: nemunas_discharge_stub.nc
+    time_var: time
+    Q_var: Q
+  winds:
+    file: winds_stub.nc
+    time_var: time
+    u10_var: u10
+    v10_var: v10
+
+estuary:
+  salinity_cost:
+    S_opt: 0.5
+    S_tol: 6.0
+    k: 0.6
+  do_avoidance:
+    lethal: 2.0
+    high: 4.0
+  seiche_pause:
+    dSSHdt_thresh_m_per_15min: 0.02

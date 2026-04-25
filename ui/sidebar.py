@@ -36,6 +36,11 @@ def sidebar_panel():
                         # user-visible label is "Curonian Lagoon H3"
                         # since the H3 bbox covers the lagoon proper.
                         "nemunas": "Curonian Lagoon H3",
+                        # TriMesh-backed Curonian — same bbox, regular
+                        # 100 m lat/lon grid; built from EMODnet +
+                        # OSM∪NE polygons, modelled after the inSTREAM
+                        # example_baltic tutorial.
+                        "curonian_trimesh": "Curonian Lagoon TriMesh",
                     },
                 ),
                 ui.input_numeric("n_agents", "Agents", value=50, min=1, max=1000),

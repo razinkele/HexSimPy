@@ -691,6 +691,7 @@ def server(input, output, session):
             grid_name = {
                 "columbia": "Columbia River",
                 "nemunas": "Curonian Lagoon H3",
+                "curonian_trimesh": "Curonian Lagoon TriMesh",
             }.get(landscape, "Curonian Lagoon H3")
             await session.send_custom_message(
                 "map_loader_show", {"text": f"Loading {grid_name} grid..."}
@@ -704,10 +705,13 @@ def server(input, output, session):
 
         if landscape == "columbia":
             cfg = load_config("config_columbia.yaml")
+        elif landscape == "curonian_trimesh":
+            cfg = load_config("configs/config_curonian_trimesh.yaml")
         else:
-            # Anything not "columbia" routes to the H3 Curonian Lagoon.
-            # The legacy TriMesh "curonian" study area was removed in
-            # v1.1.9; H3 supersedes it for the same bbox.
+            # Default + the "nemunas" key both route to the H3
+            # backend.  The TriMesh option above is the new (v1.2)
+            # complement; H3 remains the default for backwards
+            # compatibility with browser-saved selections.
             cfg = load_config("configs/config_nemunas_h3.yaml")
 
         # Apply estuary overrides from UI controls
