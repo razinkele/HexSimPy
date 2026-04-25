@@ -25,6 +25,7 @@ data/curonian_forcing_cmems.nc
 data/curonian_forcing_cmems_raw.nc
 data/curonian_forcing_shyfem.nc
 data/curonian_bathymetry_raw.tif
+data/nemunas_h3_landscape.nc
 
 # OS
 Thumbs.db
