@@ -187,3 +187,75 @@ def test_h3mesh_pentagon_allow_keeps_pentagons_with_5_neighbours():
     row = mesh.neighbors[0]  # the pentagon's row
     assert (row >= 0).sum() == 5
     assert (row == -1).sum() == 1
+
+
+# ---------------------------------------------------------------------------
+# Task 1.2 — from_polygon factory (bbox tessellation)
+# ---------------------------------------------------------------------------
+
+
+def test_h3mesh_from_polygon_builds_nemunas_subbox_at_res9():
+    """Small bbox inside the Nemunas delta → reasonable cell count, every
+    interior cell has all 6 neighbours present."""
+    ring = [
+        (55.30, 21.10), (55.30, 21.20),
+        (55.35, 21.20), (55.35, 21.10),
+        (55.30, 21.10),
+    ]
+    poly = h3.LatLngPoly(ring)
+    mesh = H3Mesh.from_polygon(poly, resolution=9)
+    # ~5.5 km × 5 km box at res 9 (200 m cells) → expect 100-500 cells.
+    assert 50 < mesh.n_cells < 800
+    assert mesh.neighbors.shape == (mesh.n_cells, 6)
+    # At least some cells are interior (all 6 neighbours present).
+    full_rows = (mesh.neighbors >= 0).sum(axis=1) == 6
+    assert full_rows.sum() > 0
+    # Resolution is read off the produced cells.
+    assert mesh.resolution == 9
+
+
+def test_h3mesh_from_polygon_forwards_pentagon_policy():
+    """from_polygon must hand pentagon_policy through to from_h3_cells.
+
+    A small box around an icosahedral vertex covers a pentagon; default
+    'raise' should refuse, 'skip' should succeed with no pentagons.
+    Resolution 5 + 0.05° half-box is a known-working combo for h3-py 4.4.2
+    (lower resolutions / larger boxes can hit H3FailedError around pentagons).
+    """
+    penta = list(h3.get_pentagons(5))[0]
+    lat0, lon0 = h3.cell_to_latlng(penta)
+    half = 0.05
+    ring = [
+        (lat0 - half, lon0 - half), (lat0 - half, lon0 + half),
+        (lat0 + half, lon0 + half), (lat0 + half, lon0 - half),
+        (lat0 - half, lon0 - half),
+    ]
+    poly = h3.LatLngPoly(ring)
+    with pytest.raises(ValueError, match="pentagon"):
+        H3Mesh.from_polygon(poly, resolution=5)
+    # At res 5 with this 0.05° half-box around the pentagon, h3 returns
+    # only the pentagon itself — skip filters it out, leaving zero cells.
+    # That triggers the "all input cells were pentagons" guard.
+    with pytest.raises(ValueError, match="pentagons"):
+        H3Mesh.from_polygon(poly, resolution=5, pentagon_policy="skip")
+    # At res 7 (smaller cells) the box covers the pentagon plus 16 hexes,
+    # so skip leaves 16 valid cells — none of which are pentagons.
+    mesh = H3Mesh.from_polygon(poly, resolution=7, pentagon_policy="skip")
+    assert mesh.n_cells > 0
+    for hid in mesh.h3_ids:
+        assert not h3.is_pentagon(h3.int_to_str(int(hid)))
+
+
+def test_h3mesh_from_polygon_zero_cells_raises():
+    """A polygon smaller than one H3 cell at the chosen resolution
+    produces zero cells — must raise ValueError, not silently build an
+    empty mesh."""
+    # 0.000001° ≈ 11 cm box, well below any H3 cell.
+    ring = [
+        (55.300000, 21.100000), (55.300000, 21.100001),
+        (55.300001, 21.100001), (55.300001, 21.100000),
+        (55.300000, 21.100000),
+    ]
+    poly = h3.LatLngPoly(ring)
+    with pytest.raises(ValueError, match="zero H3 cells"):
+        H3Mesh.from_polygon(poly, resolution=2)

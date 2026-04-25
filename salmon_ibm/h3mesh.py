@@ -185,6 +185,11 @@ class H3Mesh:
                     depth = np.asarray(depth)[keep]
                 if water_mask is not None:
                     water_mask = np.asarray(water_mask)[keep]
+                if not h3_cells:
+                    raise ValueError(
+                        "all input cells were pentagons — nothing left "
+                        "after pentagon_policy='skip'"
+                    )
             # "allow": fall through deliberately — pentagons stay in the
             # cell list and get 5 valid neighbours + a -1 sentinel in
             # the 6th slot.
@@ -239,4 +244,63 @@ class H3Mesh:
             depth=depth,
             areas=areas,
             resolution=resolution,
+        )
+
+    @classmethod
+    def from_polygon(
+        cls,
+        polygon: "h3.LatLngPoly",
+        resolution: int,
+        *,
+        depth: dict[int, float] | None = None,
+        water_mask: dict[int, bool] | None = None,
+        pentagon_policy: str = "raise",
+    ) -> "H3Mesh":
+        """Build a mesh by H3-tessellating a lat/lon polygon.
+
+        Parameters
+        ----------
+        polygon
+            ``h3.LatLngPoly`` whose interior is filled with H3 cells at
+            ``resolution``.  Use :func:`h3.LatLngPoly` with a list of
+            ``(lat, lon)`` corner tuples (closed ring — first point
+            repeated at the end).
+        resolution
+            H3 resolution (0–15).  See
+            :func:`h3.average_hexagon_edge_length` for cell size at
+            each resolution.
+        depth, water_mask
+            Optional ``{h3_int_id: value}`` lookups.  Cells not in the
+            dict get zero / True defaults.
+        pentagon_policy
+            Forwarded to :meth:`from_h3_cells` — see that docstring for
+            the three options (``raise`` / ``skip`` / ``allow``).
+        """
+        cells = list(h3.polygon_to_cells(polygon, resolution))
+        if not cells:
+            raise ValueError(
+                "polygon produced zero H3 cells — degenerate polygon "
+                "or resolution too coarse for the given extent"
+            )
+
+        # Resolve the optional dict-keyed inputs into per-cell arrays
+        # before delegating to from_h3_cells.
+        n = len(cells)
+        depth_arr = np.zeros(n, dtype=np.float32)
+        mask_arr = np.ones(n, dtype=bool)
+        ids_int = [int(h3.str_to_int(c)) for c in cells]
+        if depth is not None:
+            for i, cid in enumerate(ids_int):
+                if cid in depth:
+                    depth_arr[i] = float(depth[cid])
+        if water_mask is not None:
+            for i, cid in enumerate(ids_int):
+                if cid in water_mask:
+                    mask_arr[i] = bool(water_mask[cid])
+
+        return cls.from_h3_cells(
+            cells,
+            depth=depth_arr,
+            water_mask=mask_arr,
+            pentagon_policy=pentagon_policy,
         )
