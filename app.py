@@ -1631,9 +1631,24 @@ def server(input, output, session):
                 built = None
             if built is not None:
                 data_uri, bounds = built
+                # Write PNG to www/ and reference via URL.  BitmapLayer
+                # accepts URLs; we previously passed a data URI but the
+                # JSON envelope around it apparently isn't accepted by
+                # the deck.gl loader on the JS side (zero layers
+                # rendered with no client-console error).
+                import base64 as _b64
+                from pathlib import Path as _Path
+                png_bytes = _b64.b64decode(data_uri.split(",", 1)[1])
+                www_path = _Path("www") / "_trimesh_field.png"
+                www_path.parent.mkdir(parents=True, exist_ok=True)
+                www_path.write_bytes(png_bytes)
+                _log.warning(
+                    "_full_update wrote PNG (%d bytes) to www/_trimesh_field.png",
+                    len(png_bytes),
+                )
                 water = bitmap_layer(
                     "water",
-                    image=data_uri,
+                    image=f"_trimesh_field.png?t={sim.current_t}",
                     bounds=bounds,
                     pickable=False,
                 )
