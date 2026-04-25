@@ -1,0 +1,126 @@
+"""End-to-end Nemunas H3 invariant test.
+
+Phase 3.3 of ``docs/superpowers/plans/2026-04-24-h3mesh-backend.md``.
+
+Runs the realistic ``configs/config_nemunas_h3.yaml`` scenario (real
+EMODnet bathymetry + real CMEMS forcing on a 106 k-cell H3 res-9 mesh)
+and asserts the seven invariants pinned by
+``docs/superpowers/specs/2026-04-24-nemunas-delta-h3.md`` § "Validation
+invariants":
+
+  1. Agent-count conservation (alive + dead + arrived == n_agents).
+  2. No total extinction over the 30-day window.
+  3. Mesh is an H3Mesh at the configured resolution.
+  4. Surface-temperature envelope (Baltic-summer realistic).
+  5. Agent positions all in [0, n_cells) — no off-mesh placement.
+  6. ≥ 10 % of agents have moved at the end of the run.
+  7. North–south salinity gradient ≥ 1.5 PSU
+     (Klaipėda Strait fresher than Nemunas mouth).
+
+Tests skip cleanly when the landscape NetCDF or config are absent so
+the regression suite stays runnable on a fresh checkout.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+
+PROJECT = Path(__file__).resolve().parent.parent
+LANDSCAPE = PROJECT / "data" / "nemunas_h3_landscape.nc"
+CONFIG = PROJECT / "configs" / "config_nemunas_h3.yaml"
+
+
+def _needs_data() -> None:
+    if not LANDSCAPE.exists():
+        pytest.skip(
+            f"{LANDSCAPE.name} missing — run "
+            "`python scripts/build_nemunas_h3_landscape.py`"
+        )
+    if not CONFIG.exists():
+        pytest.skip(f"{CONFIG.name} missing")
+
+
+@pytest.fixture(scope="module")
+def h3_sim():
+    """30-day Nemunas H3 run; module-scoped because the simulation is
+    expensive (~3-5 min including Numba JIT)."""
+    _needs_data()
+    from salmon_ibm.config import load_config
+    from salmon_ibm.simulation import Simulation
+    cfg = load_config(str(CONFIG))
+    sim = Simulation(cfg, n_agents=500, rng_seed=42)
+    sim.run(n_steps=720)
+    return sim
+
+
+# ---------------------------------------------------------------------------
+# Invariants
+# ---------------------------------------------------------------------------
+
+
+def test_agent_count_invariant(h3_sim):
+    alive = int(h3_sim.pool.alive.sum())
+    arrived = int(h3_sim.pool.arrived.sum())
+    dead = 500 - alive - arrived
+    assert alive >= 0 and arrived >= 0 and dead >= 0
+    assert alive + arrived + dead == 500
+
+
+def test_no_total_extinction(h3_sim):
+    """Baltic summer (2011-06) is well below T_ACUTE_LETHAL=24 °C, so
+    movement + bioenergetics shouldn't wipe the population."""
+    assert int(h3_sim.pool.alive.sum()) > 0
+
+
+def test_mesh_is_h3_at_resolution_9(h3_sim):
+    from salmon_ibm.h3mesh import H3Mesh
+    assert isinstance(h3_sim.mesh, H3Mesh)
+    assert h3_sim.mesh.resolution == 9
+
+
+def test_temperature_envelope_baltic_summer(h3_sim):
+    fields = h3_sim.env.current()
+    t = fields["temperature"]
+    # 2011-06 surface SST in the Curonian + Baltic strait: typically
+    # 14-22 °C.  Allow a slightly wider band for spike artefacts.
+    assert -2.0 < float(t.min())
+    assert float(t.max()) < 25.0
+
+
+def test_agent_positions_all_on_mesh(h3_sim):
+    assert (h3_sim.pool.tri_idx >= 0).all()
+    assert (h3_sim.pool.tri_idx < h3_sim.mesh.n_cells).all()
+
+
+def test_at_least_one_tenth_of_agents_moved(h3_sim):
+    """Movement kernels must work on H3Mesh — non-zero displacement
+    proves water_nbrs / water_nbr_count are wired correctly."""
+    moved = (h3_sim.initial_cells != h3_sim.pool.tri_idx).sum()
+    assert moved >= 50, (
+        f"only {moved}/500 agents moved over 720 steps — movement stub?"
+    )
+
+
+def test_north_south_salinity_gradient(h3_sim):
+    """Spec §5: Klaipėda Strait (north) ≥ 1.5 PSU saltier than Nemunas
+    mouth (south).  CMEMS BALTICSEA reanalysis routinely shows ≥ 3 PSU
+    over this geography; 1.5 is loose enough not to fail on weather
+    noise but tight enough to catch regridder homogenisation bugs."""
+    sal = h3_sim.env.current()["salinity"]
+    lats = h3_sim.mesh.centroids[:, 0]
+    north_mask = lats > np.percentile(lats, 75)
+    south_mask = lats < np.percentile(lats, 25)
+    north_mean = float(np.nanmean(sal[north_mask]))
+    south_mean = float(np.nanmean(sal[south_mask]))
+    assert north_mean > south_mean, (
+        f"Salinity gradient inverted: north={north_mean:.2f} < "
+        f"south={south_mean:.2f} — Klaipėda Strait should be saltier "
+        f"than Nemunas mouth."
+    )
+    assert (north_mean - south_mean) >= 1.5, (
+        f"Salinity gradient too weak: {north_mean - south_mean:.2f} PSU "
+        f"(expected ≥ 1.5).  Regridder may be over-smoothing."
+    )

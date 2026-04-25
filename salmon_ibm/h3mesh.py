@@ -212,14 +212,23 @@ class H3Mesh:
 
         # Neighbours from H3's ring-1 query.  Rows for cells at the
         # mesh boundary or for pentagons may have fewer than 6 entries
-        # — fill the unused slots with -1.
+        # — fill the unused slots with -1, but **compact valid entries
+        # into the first slots** so movement kernels can read
+        # ``water_nbrs[c, :count]`` without skipping holes.  Without
+        # this compaction, an interior cell whose 0th h3.grid_ring
+        # neighbour happens to fall outside the bbox would have
+        # ``water_nbrs[c, 0] == -1`` even though count > 0, and
+        # ``_step_directed_numba`` would write ``best_nbr = -1`` into
+        # the agent's tri_idx.
         neighbours = np.full((n, cls.MAX_NBRS), -1, dtype=np.int32)
         for i, cell in enumerate(h3_cells):
-            for j, nb in enumerate(h3.grid_ring(cell, 1)):
+            slot = 0
+            for nb in h3.grid_ring(cell, 1):
                 nb_int = int(h3.str_to_int(nb))
                 idx = id_to_idx.get(nb_int)
                 if idx is not None:
-                    neighbours[i, j] = idx
+                    neighbours[i, slot] = idx
+                    slot += 1
 
         if water_mask is None:
             water_mask = np.ones(n, dtype=bool)

@@ -10,11 +10,17 @@ Field names are the canonical keys consumed by ``movement.py`` and the
 event handlers — ``temperature``, ``salinity``, ``u_current``,
 ``v_current`` — matching what the TriMesh and HexMesh paths expose.
 
+Contract: ``env.fields[name]`` is the **current-timestep snapshot**
+``(n_cells,) float32``.  ``advance(step)`` mutates the snapshot arrays
+in place so ``Simulation.step`` can pass ``landscape["fields"] =
+self.env.fields`` and downstream events read per-cell values without
+knowing anything about time.  Mirrors the TriMesh
+:class:`Environment` contract.
+
 Phase 2.2 of ``docs/superpowers/plans/2026-04-24-h3mesh-backend.md``.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -31,26 +37,30 @@ _FIELD_RENAME = {
 }
 
 
-@dataclass
 class H3Environment:
     """Per-step forcing fields bound to an :class:`H3Mesh` cell ordering.
 
-    Parameters
-    ----------
-    mesh
-        The :class:`H3Mesh` whose cell ordering the field arrays follow.
-    fields
-        ``{name: (n_time, n_cells) float32}`` for each variable present
-        in the landscape NetCDF.  Keys are the canonical event names
-        (see :data:`_FIELD_RENAME`).
-    time
-        ``(n_time,)`` ``datetime64`` array of timestep stamps.
+    See module docstring for the contract.  The full ``(n_time,
+    n_cells)`` time-series is held privately on :attr:`_full_fields`
+    for the rare event handler that wants it.
     """
 
-    mesh: object  # H3Mesh, declared as object to avoid circular import
-    fields: dict[str, np.ndarray]
-    time: np.ndarray
-    _time_idx: int = field(default=0, init=False)
+    def __init__(
+        self,
+        mesh,
+        full_fields: dict[str, np.ndarray],
+        time: np.ndarray,
+    ) -> None:
+        self.mesh = mesh
+        self._full_fields = full_fields
+        self.time = time
+        self._time_idx: int = 0
+        # Snapshot dict — same keys as full_fields, each value the
+        # current-step (n_cells,) slice.  Mutated in advance() (in place
+        # so callers that captured a reference still see the latest data).
+        self.fields: dict[str, np.ndarray] = {
+            name: arr[0].copy() for name, arr in full_fields.items()
+        }
 
     @classmethod
     def from_netcdf(cls, nc_path: str | Path, mesh) -> "H3Environment":
@@ -94,29 +104,67 @@ class H3Environment:
             arr = ds[src].values  # (time, ds_cell)
             return arr[:, reorder].astype(np.float32)
 
-        fields: dict[str, np.ndarray] = {}
+        full_fields: dict[str, np.ndarray] = {}
         for src, dst in _FIELD_RENAME.items():
             arr = load_renamed(src)
             if arr is not None:
-                fields[dst] = arr
+                full_fields[dst] = arr
 
-        return cls(mesh=mesh, fields=fields, time=ds["time"].values)
+        # SSH is required by movement.py's upstream/downstream branches
+        # (`fields["ssh"]`).  CMEMS BALTICSEA reanalysis doesn't ship
+        # `zos`, so the Curonian regridder zero-fills it (see
+        # scripts/fetch_cmems_forcing.py: "zos is zero-filled; real SSH
+        # requires separate product").  Mirror that behaviour here —
+        # seiche detection is a no-op, gradient-following degenerates
+        # to first-neighbour selection.  Same deferral as the Curonian
+        # plan; documented in the Nemunas spec "Known limitations".
+        n_time = full_fields[next(iter(full_fields))].shape[0] \
+            if full_fields else len(ds["time"].values)
+        full_fields["ssh"] = np.zeros(
+            (n_time, len(mesh.h3_ids)), dtype=np.float32,
+        )
+
+        return cls(mesh=mesh, full_fields=full_fields, time=ds["time"].values)
 
     # --- duck-typed, mirrors Environment / HexSimEnvironment --------
 
     def advance(self, step: int) -> None:
-        """Set the active timestep index (clamped to the available range)."""
-        self._time_idx = max(0, min(step, len(self.time) - 1))
+        """Set the active timestep and refresh :attr:`fields` in place.
+
+        ``step`` may exceed the available range — for daily CMEMS
+        forcing on an hourly simulation, indices map ``step // 24`` to
+        the day index and clamp at the last day.  Out-of-range values
+        are clamped silently rather than raising; the simulation loop
+        passes ``current_t`` directly which can outrun any finite
+        forcing series.
+        """
+        n_time = len(self.time)
+        # Heuristic mapping: if the simulation runs more steps than we
+        # have timesteps, assume hour→day ratio.  If the data is already
+        # at simulation cadence (n_time == n_steps) the divisor of 1
+        # gives a 1:1 map.  Most ratios in practice are 24× (daily
+        # CMEMS / hourly sim) or 1× (synthetic test fixtures).
+        if step < n_time:
+            new_idx = step
+        else:
+            ratio = max(1, (step + 1) // n_time)  # 24 for daily-CMEMS / hourly-sim
+            new_idx = step // ratio
+        self._time_idx = max(0, min(new_idx, n_time - 1))
+        for name, arr in self._full_fields.items():
+            # In-place copy so callers that captured `env.fields[name]`
+            # see the new data without needing to re-fetch.
+            np.copyto(self.fields[name], arr[self._time_idx])
 
     def current(self) -> dict[str, np.ndarray]:
-        """Return ``{name: (n_cells,) float32}`` for the active timestep.
+        """Return the current-timestep snapshot (alias for :attr:`fields`).
 
-        The dict is freshly built each call (cheap — n_cells slices) so
-        callers may mutate without affecting subsequent reads.
+        Provided for API symmetry with :class:`HexSimEnvironment`; the
+        returned dict is the live one — mutations affect subsequent
+        reads, same as ``env.fields`` itself.
         """
-        return {name: arr[self._time_idx] for name, arr in self.fields.items()}
+        return self.fields
 
     def sample(self, name: str) -> np.ndarray:
-        """Return the field at the active timestep — convenience for code
-        that already has a name in hand."""
-        return self.fields[name][self._time_idx]
+        """Return ``fields[name]`` — convenience for callers that have
+        a name in hand."""
+        return self.fields[name]

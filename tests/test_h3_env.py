@@ -34,9 +34,8 @@ def _write_synthetic_landscape(tmp_path, cells, n_time=3):
     # Per-time-step values that vary cell-by-cell so we can detect bad
     # permutations (each cell gets a unique recoverable value).
     rng = np.random.default_rng(0)
-    times = np.array(
-        ["2011-06-01", "2011-06-02", "2011-06-03"], dtype="datetime64[ns]",
-    )[:n_time]
+    base = np.datetime64("2011-06-01", "ns")
+    times = base + np.arange(n_time, dtype="timedelta64[D]").astype("timedelta64[ns]")
     ds = xr.Dataset(
         {
             "h3_id":      (("cell",), h3_ids),
@@ -61,7 +60,11 @@ def _write_synthetic_landscape(tmp_path, cells, n_time=3):
 
 
 def test_h3_env_loads_canonical_field_names(tmp_path):
-    """Canonical keys: tos→temperature, sos→salinity, uo→u_current, vo→v_current."""
+    """Canonical keys: tos→temperature, sos→salinity, uo→u_current, vo→v_current.
+
+    ``env.fields`` is the per-cell snapshot at the current timestep;
+    the full time-series lives on ``env._full_fields``.
+    """
     center = h3.latlng_to_cell(55.3, 21.1, 9)
     cells = [center] + list(h3.grid_ring(center, 1))
     nc, _ = _write_synthetic_landscape(tmp_path, cells)
@@ -72,12 +75,14 @@ def test_h3_env_loads_canonical_field_names(tmp_path):
         "temperature", "salinity", "u_current", "v_current",
     }
     for arr in env.fields.values():
-        assert arr.shape == (3, mesh.n_cells)
+        assert arr.shape == (mesh.n_cells,)
         assert arr.dtype == np.float32
+    for arr in env._full_fields.values():
+        assert arr.shape == (3, mesh.n_cells)
 
 
 def test_h3_env_aligns_field_columns_with_mesh_h3_ids(tmp_path):
-    """The i-th column of every field must correspond to mesh.h3_ids[i].
+    """The i-th element of every snapshot must correspond to mesh.h3_ids[i].
 
     Build a landscape, then construct the mesh with cells in REVERSE
     order — searchsorted+order must permute correctly.
@@ -88,39 +93,60 @@ def test_h3_env_aligns_field_columns_with_mesh_h3_ids(tmp_path):
     # Mesh in REVERSE order — its h3_ids[0] is the largest cell ID.
     mesh = H3Mesh.from_h3_cells(list(reversed(cells)))
     env = H3Environment.from_netcdf(nc, mesh)
+    env.advance(0)
 
     # For each mesh cell, find its row in the original ds and confirm
-    # the value at env.fields["temperature"][0, i] matches.
+    # env.fields["temperature"][i] matches ds["tos"][0, ds_idx].
     ds_ids = ds["h3_id"].values  # already sorted ascending
     ds_temps = ds["tos"].values  # (time=3, cell=N)
     for i in range(mesh.n_cells):
         ds_idx = int(np.searchsorted(ds_ids, mesh.h3_ids[i]))
-        assert env.fields["temperature"][0, i] == ds_temps[0, ds_idx]
+        assert env.fields["temperature"][i] == ds_temps[0, ds_idx]
 
 
-def test_h3_env_advance_and_current(tmp_path):
+def test_h3_env_advance_mutates_fields_in_place(tmp_path):
+    """advance() updates env.fields in place — callers that captured a
+    reference to the dict (the Simulation step loop does) must see the
+    new data without re-fetching."""
     center = h3.latlng_to_cell(55.3, 21.1, 9)
     cells = [center] + list(h3.grid_ring(center, 1))
     nc, _ = _write_synthetic_landscape(tmp_path, cells, n_time=3)
     mesh = H3Mesh.from_h3_cells(cells)
     env = H3Environment.from_netcdf(nc, mesh)
 
+    captured = env.fields  # what Simulation does: landscape["fields"] = env.fields
     env.advance(0)
-    fields_t0 = env.current()
+    t0 = captured["temperature"].copy()
     env.advance(2)
-    fields_t2 = env.current()
+    t2_after_advance = captured["temperature"]
+    # Same dict, same array object — but contents are now t=2 values.
+    assert captured is env.fields
+    different = not np.array_equal(t0, t2_after_advance)
+    assert different, "advance(2) didn't update the captured fields dict"
 
-    # Different timesteps → different values (for at least one field).
-    different = any(
-        not np.array_equal(fields_t0[k], fields_t2[k]) for k in fields_t0
-    )
-    assert different, "advance(0) vs advance(2) returned identical fields"
     # advance() must clamp to range — beyond-end stays at last index.
     env.advance(99)
-    fields_clamped = env.current()
     np.testing.assert_array_equal(
-        fields_clamped["temperature"], fields_t2["temperature"]
+        captured["temperature"], t2_after_advance
     )
+
+
+def test_h3_env_advance_hourly_step_to_daily_data(tmp_path):
+    """For daily CMEMS data on an hourly simulation, advance(step) should
+    map step→day via int division, not blow up with IndexError."""
+    center = h3.latlng_to_cell(55.3, 21.1, 9)
+    cells = [center] + list(h3.grid_ring(center, 1))
+    # 30-day daily forcing.
+    nc, _ = _write_synthetic_landscape(tmp_path, cells, n_time=30)
+    mesh = H3Mesh.from_h3_cells(cells)
+    env = H3Environment.from_netcdf(nc, mesh)
+
+    # 720 hourly steps over 30 days — must not IndexError.
+    for step in [0, 23, 24, 25, 100, 500, 719]:
+        env.advance(step)  # implicit assertion: doesn't raise
+        # Each call leaves env.fields populated.
+        for arr in env.fields.values():
+            assert arr.shape == (mesh.n_cells,)
 
 
 def test_h3_env_missing_cell_raises(tmp_path):
@@ -144,7 +170,7 @@ def test_h3_env_sample_returns_active_timestep_array(tmp_path):
     env.advance(1)
     sampled = env.sample("temperature")
     assert sampled.shape == (mesh.n_cells,)
-    np.testing.assert_array_equal(sampled, env.fields["temperature"][1])
+    np.testing.assert_array_equal(sampled, env.fields["temperature"])
 
 
 # ---------------------------------------------------------------------------

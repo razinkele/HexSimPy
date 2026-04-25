@@ -1,0 +1,21 @@
+# Nemunas Delta H3 test landscape — Phase 3 of the H3Mesh backend plan.
+#
+# Loads the H3-tessellated Nemunas bbox produced by
+# scripts/build_nemunas_h3_landscape.py: 106k cells at H3 res 9
+# (~200 m edge), real EMODnet bathymetry, 30 days of CMEMS forcing.
+#
+# This is a methodological smoke test, NOT an ecological-realism run —
+# see docs/superpowers/specs/2026-04-24-nemunas-delta-h3.md "Known
+# limitations" for what this scenario does and does not validate.
+
+name: "nemunas_h3_test"
+mesh_backend: "h3"
+h3_landscape_nc: "data/nemunas_h3_landscape.nc"
+
+# Baltic salmon bioenergetics — same params the Curonian TriMesh test uses.
+species_config: "configs/baltic_salmon_species.yaml"
+
+# Random initial placement over the water mask. NOT ecologically meaningful;
+# see Simulation._place_agents_uniform_random_water docstring.
+initial_state:
+  initial_cell_strategy: "uniform_random_water"

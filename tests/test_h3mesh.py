@@ -93,6 +93,29 @@ def test_h3mesh_areas_match_h3_per_cell():
     np.testing.assert_allclose(mesh.areas, expected, rtol=1e-5)
 
 
+def test_h3mesh_neighbors_are_compacted_to_low_slots():
+    """Valid neighbours must occupy slots [0, count); -1 only at the tail.
+
+    Regression for a movement-kernel hazard: ``_step_directed_numba``
+    initialises ``best_nbr = water_nbrs[c, 0]`` and only updates if a
+    later neighbour has a better field value.  If slot 0 is -1 (because
+    the first h3.grid_ring neighbour falls outside the mesh), the
+    agent's tri_idx becomes -1 and downstream array indexing breaks.
+    """
+    # Build a mesh that excludes one ring-1 neighbour of the centre.
+    center = h3.latlng_to_cell(55.3, 21.1, 9)
+    ring = list(h3.grid_ring(center, 1))
+    cells = [center, ring[1], ring[2], ring[3], ring[4], ring[5]]  # ring[0] dropped
+    mesh = H3Mesh.from_h3_cells(cells)
+    centre_row = mesh.neighbors[0]
+    cnt = int(mesh._water_nbr_count[0])
+    # First `cnt` slots all valid (no -1 holes), tail all -1.
+    assert (centre_row[:cnt] >= 0).all(), (
+        f"non-compact neighbours: row[:cnt]={centre_row[:cnt]}"
+    )
+    assert (centre_row[cnt:] == -1).all()
+
+
 def test_h3mesh_water_nbrs_count_matches_neighbors():
     """_water_nbr_count equals the count of non-(-1) entries in each row."""
     cells = [h3.latlng_to_cell(55.3, 21.1, 9)]

@@ -92,12 +92,23 @@ def validate_config(cfg: dict) -> None:
 
     Raises ``ValueError`` with a descriptive message on failure.
     """
-    # --- grid section ---
-    grid = cfg.get("grid")
-    if not grid:
-        raise ValueError("Config must contain a 'grid' section")
-    if "file" not in grid and "type" not in grid:
-        raise ValueError("grid section must contain a 'file' or 'type' key")
+    # --- mesh backend section ---
+    # H3 landscapes use a top-level ``mesh_backend: h3`` + ``h3_landscape_nc``
+    # path instead of the legacy ``grid`` section.  TriMesh and HexSim configs
+    # still go through the grid-section path.
+    mesh_backend = cfg.get("mesh_backend", "trimesh")
+    if mesh_backend == "h3":
+        if "h3_landscape_nc" not in cfg:
+            raise ValueError(
+                "mesh_backend=h3 requires 'h3_landscape_nc' (path to landscape "
+                "NetCDF produced by scripts/build_*_h3_landscape.py)"
+            )
+    else:
+        grid = cfg.get("grid")
+        if not grid:
+            raise ValueError("Config must contain a 'grid' section")
+        if "file" not in grid and "type" not in grid:
+            raise ValueError("grid section must contain a 'file' or 'type' key")
 
     # --- optional bioenergetics section ---
     bio = cfg.get("bioenergetics")

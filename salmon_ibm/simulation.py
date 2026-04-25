@@ -59,9 +59,27 @@ class Simulation:
         self.rng_seed = rng_seed
         self.current_t = 0
 
+        # Three mesh backends: legacy ``grid.type=hexsim``, default
+        # NetCDF TriMesh, and the new top-level ``mesh_backend=h3``.
+        mesh_backend = config.get("mesh_backend", "")
         grid_type = config.get("grid", {}).get("type", "netcdf")
 
-        if grid_type == "hexsim":
+        if mesh_backend == "h3":
+            from salmon_ibm.h3mesh import H3Mesh
+            from salmon_ibm.h3_env import H3Environment
+            import h3 as _h3
+            import xarray as _xr
+
+            landscape_path = config["h3_landscape_nc"]
+            ds = _xr.open_dataset(landscape_path, engine="h5netcdf")
+            cells = [_h3.int_to_str(int(i)) for i in ds["h3_id"].values]
+            self.mesh = H3Mesh.from_h3_cells(
+                cells,
+                depth=ds["depth"].values,
+                water_mask=ds["water_mask"].values.astype(bool),
+            )
+            self.env = H3Environment.from_netcdf(landscape_path, self.mesh)
+        elif grid_type == "hexsim":
             from salmon_ibm.hexsim import HexMesh
             from salmon_ibm.hexsim_env import HexSimEnvironment
 
@@ -82,12 +100,33 @@ class Simulation:
             self.mesh = TriMesh.from_netcdf(grid_file)
             self.env = Environment(config, self.mesh, data_dir=data_dir)
 
-        water_ids = np.where(self.mesh.water_mask)[0]
+        # Agent placement.  The legacy default (every backend up to now)
+        # is uniform-over-water-cells.  H3 landscapes can opt into the
+        # same explicit ``uniform_random_water`` strategy via the YAML
+        # so the contract is documented; in either case we record an
+        # initial_cells snapshot for movement-sanity diagnostics.
         base_rng = np.random.default_rng(rng_seed)
         rng = np.random.default_rng(base_rng.integers(2**63))
         self._rng = np.random.default_rng(base_rng.integers(2**63))
-        start_tris = rng.choice(water_ids, size=n_agents)
+
+        initial_state = config.get("initial_state", {}) or {}
+        strategy = initial_state.get("initial_cell_strategy", "uniform_random_water")
+        if strategy == "uniform_random_water":
+            water_ids = np.where(self.mesh.water_mask)[0]
+            if len(water_ids) == 0:
+                raise RuntimeError(
+                    "no water cells in mesh — cannot place agents"
+                )
+            start_tris = rng.choice(water_ids, size=n_agents)
+        else:
+            raise ValueError(
+                f"unknown initial_cell_strategy: {strategy!r}"
+            )
+
         self.pool = AgentPool(n=n_agents, start_tri=start_tris, rng_seed=rng_seed)
+        # Snapshot for movement diagnostics — see test_at_least_one_agent_moved
+        # in tests/test_nemunas_h3_integration.py.
+        self.initial_cells = self.pool.tri_idx.copy()
         self.population = Population(name="salmon", pool=self.pool)
 
         # --- Optional Phase 2-3 components ---
