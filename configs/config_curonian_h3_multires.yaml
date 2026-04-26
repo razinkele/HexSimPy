@@ -20,3 +20,19 @@ initial_state:
   initial_cell_strategy: "uniform_random_water"
 
 barriers_csv: null  # multi-res barrier CSVs not yet supported (Phase 4)
+
+# Per-reach DAILY fish-predation survival probability — see
+# config_nemunas_h3.yaml for the rationale.  Same values; multi-res
+# uses the same reach taxonomy.
+mortality_per_reach:
+  Nemunas:        0.985
+  Atmata:         0.970
+  Minija:         0.980
+  Sysa:           0.960
+  Skirvyte:       0.950
+  Leite:          0.955
+  Gilija:         0.955
+  CuronianLagoon: 0.800
+  BalticCoast:    0.700
+  OpenBaltic:     0.650
+  default:        0.985

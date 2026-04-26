@@ -239,6 +239,32 @@ class Simulation:
         # np.zeros(n_triangles) every step via fields.get(..., default).
         self._zero_salinity = np.zeros(self.mesh.n_triangles, dtype=np.float64)
 
+        # Per-cell hourly survival probability for the fish-predation event.
+        # Config supplies DAILY rates per reach; we convert to hourly so
+        # applying once per simulation step (= 1 h) reproduces the daily
+        # target.  Backends without `cells_in_reach` (TriMesh, HexMesh)
+        # silently fall back to the global default — they don't have
+        # inSTREAM reach polygons.
+        mort_cfg = config.get("mortality_per_reach") or {}
+        if mort_cfg:
+            default_daily = float(mort_cfg.get("default", 0.985))
+            self._cell_survival_hourly = np.full(
+                self.mesh.n_triangles,
+                default_daily ** (1.0 / 24.0),
+                dtype=np.float32,
+            )
+            if hasattr(self.mesh, "cells_in_reach"):
+                for name, rate_daily in mort_cfg.items():
+                    if name == "default":
+                        continue
+                    cells = self.mesh.cells_in_reach(name)
+                    if len(cells):
+                        self._cell_survival_hourly[cells] = (
+                            float(rate_daily) ** (1.0 / 24.0)
+                        )
+        else:
+            self._cell_survival_hourly = None  # event will no-op
+
         self.logger = None
         if output_path:
             self.logger = OutputLogger(output_path, self.mesh.centroids)
@@ -275,6 +301,12 @@ class Simulation:
                 n_micro_steps=3,
                 cwr_threshold=self.beh_params.temp_bins[0],
             ),
+            # Fish predation fires AFTER movement so agents are killed
+            # at their final cell of this step (not their starting cell).
+            # No-ops on backends without reach_id (TriMesh, HexMesh).
+            CustomEvent(
+                name="fish_predation", callback=self._event_fish_predation
+            ),
             CustomEvent(name="update_timers", callback=self._event_update_timers),
             CustomEvent(name="bioenergetics", callback=self._event_bioenergetics),
             CustomEvent(name="logging", callback=self._event_logging),
@@ -287,6 +319,7 @@ class Simulation:
             "behavior_selection": self._event_behavior_selection,
             "estuarine_overrides": self._event_estuarine_overrides,
             "update_cwr_counters": self._event_update_cwr_counters,
+            "fish_predation": self._event_fish_predation,
             "update_timers": self._event_update_timers,
             "bioenergetics": self._event_bioenergetics,
             "logging": self._event_logging,
@@ -321,6 +354,35 @@ class Simulation:
 
     def _event_update_cwr_counters(self, population, landscape, t, mask):
         self._update_cwr_counters()
+
+    def _event_fish_predation(self, population, landscape, t, mask):
+        """Per-cell Bernoulli mortality from fish predation.
+
+        Reads the hourly survival rate at each agent's current cell
+        (built from `mortality_per_reach` config at sim init).  Each
+        alive-and-not-arrived agent draws a Uniform(0, 1) — if it
+        exceeds the cell's survival probability, the agent dies.
+
+        No-ops when `_cell_survival_hourly` is None (config didn't
+        specify `mortality_per_reach`) or when no agents are alive.
+        Backends without inSTREAM reach polygons (TriMesh, HexMesh)
+        get the global `default` rate at every cell — no error.
+        """
+        if self._cell_survival_hourly is None:
+            return
+        active = population.alive & ~getattr(
+            population, "arrived", np.zeros(population.n, dtype=bool)
+        )
+        if not active.any():
+            return
+        p_surv = self._cell_survival_hourly[population.tri_idx[active]]
+        # Use a fresh draw per call so the predation RNG is decoupled
+        # from movement / behaviour selection RNG streams.
+        rng = np.random.default_rng(self._rng.integers(2**31))
+        died = rng.random(len(p_surv)) > p_surv
+        if died.any():
+            active_indices = np.where(active)[0]
+            population.alive[active_indices[died]] = False
 
     def _event_update_timers(self, population, landscape, t, mask):
         # Recompute alive mask — defensive against custom event orderings

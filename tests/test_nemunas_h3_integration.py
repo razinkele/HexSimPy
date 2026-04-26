@@ -119,11 +119,19 @@ def _run_short(barriers_csv: str | None, n_steps: int = 72) -> "Simulation":
     """3-day Nemunas H3 run with the chosen barrier config — for the
     barrier-mortality comparison.  Module-scoped fixtures would slow
     the suite by ~3 min each; a 3-day run is still long enough to
-    fire ~120 barrier-edge crossings at 30 % mortality."""
+    fire ~120 barrier-edge crossings at 30 % mortality.
+
+    Predation is explicitly disabled (``mortality_per_reach: None``)
+    so this test isolates the barrier-mortality signal.  Without the
+    suppression, per-reach fish-predation (added in v1.4) drowns out
+    the ~30-death barrier delta in stochastic noise — observed
+    311 vs 319 deaths across with/without barrier in seed=42 runs.
+    """
     from salmon_ibm.config import load_config
     from salmon_ibm.simulation import Simulation
     cfg = load_config(str(CONFIG))
     cfg["barriers_csv"] = barriers_csv
+    cfg["mortality_per_reach"] = None  # see docstring
     sim = Simulation(cfg, n_agents=500, rng_seed=42)
     sim.run(n_steps=n_steps)
     return sim
@@ -163,6 +171,53 @@ def test_strong_barrier_increases_mortality(
     )
     # With ~120 edges at 30 % mortality, expect ≥ 1 extra death seed=42.
     # If this is flaky in CI, raise n_agents to 5000 or n_steps to 168.
+
+
+@pytest.mark.slow
+def test_open_baltic_kills_more_than_river():
+    """Phase B per-reach mortality: agents force-placed in OpenBaltic
+    cells (daily survival 0.65) should die ~10× faster than agents
+    placed in Nemunas-river cells (daily survival 0.985) over a
+    24-hour run.  Single-seed test; uses 200 agents per cohort to
+    average out per-cell variability.
+    """
+    if not CONFIG.exists() or not LANDSCAPE.exists():
+        pytest.skip("h3_landscape_nc missing — build first")
+    import numpy as np
+    from salmon_ibm.config import load_config
+    from salmon_ibm.simulation import Simulation
+
+    def run_in_reach(reach_name: str) -> int:
+        cfg = load_config(str(CONFIG))
+        cfg["barriers_csv"] = None  # isolate predation signal
+        n_agents = 200
+        sim = Simulation(cfg, n_agents=n_agents, rng_seed=1234)
+        if not hasattr(sim.mesh, "cells_in_reach"):
+            pytest.skip("backend has no reach_id")
+        cells = sim.mesh.cells_in_reach(reach_name)
+        if len(cells) == 0:
+            pytest.skip(f"reach {reach_name} has no cells")
+        # Cycle cells if reach has fewer than n_agents cells (rivers in
+        # the Nemunas H3 landscape are small — Nemunas main has ~38
+        # cells at res 9, so we let multiple agents share a cell).
+        sim.pool.tri_idx[:] = np.tile(
+            cells, (n_agents + len(cells) - 1) // len(cells)
+        )[:n_agents]
+        sim.run(n_steps=24)  # 24 h = 1 daily-rate cycle
+        return int((~sim.pool.alive).sum())
+
+    deaths_baltic = run_in_reach("OpenBaltic")
+    deaths_river = run_in_reach("Nemunas")
+    # OpenBaltic daily survival = 0.65 → ~70 deaths in 200.
+    # Nemunas daily survival    = 0.985 → ~3 deaths in 200.
+    # Use a generous bound (3×) to absorb stochastic noise on a
+    # single seed; the *expected* ratio is ~25×.
+    assert deaths_baltic > deaths_river * 3, (
+        f"per-reach mortality contrast too weak: OpenBaltic={deaths_baltic}, "
+        f"Nemunas={deaths_river} (expected at least 3×).  Either the "
+        f"`mortality_per_reach` block isn't being read, or the "
+        f"hourly-rate conversion is wrong."
+    )
 
 
 def test_north_south_salinity_gradient(h3_sim):

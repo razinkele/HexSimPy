@@ -24,3 +24,22 @@ initial_state:
 # null to disable.  See scripts/build_nemunas_h3_barriers.py for how
 # the CSV is generated.
 barriers_csv: "data/nemunas_h3_barriers.csv"
+
+# Per-reach DAILY fish-predation survival probability.  Internally
+# converted to hourly via p_hour = p_day**(1/24); the predation event
+# fires every step so the daily rate is the bookkeeping target.
+# Values mirror inSTREAM example_baltic's `fish_pred_min` per reach.
+# Reaches not listed (or backends without reach_id) fall back to
+# `default`.
+mortality_per_reach:
+  Nemunas:        0.985    # rivers — terrestrial and small-fish predation
+  Atmata:         0.970
+  Minija:         0.980
+  Sysa:           0.960
+  Skirvyte:       0.950
+  Leite:          0.955
+  Gilija:         0.955
+  CuronianLagoon: 0.800    # lagoon — pike, perch, cormorants
+  BalticCoast:    0.700    # nearshore Baltic
+  OpenBaltic:     0.650    # offshore — seals + cod
+  default:        0.985
