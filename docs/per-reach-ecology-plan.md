@@ -1,7 +1,14 @@
 # Per-Reach Ecology — Implementation Plan
 
-**Status:** Phase A (cell tagging) shipped in v1.2.7.  This doc plans
-Phase B (per-reach simulation parameters).
+**Status:**
+* Phase A (cell tagging) shipped in v1.2.7.
+* Phase B (per-reach fish-predation mortality) shipped in v1.4.0
+  (commit `0791426`).  See "Phase B — minimal-effort change"
+  section below for what landed; the OpenBaltic-vs-river contrast
+  is now exercised by `test_open_baltic_kills_more_than_river`
+  (slow marker, 200 agents per cohort, 24 h run, expected ratio
+  ~25× actual ~10–25×).
+* Phase C (drift food + salinity tolerance) — still open.
 
 ## Background
 
