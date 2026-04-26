@@ -1,0 +1,22 @@
+# Multi-resolution H3 Curonian Lagoon scenario.
+#
+# Rivers tessellated at H3 res 10 (~75 m edges) so the Nemunas main
+# channel (~600 m wide) renders as 8 cells across; small delta arms
+# (Šyša, Skirvytė ~80-100 m) get 1-2 cells.  Lagoon at res 9 (~200 m)
+# and the open Baltic at res 8 (~530 m) keep the cell count
+# tractable for interactive play (~36 k cells total).
+#
+# Built by scripts/build_h3_multires_landscape.py with the same
+# --resolutions flag.  Re-run that script if the inSTREAM polygons
+# or the resolution choices change.
+
+name: "curonian_h3_multires"
+mesh_backend: "h3_multires"
+h3_multires_landscape_nc: "data/curonian_h3_multires_landscape.nc"
+
+species_config: "configs/baltic_salmon_species.yaml"
+
+initial_state:
+  initial_cell_strategy: "uniform_random_water"
+
+barriers_csv: null  # multi-res barrier CSVs not yet supported (Phase 4)

@@ -87,6 +87,57 @@ class Simulation:
                 if names_attr:
                     self.mesh.reach_names = names_attr.split(",")
             self.env = H3Environment.from_netcdf(landscape_path, self.mesh)
+        elif mesh_backend == "h3_multires":
+            from salmon_ibm.h3_multires import H3MultiResMesh
+            from salmon_ibm.h3_env import H3Environment
+            import h3 as _h3
+            import xarray as _xr
+
+            landscape_path = config["h3_multires_landscape_nc"]
+            ds = _xr.open_dataset(landscape_path, engine="h5netcdf")
+
+            # reach metadata MUST be loaded as a pair — without `reach_id`,
+            # `reach_names` is meaningless (every cell would report "Land").
+            # Loading them independently was rejected in plan review pass 6.
+            if "reach_id" in ds:
+                reach_id_arr = ds["reach_id"].values.astype(np.int8)
+                names_attr = ds.attrs.get("reach_names", "")
+                reach_names = names_attr.split(",") if names_attr else None
+            else:
+                reach_id_arr = None
+                reach_names = None
+
+            # Build areas from the H3 cells — cell_area is per-cell at res-aware
+            # scale, so a multi-res mesh has multi-scale areas natively.  The
+            # NC stores h3_id in compact-index order; the H3MultiResMesh
+            # constructor receives these arrays in the same order, so areas
+            # below align cell-for-cell with everything else.  We can't call
+            # `from_h3_cells` (which would also recompute areas) because that
+            # would discard the pre-built CSR neighbour table in the NC.
+            cells_str = [_h3.int_to_str(int(i)) for i in ds["h3_id"].values]
+            areas = np.array(
+                [_h3.cell_area(c, unit="m^2") for c in cells_str],
+                dtype=np.float32,
+            )
+
+            centroids = np.column_stack(
+                [ds["lat"].values, ds["lon"].values],
+            )
+
+            self.mesh = H3MultiResMesh(
+                h3_ids=ds["h3_id"].values.astype(np.uint64),
+                resolutions=ds["resolution"].values.astype(np.int8),
+                centroids=centroids,
+                nbr_starts=ds["nbr_starts"].values.astype(np.int32),
+                nbr_idx=ds["nbr_idx"].values.astype(np.int32),
+                water_mask=ds["water_mask"].values.astype(bool),
+                depth=ds["depth"].values.astype(np.float32),
+                areas=areas,
+                reach_id=reach_id_arr,
+                reach_names=reach_names,
+            )
+            ds.close()
+            self.env = H3Environment.from_netcdf(landscape_path, self.mesh)
         elif grid_type == "hexsim":
             from salmon_ibm.hexsim import HexMesh
             from salmon_ibm.hexsim_env import HexSimEnvironment

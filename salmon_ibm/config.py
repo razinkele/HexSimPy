@@ -103,6 +103,13 @@ def validate_config(cfg: dict) -> None:
                 "mesh_backend=h3 requires 'h3_landscape_nc' (path to landscape "
                 "NetCDF produced by scripts/build_*_h3_landscape.py)"
             )
+    elif mesh_backend == "h3_multires":
+        if "h3_multires_landscape_nc" not in cfg:
+            raise ValueError(
+                "mesh_backend=h3_multires requires 'h3_multires_landscape_nc' "
+                "(path to a multi-res landscape NetCDF built by "
+                "scripts/build_h3_multires_landscape.py)"
+            )
     else:
         grid = cfg.get("grid")
         if not grid:
