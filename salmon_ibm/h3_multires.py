@@ -19,7 +19,10 @@ Key differences from ``H3Mesh``:
 * **Compatibility surface.**  A padded ``(N, MAX_NBRS) int32``
   ``neighbors`` view is exposed for legacy numba kernels — same
   ``-1``-sentinel convention as ``H3Mesh.neighbors``, but
-  ``MAX_NBRS`` is bumped to 12.
+  ``MAX_NBRS`` is bumped to 64 (was 12 in the v1.2.8 scaffold;
+  v1.2.10 raised it after the v1.2.9 overflow guard caught real
+  rows of 31+ entries at res-10/res-8 boundaries — see comment on
+  ``MAX_NBRS`` for the math).
 
 Status:
 
@@ -43,12 +46,17 @@ import h3
 import numpy as np
 
 
-# Cap for the padded compat view.  Worst case at a coarse-fine edge is
-# (6 same-res ring neighbours that exist in the mesh) + (a handful of
-# cross-res children of a missing ring neighbour).  12 is plenty for
-# the res-9 lagoon vs res-11 river boundary; bump if a future config
-# spans more than two adjacent resolutions.
-MAX_NBRS = 12
+# Cap for the padded compat view.  At a coarse-fine boundary, a
+# coarse cell of resolution r has up to 6 same-res ring-1 neighbours
+# PLUS up to ~7^Δr fine children at each missing ring slot, where
+# Δr is the resolution drop.  In practice (res-10 rivers ↔ res-8
+# OpenBaltic, drop=2) we see ~30 neighbours; the production config
+# (res-11 rivers ↔ res-8 OpenBaltic, drop=3) could see ~60.  Set 64
+# as a generous cap that covers the production case with margin.
+# Per-mesh memory cost: 36 k cells × 64 cols × 4 bytes ≈ 9 MB,
+# fits in L3 trivially.  v1.2.8 had MAX_NBRS=12, v1.2.10 raised
+# this after the v1.2.9 overflow guard caught real overflows.
+MAX_NBRS = 64
 
 
 @dataclass
