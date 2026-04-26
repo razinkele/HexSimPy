@@ -208,7 +208,19 @@ class IntroductionEvent(Event):
             if layer is not None:
                 nonzero = np.where(layer != 0)[0]
                 if len(nonzero) > 0:
-                    pos_arr = rng.choice(nonzero, size=n, replace=True)
+                    mesh = landscape.get("mesh")
+                    if mesh is not None and hasattr(mesh, "areas"):
+                        # Area-weighted: cells get drawn proportional to their
+                        # m².  Without this, three-tier H3 meshes over-place
+                        # agents in fine-resolution river cells by ~7-50×.
+                        weights = mesh.areas[nonzero].astype(np.float64)
+                        weights = weights / weights.sum()
+                        pos_arr = rng.choice(
+                            nonzero, size=n, replace=True, p=weights
+                        )
+                    else:
+                        # Legacy mesh without per-cell areas: uniform-over-cells.
+                        pos_arr = rng.choice(nonzero, size=n, replace=True)
                 else:
                     pos_arr = np.zeros(n, dtype=int)
             else:
