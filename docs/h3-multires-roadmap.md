@@ -55,10 +55,36 @@ For the production-target res 11 rivers: expect ~7× more river cells
 (rough estimate ~17 k river cells); total mesh ~50 k cells; build runs
 in 5–10 s.
 
-## Phase 2 — Simulation integration (not started)
+## Phase 2 — Simulation integration (**shipped in v1.3.0**)
 
-**Goal:** make `Simulation(config_with_h3_multires)` work end-to-end
-with movement, bioenergetics, and the existing event sequencer.
+`Simulation(config_with_h3_multires)` now works end-to-end with
+movement, bioenergetics, and the existing event sequencer.  Plan
+executed against `docs/superpowers/plans/2026-04-26-h3-multires-phase2.md`
+(post multi-agent review) over 5 tasks:
+
+* **Prereq (v1.2.9 + v1.2.10):** scaffold corrections — `MAX_NBRS`
+  overflow guard, `gradient()` port, then `MAX_NBRS` 12 → 64 after
+  the guard caught real overflows at res-10 / res-8 boundaries.
+* **Task 1 (`a65ee8e`):** builder samples CMEMS forcing per cell.
+* **Task 2 (`2a84a87`):** `mesh_backend: h3_multires` Simulation
+  init branch + `configs/config_curonian_h3_multires.yaml`.
+* **Task 3 (`ee14384`):** `resolution` compat property + sidebar
+  dropdown (now default) + viewer routing.
+* **Task 4 (`c98d393`):** five new ecological invariants + pytest.ini
+  with `slow` marker.  Two plan-spec corrections applied during
+  execution: per-step displacement test rewritten as a static
+  neighbour-table check (substep-independent); no-one-way-trap test
+  filtered to OpenBaltic boundary cells (random walk in 72 h
+  doesn't reach the boundary from deep Baltic).
+* **Task 5 (v1.3.0):** tag + deploy + browser verify.  Multi-res
+  mesh renders correctly with mixed cell sizes visible in the deck.gl
+  H3HexagonLayer.
+
+Test counts at completion:
+
+* Default (`-m "not slow"`): 17 passed, 1 skipped, 2 deselected.
+* Slow (`-m slow`):           2 passed, 9 deselected.
+* H3 regression suite:        49/49 passed (no regression).
 
 ### 2a. Config schema
 
