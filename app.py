@@ -590,6 +590,260 @@ def _build_reach_legend_widget(extra_entries: list[dict] | None = None) -> dict:
     )
 
 
+# ── Per-cell diagnostic tooltip ──────────────────────────────────────────────
+# Goal: hovering a hexagon shows reach, resolution, position, area, neighbour
+# breakdown, depth, temperature, salinity, currents.  Used by the deck.gl
+# MapWidget tooltip template (CELL_TOOLTIP_HTML).  Heavy values are computed
+# once per landscape and cached in `_cached_cell_diag`.
+CELL_TOOLTIP_HTML = (
+    "<div style='line-height:1.4;font-size:11px'>"
+    "<b style='color:#e8d5b7'>{reach}</b> "
+    "<span style='color:#9aa9b3'>res {res}</span> "
+    "<span style='color:#9aa9b3'>· #{idx}</span><br>"
+    "<span style='color:#9aa9b3'>{lat}°N, {lon}°E · {area} m²</span><br>"
+    "<span style='color:#3d9b8f'>───────────</span><br>"
+    "Neighbours: <b>{nbr_total}</b> "
+    "<span style='color:#9aa9b3'>"
+    "({nbr_same_res} same-res, {nbr_cross_res} cross-res)</span><br>"
+    "<span style='color:#3d9b8f'>───────────</span><br>"
+    "Depth: <b>{depth}</b> m<br>"
+    "Temp: <b>{temp}</b> °C "
+    "<span style='color:#9aa9b3'>·</span> "
+    "Salinity: <b>{salinity}</b> PSU<br>"
+    "Currents: <b>{speed}</b> m/s {direction}"
+    "</div>"
+)
+
+_cached_cell_diag: dict | None = None
+_cached_cell_diag_meshid: int | None = None
+
+
+def _compute_cell_diagnostics(mesh) -> dict:
+    """Build per-cell static diagnostic arrays — reach name, lat/lon,
+    area, neighbour breakdown.  Cached by mesh object id; re-computes
+    when the landscape changes.  Environment fields (temp/sal/u/v) are
+    NOT cached here — they're sampled fresh from the simulation in
+    _augment_cell_data() below because they update each timestep.
+    """
+    global _cached_cell_diag, _cached_cell_diag_meshid
+    if _cached_cell_diag is not None and _cached_cell_diag_meshid == id(mesh):
+        return _cached_cell_diag
+
+    n = len(mesh.h3_ids)
+    reach_id = np.asarray(getattr(mesh, "reach_id", np.full(n, -1)), dtype=np.int8)
+    reach_names = list(getattr(mesh, "reach_names", []))
+    # Map reach_id → display string. -1 (land) shouldn't appear since we
+    # only render water cells; but if it does, label cleanly.
+    name_lookup = ["Land", *reach_names] if reach_names else ["Land"]
+    name_per_cell = np.array(
+        [name_lookup[max(0, int(r) + 1)] for r in reach_id],
+        dtype=object,
+    )
+
+    if hasattr(mesh, "resolutions"):
+        res = np.asarray(mesh.resolutions, dtype=np.int8)
+    else:
+        # Single-resolution H3Mesh — `mesh.resolution` is a scalar attr.
+        res = np.full(n, int(getattr(mesh, "resolution", 9)), dtype=np.int8)
+
+    lat = mesh.centroids[:, 0]
+    lon = mesh.centroids[:, 1]
+    area = np.asarray(getattr(mesh, "areas", np.zeros(n)), dtype=np.float32)
+    depth = np.asarray(getattr(mesh, "depth", np.zeros(n)), dtype=np.float32)
+
+    # Neighbour breakdown.  Vectorised: build a per-edge same-res mask,
+    # then sum within each cell's CSR row.
+    nbr_starts = np.asarray(getattr(mesh, "nbr_starts", None))
+    nbr_idx = np.asarray(getattr(mesh, "nbr_idx", None))
+    if nbr_starts is None or nbr_starts.ndim == 0:
+        # Legacy padded neighbour table (TriMesh, single-res H3Mesh).
+        # Not exercised in the multi-res tooltip path; just skip.
+        nbr_total = np.zeros(n, dtype=np.int32)
+        nbr_same_res = np.zeros(n, dtype=np.int32)
+        nbr_cross_res = np.zeros(n, dtype=np.int32)
+    else:
+        nbr_total = (nbr_starts[1:] - nbr_starts[:-1]).astype(np.int32)
+        # Edge-level same-res mask.
+        src = np.repeat(np.arange(n, dtype=np.int32), nbr_total)
+        same_mask = res[src] == res[nbr_idx]
+        # Aggregate to per-cell counts via reduceat (fast).
+        starts = nbr_starts[:-1]
+        # ``add.reduceat`` requires monotonic non-empty starts; cells with
+        # zero neighbours contribute 0 either way, so a small guard.
+        if len(starts) and len(same_mask):
+            sums = np.add.reduceat(same_mask.astype(np.int32), starts)
+            # Cells that have zero neighbours can pick up the next cell's
+            # value; mask them back to 0.
+            sums[nbr_total == 0] = 0
+            nbr_same_res = sums.astype(np.int32)
+        else:
+            nbr_same_res = np.zeros(n, dtype=np.int32)
+        nbr_cross_res = (nbr_total - nbr_same_res).astype(np.int32)
+
+    _cached_cell_diag = {
+        "reach": name_per_cell,
+        "res": res,
+        "lat": lat,
+        "lon": lon,
+        "area": area,
+        "depth": depth,
+        "nbr_total": nbr_total,
+        "nbr_same_res": nbr_same_res,
+        "nbr_cross_res": nbr_cross_res,
+    }
+    _cached_cell_diag_meshid = id(mesh)
+    return _cached_cell_diag
+
+
+DIRS_8 = np.array(
+    ["N", "NE", "E", "SE", "S", "SW", "W", "NW"], dtype=object
+)
+
+
+def _vec_fmt(arr: np.ndarray, dec: int) -> np.ndarray:
+    """Vectorised float-to-string formatting; NaN → '—'."""
+    finite = np.isfinite(arr)
+    out = np.full(len(arr), "—", dtype=object)
+    if finite.any():
+        out[finite] = np.char.mod(f"%.{dec}f", arr[finite].astype(np.float64))
+    return out
+
+
+def _augment_cell_data_static(idx: np.ndarray, mesh) -> dict[str, np.ndarray]:
+    """Pre-compute per-water-cell static tooltip fields (reach, lat, lon,
+    area, depth, neighbour breakdown).  Returns a dict of object-arrays
+    of pre-formatted strings/numbers, one entry per water cell.
+
+    Vectorised — ~0.5 s for 172k cells (vs ~7 s for a per-cell Python
+    loop).  Cached upstream by mesh id, so this only runs on landscape
+    change.
+    """
+    diag = _compute_cell_diagnostics(mesh)
+    out = {
+        "idx": idx.astype(np.int64),
+        "reach": diag["reach"][idx],
+        "res": diag["res"][idx].astype(np.int64),
+        "lat": _vec_fmt(diag["lat"][idx], 4),
+        "lon": _vec_fmt(diag["lon"][idx], 4),
+        "area": np.array(
+            [f"{int(round(float(a))):,}" for a in diag["area"][idx]],
+            dtype=object,
+        ),
+        "depth": _vec_fmt(diag["depth"][idx], 2),
+        "nbr_total": diag["nbr_total"][idx].astype(np.int64),
+        "nbr_same_res": diag["nbr_same_res"][idx].astype(np.int64),
+        "nbr_cross_res": diag["nbr_cross_res"][idx].astype(np.int64),
+    }
+    return out
+
+
+def _augment_cell_data_env(idx: np.ndarray, fields: dict) -> dict[str, np.ndarray]:
+    """Per-water-cell environment fields (temp, salinity, current
+    magnitude/direction).  Sampled fresh each call from the live
+    fields dict; safe to call on every refresh.
+    """
+    n_full = len(fields.get("temperature", [None])) if fields else 0
+    nan_arr = np.full(max(n_full, idx.max() + 1 if len(idx) else 1), float("nan"), dtype=np.float32)
+    temp = np.asarray(fields.get("temperature", nan_arr), dtype=np.float32)[idx]
+    sal = np.asarray(fields.get("salinity", nan_arr), dtype=np.float32)[idx]
+    u = np.asarray(fields.get("uo", nan_arr), dtype=np.float32)[idx]
+    v = np.asarray(fields.get("vo", nan_arr), dtype=np.float32)[idx]
+    speed = np.sqrt(u * u + v * v)
+    valid = np.isfinite(u) & np.isfinite(v)
+    angle = np.where(
+        valid,
+        (np.degrees(np.arctan2(u, v)) + 360) % 360,
+        0.0,
+    )
+    dir_idx = (((angle + 22.5) // 45).astype(int) % 8)
+    direction = np.where(valid, DIRS_8[dir_idx], "")
+    return {
+        "temp": _vec_fmt(temp, 1),
+        "salinity": _vec_fmt(sal, 2),
+        "speed": _vec_fmt(speed, 2),
+        "direction": direction,
+    }
+
+
+# Two-level cache for the H3HexagonLayer data_rows:
+# - static diag (reach, lat, lon, ...) — keyed by mesh id, computed once
+#   per landscape (~0.5 s vectorised).
+# - full data_rows including color + env — keyed by mesh id, rebuilt
+#   from scratch on first call but updated in place on subsequent
+#   calls (color + env fields only; ~0.8 s for 172k cells vs ~3 s for
+#   a full rebuild).
+_cached_static_diag: tuple[int, dict[str, np.ndarray]] | None = None
+_cached_h3_data_rows: tuple[int, list[dict]] | None = None
+
+
+def _build_h3_data_rows(
+    idx: np.ndarray,
+    mesh,
+    rgb_idx: np.ndarray,
+    fields: dict,
+) -> list[dict]:
+    """Build (or reuse + mutate) the H3HexagonLayer data_rows list.
+
+    First call on a given mesh: full build with all 16 fields per cell
+    (~3 s for 172k cells).  Subsequent calls: re-use cached rows and
+    only mutate the volatile fields (`color`, env values) — fast path
+    for `_hex_color_update` which fires on every field-selection change.
+    """
+    import h3 as _h3
+    global _cached_static_diag, _cached_h3_data_rows
+    n = len(idx)
+
+    if _cached_static_diag is None or _cached_static_diag[0] != id(mesh):
+        _cached_static_diag = (id(mesh), _augment_cell_data_static(idx, mesh))
+    static = _cached_static_diag[1]
+    env = _augment_cell_data_env(idx, fields or {})
+
+    # Fast path: cached rows for this mesh exist + length matches.
+    if (
+        _cached_h3_data_rows is not None
+        and _cached_h3_data_rows[0] == id(mesh)
+        and len(_cached_h3_data_rows[1]) == n
+    ):
+        rows = _cached_h3_data_rows[1]
+        rgb_list = rgb_idx.tolist()
+        for k, row in enumerate(rows):
+            r, g, b = rgb_list[k]
+            row["color"] = [int(r), int(g), int(b), 220]
+            row["temp"] = env["temp"][k]
+            row["salinity"] = env["salinity"][k]
+            row["speed"] = env["speed"][k]
+            row["direction"] = env["direction"][k]
+        return rows
+
+    # Slow path: full build.
+    h3_ids = mesh.h3_ids[idx].tolist()
+    rgb_list = rgb_idx.tolist()
+    rows = [
+        {
+            "hex": _h3.int_to_str(int(h3_ids[k])),
+            "color": [int(rgb_list[k][0]), int(rgb_list[k][1]),
+                      int(rgb_list[k][2]), 220],
+            "idx": int(static["idx"][k]),
+            "reach": str(static["reach"][k]),
+            "res": int(static["res"][k]),
+            "lat": static["lat"][k],
+            "lon": static["lon"][k],
+            "area": static["area"][k],
+            "depth": static["depth"][k],
+            "nbr_total": int(static["nbr_total"][k]),
+            "nbr_same_res": int(static["nbr_same_res"][k]),
+            "nbr_cross_res": int(static["nbr_cross_res"][k]),
+            "temp": env["temp"][k],
+            "salinity": env["salinity"][k],
+            "speed": env["speed"][k],
+            "direction": env["direction"][k],
+        }
+        for k in range(n)
+    ]
+    _cached_h3_data_rows = (id(mesh), rows)
+    return rows
+
+
 # --- shiny-deckgl map widget (shared by both landscapes) ---
 TOOLTIP_STYLE = {
     "backgroundColor": "rgba(19, 47, 62, 0.92)",
@@ -605,7 +859,10 @@ map_widget = MapWidget(
     "map",
     view_state={"longitude": 0, "latitude": 0, "zoom": 1},
     style=BLANK_STYLE,
-    tooltip={"html": "{info}", "style": TOOLTIP_STYLE},
+    # Tooltip template targets the H3 cell layer (hover any hexagon →
+    # full per-cell diagnostic).  Other layers (polygon outlines, agents)
+    # are pickable=False so they never trigger this template.
+    tooltip={"html": CELL_TOOLTIP_HTML, "style": TOOLTIP_STYLE},
     controller=True,
     parameters={"clearColor": [240 / 255, 240 / 255, 240 / 255, 1]},
 )
@@ -1679,17 +1936,17 @@ def server(input, output, session):
             # the cell on the GPU).  Each cell is a per-feature dict
             # with `hex` (string) + `color` (RGBA).  ~52k features —
             # the JSON payload is ~5 MB but the layer renders in <100 ms.
-            import h3 as _h3
             mesh = sim.mesh
             rgb = _colorscale_rgb(z, cscale)
-            h3_ids = mesh.h3_ids[idx]
-            data_rows = [
-                {
-                    "hex": _h3.int_to_str(int(h)),
-                    "color": [int(r), int(g), int(b), 220],
-                }
-                for h, (r, g, b) in zip(h3_ids.tolist(), rgb[idx].tolist())
-            ]
+            try:
+                fields = sim.env.fields if sim.env is not None else {}
+            except AttributeError:
+                fields = {}
+            # Cached row build — full assembly on first landscape load
+            # (~3 s for 172k cells), in-place colour+env update on
+            # subsequent refreshes (~0.8 s).  The diagnostic fields drive
+            # the per-cell hover tooltip (CELL_TOOLTIP_HTML).
+            data_rows = _build_h3_data_rows(idx, mesh, rgb[idx], fields)
             water = h3_hexagon_layer(
                 "water",
                 data=data_rows,
@@ -1698,7 +1955,9 @@ def server(input, output, session):
                 stroked=False,
                 filled=True,
                 extruded=False,
-                pickable=False,
+                pickable=True,
+                autoHighlight=True,
+                highlightColor=[232, 213, 183, 90],
                 highPrecision=True,
             )
         elif is_hexsim:
@@ -1774,17 +2033,13 @@ def server(input, output, session):
         n = len(idx)
 
         if is_h3:
-            import h3 as _h3
             mesh = sim.mesh
             rgb = _colorscale_rgb(z, cscale)
-            h3_ids = mesh.h3_ids[idx]
-            data_rows = [
-                {
-                    "hex": _h3.int_to_str(int(h)),
-                    "color": [int(r), int(g), int(b), 220],
-                }
-                for h, (r, g, b) in zip(h3_ids.tolist(), rgb[idx].tolist())
-            ]
+            try:
+                fields = sim.env.fields if sim.env is not None else {}
+            except AttributeError:
+                fields = {}
+            data_rows = _build_h3_data_rows(idx, mesh, rgb[idx], fields)
             water = h3_hexagon_layer(
                 "water",
                 data=data_rows,
@@ -1793,7 +2048,9 @@ def server(input, output, session):
                 stroked=False,
                 filled=True,
                 extruded=False,
-                pickable=False,
+                pickable=True,
+                autoHighlight=True,
+                highlightColor=[232, 213, 183, 90],
                 highPrecision=True,
             )
             _cached_water_layer = water
