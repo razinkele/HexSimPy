@@ -201,6 +201,16 @@ def find_cross_res_neighbours(
                         rows[i].append(k)
                         seen.add(ch_int)
 
+    max_row_len = max((len(r) for r in rows), default=0)
+    if max_row_len > MAX_NBRS:
+        raise RuntimeError(
+            f"Cross-resolution neighbour finder produced a row with "
+            f"{max_row_len} entries; MAX_NBRS is {MAX_NBRS}.  Bump "
+            f"MAX_NBRS in h3_multires.py and rebuild the landscape NC, "
+            f"or reduce ``max_resolution_drop`` to limit cross-res "
+            f"reach."
+        )
+
     # Convert lists to CSR
     nbr_starts = np.empty(n + 1, dtype=np.int32)
     nbr_starts[0] = 0
@@ -323,6 +333,31 @@ class H3MultiResMesh:
             M_PER_DEG_LON_EQUATOR * math.cos(math.radians(lat)),
             M_PER_DEG_LAT,
         )
+
+    def gradient(self, field: np.ndarray, idx: int) -> tuple[float, float]:
+        """Approximate normalised ``(dlat, dlon)`` gradient of ``field`` at ``idx``.
+
+        Same algorithm as :meth:`H3Mesh.gradient` — centroid diffs scaled
+        by :meth:`metric_scale` so a degree of longitude doesn't outweigh
+        a degree of latitude at mid-latitude.  Returns ``(0.0, 0.0)`` when
+        the cell has no valid neighbours.
+        """
+        row = self.neighbors[idx]
+        valid = row[row >= 0]
+        if len(valid) == 0:
+            return (0.0, 0.0)
+        here = self.centroids[idx]
+        scale_x, scale_y = self.metric_scale(float(here[0]))
+        dlat = dlon = 0.0
+        for n in valid:
+            there = self.centroids[n]
+            df = field[n] - field[idx]
+            dlat += df * (there[0] - here[0]) * scale_y
+            dlon += df * (there[1] - here[1]) * scale_x
+        norm = (dlat * dlat + dlon * dlon) ** 0.5
+        if norm < 1e-12:
+            return (0.0, 0.0)
+        return (dlat / norm, dlon / norm)
 
     @classmethod
     def from_h3_cells(
