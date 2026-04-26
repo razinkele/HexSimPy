@@ -53,6 +53,8 @@ class H3Mesh:
         depth: np.ndarray,
         areas: np.ndarray,
         resolution: int,
+        reach_id: np.ndarray | None = None,
+        reach_names: list[str] | None = None,
     ) -> None:
         self.h3_ids = h3_ids
         self.centroids = centroids
@@ -62,10 +64,36 @@ class H3Mesh:
         self.areas = areas
         self.resolution = resolution
 
+        # Per-cell reach IDs (optional — only populated for landscapes
+        # built with the inSTREAM-polygon water mask; older NCs have
+        # this missing).  -1 = land, 0..8 = inSTREAM reaches in the
+        # order recorded in ``reach_names``, 9 = OpenBaltic.
+        if reach_id is None:
+            self.reach_id = np.full(len(h3_ids), -1, dtype=np.int8)
+        else:
+            self.reach_id = np.asarray(reach_id, dtype=np.int8)
+        self.reach_names: list[str] = list(reach_names) if reach_names else []
+
         # Numba caches — same layout as TriMesh / HexMesh.
         self.centroids_c = np.ascontiguousarray(centroids)
         self._water_nbrs = neighbors
         self._water_nbr_count = (neighbors >= 0).sum(axis=1).astype(np.int32)
+
+    def reach_name_of(self, idx: int) -> str:
+        """Return the reach name for cell ``idx``, or ``"Land"`` / ``"Unknown"``."""
+        rid = int(self.reach_id[idx])
+        if rid < 0:
+            return "Land"
+        if 0 <= rid < len(self.reach_names):
+            return self.reach_names[rid]
+        return "Unknown"
+
+    def cells_in_reach(self, reach_name: str) -> np.ndarray:
+        """Return ``(N,)`` int array of compact indices for cells in ``reach_name``."""
+        if reach_name not in self.reach_names:
+            return np.array([], dtype=np.int64)
+        rid = self.reach_names.index(reach_name)
+        return np.where(self.reach_id == rid)[0]
 
     # --- duck-typed properties ---------------------------------------
 

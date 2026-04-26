@@ -78,6 +78,14 @@ class Simulation:
                 depth=ds["depth"].values,
                 water_mask=ds["water_mask"].values.astype(bool),
             )
+            # Carry per-cell reach IDs from the NC if present (only
+            # landscapes built with the inSTREAM-polygon mask have
+            # this; the loader leaves the defaults if missing).
+            if "reach_id" in ds.variables:
+                self.mesh.reach_id = ds["reach_id"].values.astype(np.int8)
+                names_attr = ds.attrs.get("reach_names", "")
+                if names_attr:
+                    self.mesh.reach_names = names_attr.split(",")
             self.env = H3Environment.from_netcdf(landscape_path, self.mesh)
         elif grid_type == "hexsim":
             from salmon_ibm.hexsim import HexMesh

@@ -185,3 +185,35 @@ def test_north_south_salinity_gradient(h3_sim):
         f"Salinity gradient too weak: {north_mean - south_mean:.2f} PSU "
         f"(expected ≥ 1.5).  Regridder may be over-smoothing."
     )
+
+
+def test_reach_id_present_and_consistent(h3_sim):
+    """Each H3 cell carries a reach id from the inSTREAM-polygon mask.
+
+    The build script tags water cells with the inSTREAM reach they fall
+    inside (-1 for land, 0..8 for the 9 inSTREAM reaches, 9 for cells
+    in Natural Earth ocean but no inSTREAM polygon = OpenBaltic).
+    """
+    m = h3_sim.mesh
+    assert m.reach_id.shape == (m.n_cells,), "reach_id must be per-cell"
+    assert m.reach_id.dtype == np.int8, "reach_id should be int8"
+    assert len(m.reach_names) == 10, (
+        f"expected 10 reach names (9 inSTREAM + OpenBaltic); "
+        f"got {len(m.reach_names)}: {m.reach_names}"
+    )
+    # Land cells = ~water_mask, water cells must have a non-negative id.
+    land = m.reach_id == -1
+    water = m.reach_id >= 0
+    assert (land == ~m.water_mask).all(), (
+        "reach_id == -1 must coincide exactly with water_mask == False"
+    )
+    assert water.sum() == m.water_mask.sum(), (
+        "every water cell must have a non-negative reach id"
+    )
+
+    # The Curonian Lagoon dominates the inland set — sanity check it
+    # matches the inSTREAM example_baltic shapefile's ~1 558 km² lagoon.
+    lagoon_idx = m.cells_in_reach("CuronianLagoon")
+    assert 12_000 < len(lagoon_idx) < 20_000, (
+        f"CuronianLagoon should have ~16 k cells; got {len(lagoon_idx):,}"
+    )

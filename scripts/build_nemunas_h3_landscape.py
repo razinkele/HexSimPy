@@ -38,7 +38,27 @@ from scipy.interpolate import NearestNDInterpolator, RegularGridInterpolator
 from shapely.geometry import Point
 from shapely.strtree import STRtree
 
-from _water_polygons import get_water_union
+from _water_polygons import (
+    fetch_instream_polygons,
+    fetch_natural_earth_ocean,
+    get_water_union,
+)
+
+
+# Stable integer encoding for reach names — sorted alphabetically so
+# adding a new reach in the inSTREAM shapefile only assigns it a
+# higher index, never reshuffles existing ones.  Special codes:
+#   -1 = land (water_mask is False)
+#    9 = open Baltic (water but not inside any inSTREAM polygon —
+#        i.e., inside Natural Earth ocean only).  Kept distinct from
+#        BalticCoast (the narrow inSTREAM strip near Klaipėda).
+INSTREAM_REACH_NAMES = [
+    "Atmata", "BalticCoast", "CuronianLagoon", "Gilija", "Leite",
+    "Minija", "Nemunas", "Skirvyte", "Sysa",
+]
+OPEN_BALTIC_ID = len(INSTREAM_REACH_NAMES)  # 9
+LAND_ID = -1
+ALL_REACH_NAMES = INSTREAM_REACH_NAMES + ["OpenBaltic"]
 
 
 BBOX = {"minlon": 20.4, "maxlon": 21.9, "minlat": 54.9, "maxlat": 55.8}
@@ -216,6 +236,76 @@ def polygon_water_mask(
     return mask
 
 
+def reach_id_per_cell(
+    lats: np.ndarray, lons: np.ndarray, water_mask: np.ndarray,
+) -> np.ndarray:
+    """Tag each cell with the inSTREAM reach it falls in (or LAND/OpenBaltic).
+
+    Returns ``(N,)`` int8 array.  Encoding:
+
+    * ``-1`` (LAND) — water_mask is False at this cell.
+    * ``0..8``      — index into ``INSTREAM_REACH_NAMES`` for cells whose
+      centroid lies inside that inSTREAM polygon.
+    * ``9`` (OpenBaltic) — water cell whose centroid is outside *every*
+      inSTREAM polygon but inside the Natural Earth ocean polygon.  This
+      is the open Baltic west of the inSTREAM ``BalticCoast`` strip.
+
+    Uses ``shapely.contains_xy`` for vectorised point-in-polygon — was
+    a per-point loop in v1.2.5 (~5 minutes at 100 k cells); now <1 s.
+
+    Test order is reach-by-reach so the first match wins.  The inSTREAM
+    polygons don't overlap each other, so order doesn't actually matter
+    for correctness — only for performance (rare-overlap edge cases).
+    """
+    import shapely
+    from shapely.ops import unary_union
+
+    n = len(lats)
+    reach = np.full(n, LAND_ID, dtype=np.int8)
+
+    # Land cells stay at LAND.  Only test water cells.
+    if not water_mask.any():
+        return reach
+
+    water_idx = np.where(water_mask)[0]
+    water_lats = lats[water_idx].astype(np.float64)
+    water_lons = lons[water_idx].astype(np.float64)
+
+    instream = fetch_instream_polygons()
+    by_reach = instream.dissolve(by="REACH_NAME").geometry
+
+    print(f"  tagging cells by reach ({len(by_reach)} reaches in inSTREAM)…")
+    matched = np.zeros(len(water_idx), dtype=bool)
+    for reach_name in INSTREAM_REACH_NAMES:
+        if reach_name not in by_reach.index:
+            continue
+        poly = by_reach.loc[reach_name]
+        rid = INSTREAM_REACH_NAMES.index(reach_name)
+        # Test only water cells not yet matched — saves work when one
+        # huge reach (CuronianLagoon = 1 558 km²) has already claimed
+        # most of the lagoon cells.
+        unmatched = ~matched
+        if not unmatched.any():
+            break
+        sub_lons = water_lons[unmatched]
+        sub_lats = water_lats[unmatched]
+        hits = shapely.contains_xy(poly, sub_lons, sub_lats)
+        if hits.any():
+            global_idx = water_idx[unmatched][hits]
+            reach[global_idx] = rid
+            matched[unmatched] |= hits
+            print(f"    {reach_name:>14s} (id={rid}): {int(hits.sum()):,} cells")
+
+    # Remaining unmatched water cells get OpenBaltic (cells in NE
+    # ocean but no inSTREAM polygon).
+    n_open = int((~matched).sum())
+    if n_open:
+        reach[water_idx[~matched]] = OPEN_BALTIC_ID
+        print(f"    {'OpenBaltic':>14s} (id={OPEN_BALTIC_ID}): {n_open:,} cells")
+
+    return reach
+
+
 # ---------------------------------------------------------------------------
 # Stage 4: write the consolidated NetCDF
 # ---------------------------------------------------------------------------
@@ -258,6 +348,9 @@ def write_landscape_nc(
         f"polygon-mask dropped {n_dropped:,} below-sea-level land cells"
     )
 
+    print(f"  tagging cells with inSTREAM reach IDs…")
+    reach_id = reach_id_per_cell(lats, lons, water_mask.astype(bool))
+
     forcing_sorted = {k: v[:, order] for k, v in forcing.items()}
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -268,6 +361,7 @@ def write_landscape_nc(
             "lon":        (("cell",), lons),
             "depth":      (("cell",), depth_sorted),
             "water_mask": (("cell",), water_mask),
+            "reach_id":   (("cell",), reach_id),
             **{k: (("time", "cell"), v) for k, v in forcing_sorted.items()},
         },
         coords={"time": times},
@@ -286,6 +380,15 @@ def write_landscape_nc(
             "n_pentagons": int(sum(h3.is_pentagon(c) for c in cells)),
             "created_utc": datetime.datetime.utcnow().isoformat() + "Z",
             "license": "CC-BY 4.0 (EMODnet + Copernicus Marine)",
+            # reach_id encoding — the consumer reads this attribute to
+            # decode reach IDs back to names.  -1 stays implicit
+            # (= land); positive ids index into this list.
+            "reach_names": ",".join(ALL_REACH_NAMES),
+            "reach_source": (
+                "inSTREAM example_baltic shapefile "
+                "(9 reaches: rivers + lagoon + Baltic strip) + "
+                "OpenBaltic for cells in Natural Earth ocean only"
+            ),
         },
     )
     # NETCDF4 (via h5netcdf) so we can store h3_id as uint64 — NetCDF3
