@@ -114,6 +114,68 @@ DEFAULT_RES = {
 }
 
 
+def sample_cmems(
+    cells: list[str],
+    cmems_path: Path,
+    start: str | None = None,
+    end: str | None = None,
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """Sample CMEMS thetao/so/uo/vo at each H3 cell centroid.
+
+    Returns ``(time_array, {var_name: (time, cell) float32})``.
+    Same NaN-fill via NearestNDInterpolator as the uniform-res builder
+    so the thermal-kill path doesn't kill agents on a CMEMS land cell.
+    """
+    raw = xr.open_dataset(cmems_path)
+    if start is not None or end is not None:
+        raw = raw.sel(time=slice(start, end))
+        if raw.sizes["time"] == 0:
+            raise ValueError(f"no CMEMS timesteps in [{start}, {end}]")
+    lat_src = raw["latitude"].values
+    lon_src = raw["longitude"].values
+    if lat_src[0] > lat_src[-1]:
+        lat_src = lat_src[::-1]
+        raw = raw.isel(latitude=slice(None, None, -1))
+    lats, lons = zip(*(h3.cell_to_latlng(c) for c in cells))
+    query = np.column_stack([lats, lons])
+    n_time = raw.sizes["time"]
+    n_cells = len(cells)
+    src_lats_2d, src_lons_2d = np.meshgrid(lat_src, lon_src, indexing="ij")
+    var_map = [("thetao", "tos"), ("so", "sos"), ("uo", "uo"), ("vo", "vo")]
+    out: dict[str, np.ndarray] = {}
+    from scipy.interpolate import NearestNDInterpolator, RegularGridInterpolator
+    for src, dst in var_map:
+        if src not in raw:
+            print(f"  ! source var {src} missing — skipping")
+            continue
+        arr = raw[src].squeeze().values
+        vals = np.empty((n_time, n_cells), dtype=np.float32)
+        for t in range(n_time):
+            src_t = arr[t]
+            interp = RegularGridInterpolator(
+                (lat_src, lon_src), src_t,
+                method="linear", bounds_error=False, fill_value=np.nan,
+            )
+            row = interp(query)
+            nan_mask = np.isnan(row)
+            if nan_mask.any():
+                src_flat = src_t.ravel()
+                src_valid = ~np.isnan(src_flat)
+                if src_valid.any():
+                    nn = NearestNDInterpolator(
+                        np.column_stack([
+                            src_lats_2d.ravel()[src_valid],
+                            src_lons_2d.ravel()[src_valid],
+                        ]),
+                        src_flat[src_valid],
+                    )
+                    row[nan_mask] = nn(query[nan_mask])
+            vals[t] = row.astype(np.float32)
+        out[dst] = vals
+        print(f"  ✓ {src} → {dst} ({n_time} timesteps, {n_cells:,} cells)")
+    return raw["time"].values, out
+
+
 def parse_resolution_overrides(spec: str) -> dict[str, int]:
     """Parse ``Reach=N,Reach=N,...`` into a {name: res} dict."""
     if not spec:
@@ -208,6 +270,18 @@ def main() -> None:
         "--tif", default="data/curonian_bathymetry_raw.tif",
         help="EMODnet bathymetry GeoTIFF",
     )
+    parser.add_argument(
+        "--cmems", default="data/curonian_forcing_cmems_raw.nc",
+        help="CMEMS reanalysis NetCDF",
+    )
+    parser.add_argument(
+        "--start", default="2011-06-01",
+        help="CMEMS time-window start (ISO date) — keeps output ≤30 MB",
+    )
+    parser.add_argument(
+        "--end", default="2011-06-30",
+        help="CMEMS time-window end (ISO date)",
+    )
     args = parser.parse_args()
 
     overrides = parse_resolution_overrides(args.resolutions)
@@ -267,6 +341,11 @@ def main() -> None:
     print(f"  depth range: {depth.min():.2f} – {depth.max():.2f} m, "
           f"water cells: {int(water_mask.sum()):,}")
 
+    print(f"\n[3.5/4] Sampling CMEMS forcing [{args.start} .. {args.end}]…")
+    times, forcing = sample_cmems(
+        cells, PROJECT / args.cmems, args.start, args.end,
+    )
+
     print(f"\n[4/4] Writing {args.out}…")
     # Build the CSR neighbour table — this is the multi-res-specific
     # work that scales O(N · k · D), ~1 second for 50 k cells.
@@ -277,6 +356,9 @@ def main() -> None:
 
     out_path = PROJECT / args.out
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    # Pre-existing in main() scope (v1.2.8 scaffold): cells, lats, lons,
+    # depth, water_mask, reach_id_arr, nbr_starts, nbr_idx.  This task
+    # adds: times, forcing.
     ds = xr.Dataset(
         {
             "h3_id":      (("cell",), np.array([int(h3.str_to_int(c)) for c in cells], dtype=np.uint64)),
@@ -288,15 +370,24 @@ def main() -> None:
             "reach_id":   (("cell",), reach_id_arr),
             "nbr_starts": (("cell_p1",), nbr_starts),
             "nbr_idx":    (("edge",), nbr_idx),
+            # Forcing per (time, cell) — added in this task.
+            **{k: (("time", "cell"), v) for k, v in forcing.items()},
         },
+        coords={"time": times},  # added in this task
         attrs={
-            "title": "Curonian Lagoon multi-resolution H3 landscape (scaffold)",
+            "title": "Curonian Lagoon multi-resolution H3 landscape",
             "reach_names": ",".join(reach_polygons.keys()),
             "reach_resolutions": ",".join(
                 f"{n}={reach_res.get(n, 9)}" for n in reach_polygons.keys()
             ),
             "n_cells": len(cells),
             "n_edges": len(nbr_idx),
+            # Static-viewer compat: median per-cell resolution lets the
+            # legacy "h3_resolution" reader (app.py:2053 & 515) pick a
+            # sensible camera zoom even though the NC is mixed-res.
+            "h3_resolution": int(np.median(
+                np.array([h3.get_resolution(c) for c in cells])
+            )),
             "created_utc": datetime.datetime.now(datetime.UTC).isoformat(),
         },
     )
