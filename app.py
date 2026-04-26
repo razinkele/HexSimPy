@@ -20,8 +20,10 @@ from shiny_deckgl import (
     h3_hexagon_layer,
     head_includes,
     layer,
+    layer_legend_widget,
     loading_widget,
     map_view,
+    polygon_layer,
     reset_view_widget,
     trips_layer,
 )
@@ -441,6 +443,152 @@ WWW_DIR = Path(__file__).parent / "www"
 # Max hex background points for deck.gl (200K → ~5.5 MB HTML, less banding)
 MAX_DECK_POINTS = 200_000
 MAX_HEX_POINTS = 200_000  # ScatterplotLayer: 200K points ≈ 2MB binary, handles easily
+
+# ── inSTREAM hydrological-feature polygon overlay ────────────────────────────
+# Per-reach colour palette for the polygon overlay + the layer-legend widget.
+# Distinct rainbow so all 10 reaches stand out; matches naturalness of the
+# domain (rivers warm/red, lagoon teal, baltic cool/navy).
+REACH_COLORS = {
+    "Nemunas":        [102, 194, 165],
+    "Atmata":         [252, 141,  98],
+    "Minija":         [141, 160, 203],
+    "Sysa":           [231, 138, 195],
+    "Skirvyte":       [166, 216,  84],
+    "Leite":          [255, 217,  47],
+    "Gilija":         [229, 196, 148],
+    "CuronianLagoon": [ 51, 160, 184],
+    "BalticCoast":    [255,  98, 113],
+    "OpenBaltic":     [ 31,  74, 110],
+}
+# inSTREAM reach order matches the build script so the layer-legend
+# entries render in a stable order (rivers grouped, then water bodies).
+REACH_ORDER = list(REACH_COLORS.keys())
+
+_cached_reach_polygons: dict[str, list[list[list[float]]]] | None = None
+
+
+def _polygon_to_rings(geom) -> list[list[list[float]]]:
+    """Convert a shapely (Multi)Polygon into a list of deck.gl rings.
+
+    Each ring is a list of ``[lon, lat]`` pairs.  Multipolygons return
+    one ring per part (deck.gl PolygonLayer treats each as an
+    independent feature).  Holes (interiors) are dropped because the
+    layer's ``getPolygon=@@d.polygon`` accessor expects a flat ring;
+    the inSTREAM polygons don't have meaningful interior holes anyway.
+    """
+    from shapely.geometry import MultiPolygon
+    out: list[list[list[float]]] = []
+    parts = list(geom.geoms) if isinstance(geom, MultiPolygon) else [geom]
+    for part in parts:
+        if part.is_empty:
+            continue
+        ring = [[float(x), float(y)] for x, y in part.exterior.coords]
+        out.append(ring)
+    return out
+
+
+def _load_reach_polygons() -> dict[str, list[list[list[float]]]]:
+    """Lazy-load the inSTREAM reach polygons + OpenBaltic, in deck.gl
+    PolygonLayer format (dict keyed by reach name → list of rings).
+    Module-level cache; first call costs ~2 seconds (shapefile read +
+    union for OpenBaltic), subsequent calls are O(1)."""
+    global _cached_reach_polygons
+    if _cached_reach_polygons is not None:
+        return _cached_reach_polygons
+
+    import sys as _sys
+    scripts_dir = str((Path(__file__).resolve().parent / "scripts").resolve())
+    if scripts_dir not in _sys.path:
+        _sys.path.insert(0, scripts_dir)
+    from _water_polygons import (  # type: ignore
+        BBOX,
+        fetch_instream_polygons,
+        fetch_natural_earth_ocean,
+    )
+    from shapely.ops import unary_union
+    from shapely.geometry import box
+
+    instream = fetch_instream_polygons()
+    by_reach = instream.dissolve(by="REACH_NAME").geometry
+    cache: dict[str, list[list[list[float]]]] = {}
+    for name in REACH_ORDER:
+        if name == "OpenBaltic":
+            continue
+        if name not in by_reach.index:
+            continue
+        cache[name] = _polygon_to_rings(by_reach[name])
+
+    # OpenBaltic = (NE ocean ∩ BBOX) − BalticCoast — same definition as
+    # the build script (see scripts/build_h3_multires_landscape.py).
+    try:
+        ne_ocean = fetch_natural_earth_ocean()
+        clipped = ne_ocean.intersection(
+            box(BBOX[1], BBOX[0], BBOX[3], BBOX[2])
+        )
+        ne_union = unary_union(list(clipped[~clipped.is_empty]))
+        if "BalticCoast" in by_reach.index:
+            ob = ne_union.difference(by_reach["BalticCoast"])
+        else:
+            ob = ne_union
+        cache["OpenBaltic"] = _polygon_to_rings(ob)
+    except Exception as e:
+        # Network-fetch failures (NE CDN) shouldn't block the rest of
+        # the overlay — the user just won't see the OpenBaltic outline.
+        print(f"  ! OpenBaltic polygon unavailable: {e}")
+
+    _cached_reach_polygons = cache
+    return cache
+
+
+def _build_reach_polygon_layers() -> list[dict]:
+    """One PolygonLayer per reach — outline only, distinct colour, not
+    pickable (cells underneath get the tooltips, not the polygons).
+    Each layer has id ``polygon-<ReachName>`` so the layer-legend
+    widget can toggle them independently."""
+    polys = _load_reach_polygons()
+    layers: list[dict] = []
+    for name in REACH_ORDER:
+        rings = polys.get(name)
+        if not rings:
+            continue
+        rgb = REACH_COLORS[name]
+        data = [{"polygon": ring, "name": name} for ring in rings]
+        layers.append(polygon_layer(
+            f"polygon-{name}",
+            data=data,
+            getPolygon="@@=d.polygon",
+            getFillColor=[0, 0, 0, 0],
+            getLineColor=[*rgb, 255],
+            getLineWidth=1,
+            lineWidthMinPixels=1.5,
+            lineWidthMaxPixels=3,
+            stroked=True,
+            filled=False,
+            extruded=False,
+            pickable=False,
+        ))
+    return layers
+
+
+def _build_reach_legend_widget(extra_entries: list[dict] | None = None) -> dict:
+    """Layer-legend widget with checkbox-toggle per polygon overlay,
+    plus optional ``extra_entries`` for the cell/agent/trips layers."""
+    entries: list[dict] = list(extra_entries or [])
+    for name in REACH_ORDER:
+        entries.append({
+            "layer_id": f"polygon-{name}",
+            "label": name,
+            "color": REACH_COLORS[name],
+            "shape": "rect",
+        })
+    return layer_legend_widget(
+        entries=entries,
+        placement="top-left",
+        show_checkbox=True,
+        title="Layers",
+        collapsed=False,
+    )
+
 
 # --- shiny-deckgl map widget (shared by both landscapes) ---
 TOOLTIP_STYLE = {
@@ -1600,12 +1748,20 @@ def server(input, output, session):
                 pickable=False,
             )
         _cached_water_layer = water
-        update_layers = [water, _build_trips_layer()]
+        # Polygon overlay last so the strokes draw on top of the cells.
+        # The layer-legend widget lets the user hide each overlay.
+        polygon_layers = _build_reach_polygon_layers() if is_h3 else []
+        update_layers = [water, _build_trips_layer(), *polygon_layers]
+        legend_widget = _build_reach_legend_widget(extra_entries=[
+            {"layer_id": "water", "label": "Cells", "color": [120, 144, 156], "shape": "rect"},
+            {"layer_id": "anim-trails", "label": "Agent trails", "color": [212, 130, 106], "shape": "line"},
+        ])
         await map_widget.update(
             session,
             layers=update_layers,
             view_state=_view_state(sim, landscape=landscape),
             views=[map_view(controller=True)],
+            widgets=[loading_widget(), reset_view_widget(), legend_widget],
         )
 
     async def _hex_color_update(sim, landscape=None):
