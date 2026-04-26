@@ -29,6 +29,9 @@ def sidebar_panel():
                     "landscape",
                     "Study area",
                     choices={
+                        # Multi-resolution H3 is the new default
+                        # (v1.3.0): rivers res 10 (~75 m), lagoon
+                        # res 9 (~200 m), OpenBaltic res 8 (~530 m).
                         # Curonian Lagoon H3 is now the default
                         # (v1.2.6).  Internal key stays "nemunas"
                         # (matches configs/config_nemunas_h3.yaml +
@@ -37,11 +40,12 @@ def sidebar_panel():
                         # polygons + NE ocean — tighter inland than
                         # the prior OSM source, eliminates the
                         # ~1 000-cell Nemunas-Delta-polderland leak.
+                        "curonian_h3_multires": "Curonian Lagoon H3 (multi-res)",
                         "nemunas": "Curonian Lagoon H3",
                         "curonian_trimesh": "Curonian Lagoon TriMesh",
                         "columbia": "Columbia River",
                     },
-                    selected="nemunas",
+                    selected="curonian_h3_multires",
                 ),
                 ui.input_numeric("n_agents", "Agents", value=50, min=1, max=1000),
                 ui.input_numeric("n_steps", "Hours", value=480, min=1, max=8760),

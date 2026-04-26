@@ -775,6 +775,7 @@ def server(input, output, session):
                 "columbia": "Columbia River",
                 "nemunas": "Curonian Lagoon H3",
                 "curonian_trimesh": "Curonian Lagoon TriMesh",
+                "curonian_h3_multires": "Curonian Lagoon H3 (multi-res)",
             }.get(landscape, "Curonian Lagoon H3")
             await session.send_custom_message(
                 "map_loader_show", {"text": f"Loading {grid_name} grid..."}
@@ -790,6 +791,8 @@ def server(input, output, session):
             cfg = load_config("config_columbia.yaml")
         elif landscape == "curonian_trimesh":
             cfg = load_config("configs/config_curonian_trimesh.yaml")
+        elif landscape == "curonian_h3_multires":
+            cfg = load_config("configs/config_curonian_h3_multires.yaml")
         else:
             # Default + the "nemunas" key both route to the H3
             # backend.  The TriMesh option above is the new (v1.2)

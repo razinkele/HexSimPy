@@ -60,3 +60,22 @@ def test_at_least_one_agent_moves(multires_sim):
         multires_sim.step()
     moved = (multires_sim.pool.tri_idx != initial).any()
     assert moved
+
+
+def test_h3_multires_in_sidebar_choices():
+    """The Study area dropdown must include 'curonian_h3_multires' so
+    a user can select it without typing URL params.  Walks the
+    sidebar UI panel object tree and looks for the choice key in the
+    rendered HTML.
+
+    ``Sidebar.__repr__`` returns the default object repr — we have to
+    call ``tagify()`` to materialise the sidebar's TagList and render
+    it to HTML before substring-matching.
+    """
+    from ui.sidebar import sidebar_panel
+    panel = sidebar_panel()
+    html = str(panel.tagify())
+    assert "curonian_h3_multires" in html, (
+        "h3_multires not registered in sidebar choices; users can't "
+        "select it"
+    )

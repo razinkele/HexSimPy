@@ -313,6 +313,32 @@ class H3MultiResMesh:
         """Alias for ``n_cells`` — duck-types ``TriMesh`` / ``H3Mesh``."""
         return self.n_cells
 
+    @property
+    def resolution(self) -> int:
+        """Median per-cell resolution — for legacy code that expects a
+        single ``mesh.resolution`` (the deck.gl viewer in app.py and
+        H3Mesh.find_triangle).  Multi-res-aware code should read
+        ``self.resolutions`` (plural) instead.
+
+        Edge cases:
+
+        * Empty mesh — returns 9 (the default Curonian-Lagoon resolution),
+          because ``np.median`` on an empty array raises and the only
+          callers (viewer zoom + find_triangle) need a numeric value.
+        * Even split between two resolutions — uses ``round`` rather
+          than ``int`` truncation so 9.5 → 10, not 9.
+
+        TODO: a proper multi-res ``find_triangle`` should walk the H3
+        hierarchy from the finest resolution in use down to the coarsest,
+        returning the first match.  Median is good enough for the scaffold
+        because the only caller that matters at this stage is the viewer
+        zoom heuristic.
+        """
+        arr = self.resolutions[self.water_mask] if self.water_mask.any() else self.resolutions
+        if len(arr) == 0:
+            return 9  # Curonian default; arbitrary but never reached in practice
+        return int(round(float(np.median(arr))))
+
     def neighbours_of(self, idx: int) -> np.ndarray:
         """Return the *exact* neighbour list (no padding) for cell ``idx``."""
         return self.nbr_idx[self.nbr_starts[idx]:self.nbr_starts[idx + 1]]
