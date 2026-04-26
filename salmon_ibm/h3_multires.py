@@ -56,7 +56,7 @@ import numpy as np
 # Per-mesh memory cost: 36 k cells × 64 cols × 4 bytes ≈ 9 MB,
 # fits in L3 trivially.  v1.2.8 had MAX_NBRS=12, v1.2.10 raised
 # this after the v1.2.9 overflow guard caught real overflows.
-MAX_NBRS = 64
+MAX_NBRS = 128
 
 
 @dataclass

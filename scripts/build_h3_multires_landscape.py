@@ -101,6 +101,10 @@ from _water_polygons import (
 PROJECT = Path(__file__).resolve().parent.parent
 LAND_ID = -1
 DEFAULT_RES = {
+    # Rivers — res 11 (~28 m edge) to resolve 50–200 m channel
+    # widths as 1–7 cells across.  At this scale, polygon_to_cells
+    # tessellates rivers as a connected swath naturally; bridge-cell
+    # logic (Task 2) is a safety net for multi-polygon cases.
     "Nemunas":        11,
     "Atmata":         11,
     "Minija":         11,
@@ -108,9 +112,17 @@ DEFAULT_RES = {
     "Skirvyte":       11,
     "Leite":          11,
     "Gilija":         11,
-    "CuronianLagoon":  9,
+    # Lagoon — res 10 (~76 m edge, ~120 k cells) for spatial
+    # heterogeneity in mortality, temperature, salinity gradients
+    # across the lagoon's 1 600 km².  Was res 9 in v1.4.0.
+    "CuronianLagoon": 10,
+    # Baltic — uniform res 9 (~201 m edge) eliminates the v1.4.0
+    # res-9 / res-8 boundary discontinuity at the BalticCoast↔
+    # OpenBaltic interface.  Mesoscale circulation does not need
+    # finer cells.  OpenBaltic gains ~7× cells (50 k vs 7 k); the
+    # visible "scattered hexagons" boundary disappears.
     "BalticCoast":     9,
-    "OpenBaltic":      8,
+    "OpenBaltic":      9,
 }
 
 
@@ -190,13 +202,26 @@ def parse_resolution_overrides(spec: str) -> dict[str, int]:
 
 
 def tessellate_reach(polygon, resolution: int) -> list[str]:
-    """Return the H3 cells tessellating ``polygon`` at ``resolution``.
+    """Return the H3 cells tessellating a buffered version of polygon.
 
-    Builds the H3 ``LatLngPoly`` from the polygon's exterior ring and
-    interior holes, then calls ``polygon_to_cells``.  Multi-polygons
-    are handled by tessellating each part and unioning the cell lists.
+    Buffer = half the H3 edge length at the target resolution.  This
+    ensures cells whose centroid sits within half-a-cell of the
+    polygon edge are included — without it, a thin meandering river
+    polygon at res 10 (~75 m cells) tessellates as a sparse, often
+    disconnected, cell set because polygon_to_cells uses a strict
+    centroid-in-polygon test.
+
+    Buffer is applied in degrees: convert metres → degrees at lat 55°
+    (the bbox centre) using 1 deg ≈ 111 km.
+
+    For multi-polygon inputs, each part is buffered + tessellated
+    independently and the cell sets are unioned.
     """
     from shapely.geometry import MultiPolygon
+
+    edge_m = h3.average_hexagon_edge_length(resolution, unit="m")
+    # Buffer in degrees: half a cell edge at lat 55°.
+    buffer_deg = (edge_m / 2.0) / 111_000.0
 
     if isinstance(polygon, MultiPolygon):
         parts = list(polygon.geoms)
@@ -207,19 +232,119 @@ def tessellate_reach(polygon, resolution: int) -> list[str]:
     for part in parts:
         if part.is_empty:
             continue
-        # H3's LatLngPoly takes (lat, lon) tuples; shapely gives (x, y) = (lon, lat).
-        ext = [(y, x) for x, y in part.exterior.coords]
-        holes = [
-            [(y, x) for x, y in interior.coords] for interior in part.interiors
-        ]
-        try:
-            poly = h3.LatLngPoly(ext, *holes)
-        except Exception as e:
-            print(f"  ! skipping polygon part: {e}")
-            continue
-        for c in h3.polygon_to_cells(poly, resolution):
-            cells.add(c)
+        buffered = part.buffer(buffer_deg)
+        # Buffer can return a MultiPolygon when the original was thin
+        # (the dilation merges previously-separate pieces).  Normalise
+        # to a list of single Polygons.
+        if hasattr(buffered, "geoms"):
+            inner_parts = list(buffered.geoms)
+        else:
+            inner_parts = [buffered]
+        for ip in inner_parts:
+            if ip.is_empty:
+                continue
+            ext = [(y, x) for x, y in ip.exterior.coords]
+            holes = [
+                [(y, x) for x, y in interior.coords]
+                for interior in ip.interiors
+            ]
+            try:
+                poly = h3.LatLngPoly(ext, *holes)
+            except Exception as e:
+                print(f"  ! skipping polygon part: {e}")
+                continue
+            for c in h3.polygon_to_cells(poly, resolution):
+                cells.add(c)
     return sorted(cells)
+
+
+def bridge_components(
+    cells: list[str], resolution: int, max_bridge_len: int = 10
+) -> list[str]:
+    """Merge disconnected H3 components into a single graph by adding
+    shortest-path cells between adjacent components.
+
+    **Precondition: all input cells must be at the same H3 resolution**
+    (passed as the ``resolution`` argument).  ``h3.grid_ring`` and
+    ``h3.grid_distance`` only work between same-resolution cells; mixing
+    resolutions would silently produce spurious component splits and
+    nonsensical bridge paths.  In `build_cell_list` (Step 2.2) this is
+    guaranteed because each call sees only one reach's cells, all at
+    that reach's resolution.
+
+    For each pair of components A and B, find the cell pair (a ∈ A,
+    b ∈ B) with the shortest H3 grid distance.  If that distance is
+    ≤ ``max_bridge_len`` cells, add the intermediate cells from
+    `h3.grid_path_cells(a, b)` to the cell set.  This connects
+    near-adjacent fragments without grafting on huge unrelated zones.
+
+    Returns the augmented cell list, sorted.
+    """
+    if not cells or len(cells) < 2:
+        return cells
+    cell_set = set(cells)
+
+    # BFS within cell_set using grid_ring(1) to find components.
+    components: list[set[str]] = []
+    seen: set[str] = set()
+    for start in cell_set:
+        if start in seen:
+            continue
+        comp: set[str] = set()
+        stack = [start]
+        while stack:
+            c = stack.pop()
+            if c in seen:
+                continue
+            seen.add(c)
+            comp.add(c)
+            for nb in h3.grid_ring(c, 1):
+                if nb in cell_set and nb not in seen:
+                    stack.append(nb)
+        components.append(comp)
+
+    if len(components) <= 1:
+        return cells
+
+    # Pick the largest component as the "anchor".  For each smaller
+    # component, find the nearest cell to the anchor and bridge.
+    components.sort(key=len, reverse=True)
+    anchor = components[0]
+    bridges_added = 0
+    for orphan in components[1:]:
+        # Find the (anchor_cell, orphan_cell) pair with shortest grid
+        # distance.  O(|anchor|·|orphan|) — fine for the small
+        # components (typically <100 cells each).
+        best_dist = max_bridge_len + 1
+        best_pair = None
+        for a in orphan:
+            for b in anchor:
+                d = h3.grid_distance(a, b)
+                if d < best_dist:
+                    best_dist = d
+                    best_pair = (a, b)
+                    if d == 1:
+                        break
+            if best_pair and best_dist == 1:
+                break
+        if best_pair is None or best_dist > max_bridge_len:
+            print(
+                f"  ! orphan component of {len(orphan)} cells too far "
+                f"from anchor (>{max_bridge_len} cells) — leaving "
+                f"disconnected"
+            )
+            continue
+        # Add intermediate path cells to bridge.
+        path = list(h3.grid_path_cells(best_pair[0], best_pair[1]))
+        for pc in path:
+            if pc not in cell_set:
+                cell_set.add(pc)
+                bridges_added += 1
+
+    if bridges_added:
+        print(f"  bridge-cell pass: added {bridges_added} cells across "
+              f"{len(components) - 1} component gaps")
+    return sorted(cell_set)
 
 
 def build_cell_list(
@@ -239,6 +364,7 @@ def build_cell_list(
     for reach_name, poly in reach_polygons.items():
         res = reach_res.get(reach_name, 9)
         cells = tessellate_reach(poly, res)
+        cells = bridge_components(cells, res)
         for c in cells:
             ci = int(h3.str_to_int(c))
             if ci not in seen_id_to_reach:
@@ -304,7 +430,14 @@ def main() -> None:
     )
     ne_union = unary_union(list(ne_clipped[~ne_clipped.is_empty]))
     # Subtract the inSTREAM BalticCoast strip from the NE ocean so we
-    # don't double-tessellate that region.
+    # don't double-tessellate that region.  We deliberately do NOT
+    # subtract the lagoon or rivers: doing so creates a Swiss-cheese
+    # ocean polygon that fragments OpenBaltic into 60+ components and
+    # actually INCREASES the number of spurious cross-res lagoon↔
+    # OpenBaltic links (longer shared boundary).  Some lagoon-side
+    # cross-res neighbours into OpenBaltic remain — that's a known
+    # limitation rooted in `find_cross_res_neighbours` walking up to
+    # res 9 from missing lagoon ring members, not in this script.
     if "BalticCoast" in by_reach.index:
         open_baltic = ne_union.difference(by_reach["BalticCoast"])
     else:
