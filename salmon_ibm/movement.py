@@ -36,7 +36,7 @@ def execute_movement(
     mesh,
     fields,
     seed=None,
-    n_micro_steps=3,
+    n_micro_steps_per_cell=None,
     cwr_threshold=16.0,
     barrier_arrays=None,
 ):
@@ -44,8 +44,16 @@ def execute_movement(
 
     Parameters
     ----------
+    n_micro_steps_per_cell : np.ndarray | None
+        Per-cell array of cell-hop budgets.  If None, defaults to a
+        uniform 3 hops/step (legacy behaviour).
     barrier_arrays : tuple (mort, defl, trans) from BarrierMap.to_arrays(), or None
     """
+    if n_micro_steps_per_cell is None:
+        n_micro_steps_per_cell = np.full(
+            mesh.n_triangles, 3, dtype=np.int32,
+        )
+    max_steps = int(n_micro_steps_per_cell.max())
     rng = np.random.default_rng(seed)
     alive = pool.alive & ~pool.arrived
 
@@ -66,24 +74,36 @@ def execute_movement(
     for b in np.unique(alive_beh):
         buckets[int(b)] = alive_idx[alive_beh == b]
 
+    # Each behaviour bucket gets its own fresh fraction-remaining
+    # budget (one entry per agent in that bucket, all initialised to
+    # 1.0 = full timestep).  Passed by reference so kernels can
+    # mutate in place; allocated locally so buckets don't share state.
+
     # --- RANDOM ---
     idx = buckets.get(int(Behavior.RANDOM))
     if idx is not None and len(idx) > 0:
         tri_buf = pool.tri_idx[idx].copy()
-        _step_random_vec(tri_buf, water_nbrs, water_nbr_count, rng, n_micro_steps)
+        fraction_remaining = np.ones(len(tri_buf), dtype=np.float32)
+        _step_random_vec(
+            tri_buf, water_nbrs, water_nbr_count, rng,
+            max_steps, n_micro_steps_per_cell, fraction_remaining,
+        )
         pool.tri_idx[idx] = tri_buf
 
     # --- UPSTREAM ---
     idx = buckets.get(int(Behavior.UPSTREAM))
     if idx is not None and len(idx) > 0:
         tri_buf = pool.tri_idx[idx].copy()
+        fraction_remaining = np.ones(len(tri_buf), dtype=np.float32)
         _step_directed_vec(
             tri_buf,
             water_nbrs,
             water_nbr_count,
             fields["ssh"],
             rng,
-            n_micro_steps,
+            max_steps,
+            n_micro_steps_per_cell,
+            fraction_remaining,
             ascending=False,
         )
         pool.tri_idx[idx] = tri_buf
@@ -92,13 +112,16 @@ def execute_movement(
     idx = buckets.get(int(Behavior.DOWNSTREAM))
     if idx is not None and len(idx) > 0:
         tri_buf = pool.tri_idx[idx].copy()
+        fraction_remaining = np.ones(len(tri_buf), dtype=np.float32)
         _step_directed_vec(
             tri_buf,
             water_nbrs,
             water_nbr_count,
             fields["ssh"],
             rng,
-            n_micro_steps,
+            max_steps,
+            n_micro_steps_per_cell,
+            fraction_remaining,
             ascending=True,
         )
         pool.tri_idx[idx] = tri_buf
@@ -107,12 +130,15 @@ def execute_movement(
     idx = buckets.get(int(Behavior.TO_CWR))
     if idx is not None and len(idx) > 0:
         tri_buf = pool.tri_idx[idx].copy()
+        fraction_remaining = np.ones(len(tri_buf), dtype=np.float32)
         _step_to_cwr_vec(
             tri_buf,
             water_nbrs,
             water_nbr_count,
             fields["temperature"],
-            n_micro_steps,
+            max_steps,
+            n_micro_steps_per_cell,
+            fraction_remaining,
             cwr_threshold,
         )
         pool.tri_idx[idx] = tri_buf
@@ -134,10 +160,27 @@ def execute_movement(
 
 
 @njit(cache=True, parallel=True)
-def _step_random_numba(tri_indices, water_nbrs, water_nbr_count, rand_vals, steps):
+def _step_random_numba(
+    tri_indices, water_nbrs, water_nbr_count, rand_vals,
+    max_steps, n_micro_per_cell, fraction_remaining,
+):
+    """Random walk with per-agent fractional swim budget.
+
+    fraction_remaining[i] starts at 1.0 (full timestep budget).  Each
+    hop in cell c subtracts 1.0/n_micro_per_cell[c] — i.e. the fraction
+    of the timestep that one cell-hop in this resolution represents.
+    Agent stops when fraction_remaining[i] <= 0.
+
+    This conserves physical swim distance across resolution boundaries:
+    an agent that uses half its budget in coarse cells and crosses into
+    fine cells will use the *remaining* half-budget at the fine cell's
+    cost, not get a fresh full budget at the new resolution.
+    """
     n = len(tri_indices)
-    for s in range(steps):
+    for s in range(max_steps):
         for i in prange(n):
+            if fraction_remaining[i] <= 0.0:
+                continue
             c = tri_indices[i]
             cnt = water_nbr_count[c]
             if cnt > 0:
@@ -145,15 +188,19 @@ def _step_random_numba(tri_indices, water_nbrs, water_nbr_count, rand_vals, step
                 if idx >= cnt:
                     idx = cnt - 1
                 tri_indices[i] = water_nbrs[c, idx]
+                fraction_remaining[i] -= 1.0 / n_micro_per_cell[c]
 
 
 @njit(cache=True, parallel=True)
 def _step_directed_numba(
-    tri_indices, water_nbrs, water_nbr_count, field, rand_vals, steps, ascending
+    tri_indices, water_nbrs, water_nbr_count, field, rand_vals,
+    max_steps, n_micro_per_cell, fraction_remaining, ascending,
 ):
     n = len(tri_indices)
-    for s in range(steps):
+    for s in range(max_steps):
         for i in prange(n):
+            if fraction_remaining[i] <= 0.0:
+                continue
             c = tri_indices[i]
             cnt = water_nbr_count[c]
             if cnt <= 0:
@@ -178,15 +225,19 @@ def _step_directed_numba(
                 if idx >= cnt:
                     idx = cnt - 1
                 tri_indices[i] = water_nbrs[c, idx]
+            fraction_remaining[i] -= 1.0 / n_micro_per_cell[c]
 
 
 @njit(cache=True, parallel=True)
 def _step_to_cwr_numba(
-    tri_indices, water_nbrs, water_nbr_count, temperature, steps, cwr_threshold
+    tri_indices, water_nbrs, water_nbr_count, temperature,
+    max_steps, n_micro_per_cell, fraction_remaining, cwr_threshold,
 ):
     n = len(tri_indices)
-    for s in range(steps):
+    for s in range(max_steps):
         for i in prange(n):
+            if fraction_remaining[i] <= 0.0:
+                continue
             c = tri_indices[i]
             if temperature[c] < cwr_threshold:
                 continue
@@ -202,6 +253,7 @@ def _step_to_cwr_numba(
                     best_temp = t
                     best_nbr = nbr
             tri_indices[i] = best_nbr
+            fraction_remaining[i] -= 1.0 / n_micro_per_cell[c]
 
 
 @njit(cache=True, parallel=True)
@@ -254,27 +306,45 @@ def _advection_numba(
             tri_indices[i] = best_nbr
 
 
-def _step_random_vec(tri_indices, water_nbrs, water_nbr_count, rng, steps):
-    """Vectorized random walk for a batch of agents."""
+def _step_random_vec(
+    tri_indices, water_nbrs, water_nbr_count, rng,
+    max_steps, n_micro_per_cell, fraction_remaining,
+):
+    """Vectorized random walk for a batch of agents.
+
+    Uses a per-agent fractional swim-distance budget so an agent's
+    physical displacement is conserved across resolution boundaries.
+    """
     if _use_numba():
-        rand_vals = rng.random((steps, len(tri_indices)))
-        _step_random_numba(tri_indices, water_nbrs, water_nbr_count, rand_vals, steps)
+        rand_vals = rng.random((max_steps, len(tri_indices)))
+        _step_random_numba(
+            tri_indices, water_nbrs, water_nbr_count, rand_vals,
+            max_steps, n_micro_per_cell, fraction_remaining,
+        )
     else:
-        # Original NumPy implementation
-        n = len(tri_indices)
-        for _ in range(steps):
+        # NumPy fallback — same fractional-budget semantics as the
+        # Numba kernel above.
+        for s in range(max_steps):
+            active_mask = fraction_remaining > 0.0
+            if not active_mask.any():
+                break
             current = tri_indices
             counts = water_nbr_count[current]
             has_nbrs = counts > 0
-            if not has_nbrs.any():
-                break
+            move_mask = active_mask & has_nbrs
+            if not move_mask.any():
+                continue
             rand_idx = rng.integers(0, np.maximum(counts, 1))
             chosen = water_nbrs[current, rand_idx]
-            tri_indices[has_nbrs] = chosen[has_nbrs]
+            tri_indices[move_mask] = chosen[move_mask]
+            fraction_remaining[move_mask] -= (
+                1.0 / n_micro_per_cell[current[move_mask]]
+            )
 
 
 def _step_directed_vec(
-    tri_indices, water_nbrs, water_nbr_count, field, rng, steps, ascending
+    tri_indices, water_nbrs, water_nbr_count, field, rng,
+    max_steps, n_micro_per_cell, fraction_remaining, ascending,
 ):
     """Vectorized gradient-following for a batch of agents.
 
@@ -282,20 +352,26 @@ def _step_directed_vec(
     Odd micro-steps: random jitter (move to random neighbor).
     """
     if _use_numba():
-        rand_vals = rng.random((steps, len(tri_indices)))
+        rand_vals = rng.random((max_steps, len(tri_indices)))
         _step_directed_numba(
-            tri_indices, water_nbrs, water_nbr_count, field, rand_vals, steps, ascending
+            tri_indices, water_nbrs, water_nbr_count, field, rand_vals,
+            max_steps, n_micro_per_cell, fraction_remaining, ascending,
         )
     else:
-        # Original NumPy implementation
+        # NumPy fallback — same fractional-budget semantics as the
+        # Numba kernel above.
         n = len(tri_indices)
 
-        for s in range(steps):
+        for s in range(max_steps):
+            active_mask = fraction_remaining > 0.0
+            if not active_mask.any():
+                break
             current = tri_indices
             counts = water_nbr_count[current]
             has_nbrs = counts > 0
-            if not has_nbrs.any():
-                break
+            move_mask = active_mask & has_nbrs
+            if not move_mask.any():
+                continue
 
             if s % 2 == 0:
                 # Gradient step: gather field values at all neighbors
@@ -310,33 +386,42 @@ def _step_directed_vec(
                     nbr_vals[invalid] = np.inf
                     best_local = np.argmin(nbr_vals, axis=1)
                 chosen = nbr_matrix[np.arange(n), best_local]
-                tri_indices[has_nbrs] = chosen[has_nbrs]
+                tri_indices[move_mask] = chosen[move_mask]
             else:
                 # Random jitter step
                 rand_idx = rng.integers(0, np.maximum(counts, 1))
                 chosen = water_nbrs[current, rand_idx]
-                tri_indices[has_nbrs] = chosen[has_nbrs]
+                tri_indices[move_mask] = chosen[move_mask]
+            fraction_remaining[move_mask] -= (
+                1.0 / n_micro_per_cell[current[move_mask]]
+            )
 
 
 def _step_to_cwr_vec(
-    tri_indices, water_nbrs, water_nbr_count, temperature, steps, cwr_threshold
+    tri_indices, water_nbrs, water_nbr_count, temperature,
+    max_steps, n_micro_per_cell, fraction_remaining, cwr_threshold,
 ):
     """Vectorized cold-water refuge seeking for a batch of agents."""
     if _use_numba():
         _step_to_cwr_numba(
-            tri_indices, water_nbrs, water_nbr_count, temperature, steps, cwr_threshold
+            tri_indices, water_nbrs, water_nbr_count, temperature,
+            max_steps, n_micro_per_cell, fraction_remaining, cwr_threshold,
         )
     else:
-        # Original NumPy implementation
+        # NumPy fallback — same fractional-budget semantics as the
+        # Numba kernel above.
         n = len(tri_indices)
 
-        for _ in range(steps):
+        for s in range(max_steps):
+            active_budget = fraction_remaining > 0.0
+            if not active_budget.any():
+                break
             current = tri_indices
             above_thresh = temperature[current] >= cwr_threshold
             counts = water_nbr_count[current]
-            active = above_thresh & (counts > 0)
+            active = active_budget & above_thresh & (counts > 0)
             if not active.any():
-                break
+                continue
 
             nbr_matrix = water_nbrs[current]
             safe_idx = np.where(nbr_matrix >= 0, nbr_matrix, 0)
@@ -345,6 +430,9 @@ def _step_to_cwr_vec(
             best_local = np.argmin(nbr_temps, axis=1)
             chosen = nbr_matrix[np.arange(n), best_local]
             tri_indices[active] = chosen[active]
+            fraction_remaining[active] -= (
+                1.0 / n_micro_per_cell[current[active]]
+            )
 
 
 def _apply_current_advection_vec(pool, mesh, fields, alive_mask, rng):

@@ -24,6 +24,18 @@ class Landscape(TypedDict, total=False):
     census_records: list
     summary_reports: list
     log_dir: str
+    n_micro_steps_per_cell: np.ndarray  # NEW: per-cell hop budget
+
+
+# Module-level constants for resolution-aware movement (Task 0.5).
+# SWIM_SPEED_M_S × DT_S gives total physical distance an agent can swim
+# in one simulation step; per-cell hop budget = distance / cell-edge.
+SWIM_SPEED_M_S = 1.0   # midpoint of 0.5-2 m/s migrating-smolt range
+DT_S = 3600.0          # one hour per simulation step
+MAX_N_MICRO_STEPS = 256  # ceiling for budget — at res 11 (~28 m) this
+                         # equals ≈ 7.2 km/step which exceeds any
+                         # plausible smolt swim speed, so it's an
+                         # effective no-op upper bound.
 
 
 from salmon_ibm.agents import AgentPool, Behavior
@@ -187,6 +199,25 @@ class Simulation:
         # in tests/test_nemunas_h3_integration.py.
         self.initial_cells = self.pool.tri_idx.copy()
         self.population = Population(name="salmon", pool=self.pool)
+
+        # Per-cell number of cell-hops budget.  Equal to physical distance
+        # travelled (SWIM_SPEED_M_S × DT_S) divided by cell edge length.
+        # Falls back to 3 (legacy default) if mesh has no per-cell resolution.
+        if hasattr(self.mesh, "resolutions"):
+            import h3 as _h3   # local; module-level not desired (see above)
+            edge_m = np.array(
+                [_h3.average_hexagon_edge_length(int(r), unit="m")
+                 for r in self.mesh.resolutions],
+                dtype=np.float32,
+            )
+            n_micro = np.round(SWIM_SPEED_M_S * DT_S / np.maximum(edge_m, 1.0))
+            self._n_micro_steps_per_cell = np.clip(
+                n_micro, 1, MAX_N_MICRO_STEPS
+            ).astype(np.int32)
+        else:
+            self._n_micro_steps_per_cell = np.full(
+                self.mesh.n_triangles, 3, dtype=np.int32,
+            )
 
         # --- Optional Phase 2-3 components ---
         # Barriers — three loader paths depending on mesh backend:
@@ -471,6 +502,7 @@ class Simulation:
             "genome": self._genome,
             "multi_pop_mgr": self._multi_pop_mgr,
             "network": self._network,
+            "n_micro_steps_per_cell": self._n_micro_steps_per_cell,
         }
         self._sequencer.step(self.population, landscape, t)
         self.current_t += 1

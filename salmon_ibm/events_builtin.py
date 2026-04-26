@@ -26,12 +26,22 @@ class MovementEvent(Event):
         fields = landscape["fields"]
         rng = landscape["rng"]
         barrier_arrays = landscape.get("barrier_arrays")
+        n_micro = landscape.get("n_micro_steps_per_cell")
+        if n_micro is None:
+            # Legacy path: scalar broadcast to per-cell so the kernel
+            # signature stays uniform.  ``getattr`` keeps mock-mesh
+            # tests (object() stand-ins) working — execute_movement
+            # itself only inspects n_micro.max().
+            n_cells_legacy = getattr(mesh, "n_triangles", 1)
+            n_micro = np.full(
+                n_cells_legacy, self.n_micro_steps, dtype=np.int32,
+            )
         execute_movement(
             population,
             mesh,
             fields,
             seed=int(rng.integers(2**31)),
-            n_micro_steps=self.n_micro_steps,
+            n_micro_steps_per_cell=n_micro,
             cwr_threshold=self.cwr_threshold,
             barrier_arrays=barrier_arrays,
         )
