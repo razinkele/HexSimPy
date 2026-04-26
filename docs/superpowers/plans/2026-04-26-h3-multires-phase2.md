@@ -77,7 +77,8 @@ Expected: 8 PASSED.  (No new tests added in this prereq; Phase 2 tests will exer
 git -C "C:/Users/arturas.baziukas/OneDrive - ku.lt/HORIZON_EUROPE/HexSim" add salmon_ibm/h3_multires.py
 git -C "C:/Users/arturas.baziukas/OneDrive - ku.lt/HORIZON_EUROPE/HexSim" commit -m "fix(h3-multires): MAX_NBRS overflow guard + gradient() port"
 git -C "C:/Users/arturas.baziukas/OneDrive - ku.lt/HORIZON_EUROPE/HexSim" tag -a v1.2.9 -m "v1.2.9 — scaffold corrections from plan review"
-git -C "C:/Users/arturas.baziukas/OneDrive - ku.lt/HORIZON_EUROPE/HexSim" push origin main && git -C "..." push origin v1.2.9
+git -C "C:/Users/arturas.baziukas/OneDrive - ku.lt/HORIZON_EUROPE/HexSim" push origin main
+git -C "C:/Users/arturas.baziukas/OneDrive - ku.lt/HORIZON_EUROPE/HexSim" push origin v1.2.9
 ```
 
 ---
@@ -253,9 +254,12 @@ times, forcing = sample_cmems(
 )
 ```
 
-And replace the existing `xr.Dataset(...)` constructor with this version (the only new lines are the `forcing.items()` unpack and the `coords={"time": times}` arg):
+And replace the existing `xr.Dataset(...)` constructor with this version (the only new lines are the `forcing.items()` unpack and the `coords={"time": times}` arg).  All other variables in the snippet — `cells`, `lats`, `lons`, `depth`, `water_mask`, `reach_id_arr`, `nbr_starts`, `nbr_idx` — already exist in `main()`'s scope from the v1.2.8 scaffold; the snippet shows the **full** constructor as a drop-in replacement, not a new self-contained block.
 
 ```python
+# Pre-existing in main() scope (v1.2.8 scaffold): cells, lats, lons,
+# depth, water_mask, reach_id_arr, nbr_starts, nbr_idx.  This task
+# adds: times, forcing.
 ds = xr.Dataset(
     {
         "h3_id":      (("cell",), np.array([int(h3.str_to_int(c)) for c in cells], dtype=np.uint64)),
@@ -538,7 +542,7 @@ The sidebar dropdown lists landscapes via the `landscape` input; selecting `curo
 
 - [ ] **Step 3.0: Add a `resolution` compat property to `H3MultiResMesh`.**
 
-`app.py` routes to the H3 viewer branch via `hasattr(mesh, "resolution")` (singular) at four call sites (`app.py:1380, 1407, 1518, 1611`). `H3MultiResMesh` only exposes `resolutions` (plural).  Without this property the multi-res mesh falls through to the TriMesh branch and the viewer renders dots instead of hexagons.
+`app.py` routes to the H3 viewer branch via `hasattr(mesh, "resolution")` (singular) at five call sites (`app.py:1380, 1407, 1518, 1611, 1713`). `H3MultiResMesh` only exposes `resolutions` (plural).  Without this property the multi-res mesh falls through to the TriMesh branch and the viewer renders dots instead of hexagons.
 
 `H3Mesh.find_triangle` (`salmon_ibm/h3mesh.py:117`) also reads `self.resolution` to do `h3.latlng_to_cell(lat, lon, self.resolution)`. The same call on a multi-res mesh would miss cells in fine zones — but for now the median-resolution fallback is enough for the agent-placement code path and the click-to-inspect viewer use case.  Proper multi-res `find_triangle` (try fine first, fall back to coarse) is a TODO comment on the property.
 
@@ -777,8 +781,10 @@ default filter).
 
 - [ ] **Step 4.2: Run the cross-res test.**
 
+The test is `@pytest.mark.slow` and `pytest.ini`'s default `addopts = -m "not slow"` filters it out — must override with `-m slow`:
+
 ```bash
-micromamba run -n shiny python -m pytest "C:/Users/arturas.baziukas/OneDrive - ku.lt/HORIZON_EUROPE/HexSim/tests/test_h3_multires_integration.py::test_agents_cross_resolution_boundaries" -v
+micromamba run -n shiny python -m pytest "C:/Users/arturas.baziukas/OneDrive - ku.lt/HORIZON_EUROPE/HexSim/tests/test_h3_multires_integration.py::test_agents_cross_resolution_boundaries" -v -m slow
 ```
 
 Expected: PASS.  If it fails with `crossed = False`, double-check that `_water_nbr_count` includes cross-resolution neighbours (inspect `mesh._water_nbr_count[fine_river_cell]` — should be ≥ 6 + extras at the boundary).
@@ -896,26 +902,34 @@ def test_mass_loss_rate_independent_of_cell_resolution():
 
 - [ ] **Step 4.3: Run the full multi-res suite.**
 
+Two-pass run — once at the default filter, once with the slow tests included:
+
 ```bash
+# Default filter (addopts = -m "not slow"):
 micromamba run -n shiny python -m pytest "C:/Users/arturas.baziukas/OneDrive - ku.lt/HORIZON_EUROPE/HexSim/tests/test_h3_multires.py" "C:/Users/arturas.baziukas/OneDrive - ku.lt/HORIZON_EUROPE/HexSim/tests/test_h3_multires_builder.py" "C:/Users/arturas.baziukas/OneDrive - ku.lt/HORIZON_EUROPE/HexSim/tests/test_h3_multires_integration.py" --tb=short
 ```
 
-Expected: 19 PASSED (8 scaffold + 1 builder + 10 integration).
-Integration breakdown:
-* `mesh_is_h3multires`
-* `resolutions_are_mixed`
-* `initial_placement_lands_on_water`
-* `one_step_runs_without_error`
-* `at_least_one_agent_moves`
-* `h3_multires_in_sidebar_choices`
-* `salinity_correlates_with_resolution_zone`
-* `per_step_displacement_bounded`
-* `mass_loss_rate_independent_of_cell_resolution` (skipped — pending Phase B)
-* `agents_cross_resolution_boundaries` (slow — must run with `-m slow`)
-* `no_one_way_trap_at_resolution_boundary` (slow)
+Expected: `17 passed, 1 skipped, 2 deselected` — the 8 scaffold + 1 builder + 8 fast integration tests pass; the mass-loss test is `pytest.skip`ped pending Phase B; the two `@pytest.mark.slow` tests are deselected by `addopts`.
 
-When running default (`-m "not slow"`): 17 PASSED + 2 deselected.  Run
-`pytest -m slow` separately to exercise the 6-day Simulation walks.
+```bash
+# Slow run (override the default filter):
+micromamba run -n shiny python -m pytest "C:/Users/arturas.baziukas/OneDrive - ku.lt/HORIZON_EUROPE/HexSim/tests/test_h3_multires_integration.py" -v -m slow
+```
+
+Expected: `2 passed, 9 deselected` — the two cross-res slow tests pass; the 9 fast integration tests are filtered out.
+
+Integration test inventory (11 total in `test_h3_multires_integration.py`):
+* `mesh_is_h3multires`                              — fast
+* `resolutions_are_mixed`                           — fast
+* `initial_placement_lands_on_water`                — fast
+* `one_step_runs_without_error`                     — fast
+* `at_least_one_agent_moves`                        — fast
+* `h3_multires_in_sidebar_choices`                  — fast
+* `salinity_correlates_with_resolution_zone`        — fast
+* `per_step_displacement_bounded`                   — fast
+* `mass_loss_rate_independent_of_cell_resolution`   — fast, but `pytest.skip` until Phase B
+* `agents_cross_resolution_boundaries`              — slow
+* `no_one_way_trap_at_resolution_boundary`          — slow
 
 - [ ] **Step 4.4: Run the existing H3 + barriers + env regression.**
 
