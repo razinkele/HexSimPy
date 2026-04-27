@@ -51,6 +51,10 @@ def _branch_reach_ids(mesh) -> np.ndarray:
     Returns an empty array if the mesh has no reach_names. Caches on the
     mesh as `_delta_branch_reach_ids` so repeated step calls don't re-scan.
     """
+    # Cache assumes mesh.reach_names is immutable after the first call.
+    # The Simulation.__init__ flow sets reach_names ONCE before any event
+    # fires, so this is safe today. If a future caller mutates reach_names
+    # post-init, invalidate by setting `mesh._delta_branch_reach_ids = None`.
     cached = getattr(mesh, "_delta_branch_reach_ids", None)
     if cached is not None:
         return cached
