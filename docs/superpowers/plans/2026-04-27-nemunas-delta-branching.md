@@ -974,14 +974,10 @@ git commit -m "feat(network): TransferEvent preserves natal/exit ids from source
 Append to `tests/test_simulation.py`:
 
 ```python
-def test_init_raises_when_branch_fractions_keys_missing_from_mesh(tmp_path):
+def test_init_raises_when_branch_fractions_keys_missing_from_mesh():
     """If the mesh's reach_names does not include all BRANCH_FRACTIONS keys,
-    Simulation must raise ValueError naming the missing branches."""
+    the validator must raise ValueError naming the missing branches."""
     import pytest
-    from salmon_ibm import delta_routing
-    # Build a fake-ish Simulation init by monkey-patching the validation entry
-    # point. Use the dedicated helper if Simulation exposes one; otherwise
-    # call the validator directly.
     from salmon_ibm.simulation import _validate_mesh_for_delta_routing
 
     class _Mesh:
@@ -1044,11 +1040,33 @@ def _validate_mesh_for_delta_routing(mesh) -> None:
         )
 ```
 
-In `Simulation.__init__`, after the mesh is fully built and `mesh.reach_names` is populated (typically at the end of the mesh-load block — search for `self.mesh.reach_names = names_attr.split(",")` around line 100), add:
+In `Simulation.__init__`, the mesh-construction section is an `if/elif/elif/else` block spanning multiple backends (`h3`, `h3_multires`, `hexsim`, default TriMesh). The validator must run **after all branches complete**, *not* inside any single branch.
+
+The cleanest anchor is **just before `self.pool = AgentPool(...)`** (around line 197) — by that point `self.mesh` is fully constructed and populated regardless of which mesh backend ran. Insert:
 
 ```python
+        # Cross-validate BRANCH_FRACTIONS against the constructed mesh.
+        # No-op on backends without reach_names (TriMesh / HexMesh fallbacks).
         _validate_mesh_for_delta_routing(self.mesh)
+
+        self.pool = AgentPool(n=n_agents, start_tri=start_tris, rng_seed=rng_seed)
 ```
+
+- [ ] **Step 12.6: Tag initial agents at simulation init**
+
+Initial agents are placed in `AgentPool.__init__` (line 197) — *not* via an `IntroductionEvent`. Without explicit init-time tagging, they all stay `natal_reach_id = -1` and the runtime assertion (Task 13.4) fires on step 1.
+
+After `self.population = Population(name="salmon", pool=self.pool)` at line 201, add:
+
+```python
+        # Tag initial agents' natal_reach_id from their starting cell.
+        # No-op on backends without reach_names (TriMesh / HexMesh).
+        self.population.set_natal_reach_from_cells(
+            np.arange(self.pool.n), self.mesh
+        )
+```
+
+This ensures all H3 scenarios have correctly-tagged initial agents from step 0. On TriMesh / HexMesh, the call is a no-op (the new fields stay at -1) and the Task-13.4 callback's mesh-gate keeps the assertion silent.
 
 - [ ] **Step 12.4: Run tests — must pass**
 
@@ -1095,9 +1113,17 @@ def test_simulation_resume_flag_defaults_false():
 
 
 def test_simulation_step_skips_assertion_when_resume():
-    """Under resume=True, Simulation.step does NOT call assert_natal_tagged."""
+    """Under resume=True, Simulation.step does NOT call assert_natal_tagged.
+
+    Note: TriMesh has no reach_names, so the callback short-circuits before
+    even reaching the `resume` check. To isolate the resume-gate, we
+    monkey-patch reach_names on the mesh so the callback proceeds past the
+    no-reach-metadata gate. Then the resume gate is the ONLY thing that
+    decides whether the spy is called.
+    """
     cfg = load_config("config_curonian_minimal.yaml")
     sim = Simulation(cfg, n_agents=10, data_dir="data", rng_seed=42, resume=True)
+    sim.mesh.reach_names = ["FakeReach"]   # force the path past the no-meta gate
     called = {"count": 0}
 
     def _spy():
@@ -1109,9 +1135,11 @@ def test_simulation_step_skips_assertion_when_resume():
 
 
 def test_simulation_step_calls_assertion_when_not_resume():
-    """Under resume=False (default), Simulation.step DOES call the assertion."""
+    """Under resume=False (default), Simulation.step DOES call the assertion
+    when reach metadata is present."""
     cfg = load_config("config_curonian_minimal.yaml")
     sim = Simulation(cfg, n_agents=10, data_dir="data", rng_seed=42)
+    sim.mesh.reach_names = ["FakeReach"]   # force the path past the no-meta gate
     called = {"count": 0}
 
     def _spy():
@@ -1119,10 +1147,10 @@ def test_simulation_step_calls_assertion_when_not_resume():
 
     sim.population.assert_natal_tagged = _spy
     sim.step()
-    assert called["count"] >= 1, "assertion must run when resume=False"
+    assert called["count"] >= 1, "assertion must run when resume=False and reach_names is set"
 ```
 
-Note: `n_agents=10` may produce 10 untagged agents in the minimal scenario, which would *itself* fail the assertion. To prevent the spy-test from tripping the real assertion, monkey-patch *before* the first step. The third test also needs the spy installed before stepping — the spy replaces the real method so the underlying assertion does not run.
+Why the spy: the spy replaces `assert_natal_tagged` entirely, so the underlying assertion logic (which would *itself* fail because the TriMesh agents have `natal_reach_id == -1`) never runs. The test only verifies whether the callback chooses to invoke the method or short-circuits — exactly the gate we want to test.
 
 - [ ] **Step 13.2: Run tests — should fail**
 
@@ -1173,8 +1201,14 @@ Add the callback method (place it next to `_event_logging`, around line 466):
 
 ```python
     def _event_assert_natal_tagged(self, population, landscape, t, mask):
-        if not self.resume:
-            population.assert_natal_tagged()
+        # Two short-circuits: resume runs (option α) and meshes without
+        # reach metadata (TriMesh / HexMesh — agents legitimately have
+        # natal_reach_id == -1 there, no contract to enforce).
+        if self.resume:
+            return
+        if not getattr(self.mesh, "reach_names", None):
+            return
+        population.assert_natal_tagged()
 ```
 
 - [ ] **Step 13.5: Run tests — must pass**
@@ -1829,6 +1863,6 @@ ssh razinka@laguna.ku.lt 'cd /srv/shiny-server/HexSimPy && md5sum data/nemunas_d
 | Runtime invariants — sticky, no-op safety | Tasks 2, 6 |
 | Schema-evolution mitigations | Implicitly preserved (additive-only schema) — verified by Task 19 full-suite |
 | Documented limitations | Spec only — no implementation |
-| All 25 tests | Tasks 1, 2 (12), 3 (3), 4, 5, 6 (4 in Population), 12, 13 (2), 15 (2), 16 (1), 18 (1), 19 (1) |
+| All ~30 tests | Tasks 1+2 (12 in test_delta_routing), 3 (3 in test_agents), 4+5+6 (1+2+3=6 in test_population), 12+13 (3+3=6 in test_simulation), 15 (2 in test_output), 16 (1 in test_nemunas_discharge), 18 (1 in test_nemunas_h3_integration), 19 (1 in test_movement_metric) — 32 tests total |
 
 All sections implemented. No placeholders inside tasks.
