@@ -85,11 +85,13 @@ def _validate_mesh_for_delta_routing(mesh) -> None:
 
 class Simulation:
     def __init__(
-        self, config, n_agents=100, data_dir="data", rng_seed=None, output_path=None
+        self, config, n_agents=100, data_dir="data", rng_seed=None,
+        output_path=None, resume: bool = False,
     ):
         self.config = config
         self.rng_seed = rng_seed
         self.current_t = 0
+        self.resume = resume
 
         # Three mesh backends: legacy ``grid.type=hexsim``, default
         # NetCDF TriMesh, and the new top-level ``mesh_backend=h3``.
@@ -369,6 +371,10 @@ class Simulation:
             ),
             CustomEvent(name="update_timers", callback=self._event_update_timers),
             CustomEvent(name="bioenergetics", callback=self._event_bioenergetics),
+            CustomEvent(
+                name="assert_natal_tagged",
+                callback=self._event_assert_natal_tagged,
+            ),
             CustomEvent(name="logging", callback=self._event_logging),
         ]
 
@@ -382,6 +388,7 @@ class Simulation:
             "fish_predation": self._event_fish_predation,
             "update_timers": self._event_update_timers,
             "bioenergetics": self._event_bioenergetics,
+            "assert_natal_tagged": self._event_assert_natal_tagged,
             "logging": self._event_logging,
         }
 
@@ -491,6 +498,16 @@ class Simulation:
             temps_at_agents >= lethal_T
         )
         population.alive[thermal_kill] = False
+
+    def _event_assert_natal_tagged(self, population, landscape, t, mask):
+        # Two short-circuits: resume runs (option α) and meshes without
+        # reach metadata (TriMesh / HexMesh — agents legitimately have
+        # natal_reach_id == -1 there, no contract to enforce).
+        if self.resume:
+            return
+        if not getattr(self.mesh, "reach_names", None):
+            return
+        population.assert_natal_tagged()
 
     def _event_logging(self, population, landscape, t, mask):
         if self.logger:

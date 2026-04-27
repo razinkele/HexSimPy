@@ -296,3 +296,42 @@ def test_validate_mesh_no_op_without_reach_names():
         pass
 
     _validate_mesh_for_delta_routing(_NoMesh())  # no-op, no exception
+
+
+def test_simulation_resume_flag_defaults_false():
+    """Simulation.__init__ accepts resume: bool; default is False."""
+    import inspect
+    from salmon_ibm.simulation import Simulation
+    sig = inspect.signature(Simulation.__init__)
+    assert "resume" in sig.parameters, "Simulation must accept a `resume` kwarg"
+    assert sig.parameters["resume"].default is False
+
+
+def test_simulation_step_skips_assertion_when_resume():
+    """Under resume=True, Simulation.step does NOT call assert_natal_tagged."""
+    cfg = load_config("config_curonian_minimal.yaml")
+    sim = Simulation(cfg, n_agents=10, data_dir="data", rng_seed=42, resume=True)
+    sim.mesh.reach_names = ["FakeReach"]
+    called = {"count": 0}
+
+    def _spy():
+        called["count"] += 1
+
+    sim.population.assert_natal_tagged = _spy
+    sim.step()
+    assert called["count"] == 0, "assertion should be suppressed under resume=True"
+
+
+def test_simulation_step_calls_assertion_when_not_resume():
+    """Under resume=False (default), Simulation.step DOES call the assertion."""
+    cfg = load_config("config_curonian_minimal.yaml")
+    sim = Simulation(cfg, n_agents=10, data_dir="data", rng_seed=42)
+    sim.mesh.reach_names = ["FakeReach"]
+    called = {"count": 0}
+
+    def _spy():
+        called["count"] += 1
+
+    sim.population.assert_natal_tagged = _spy
+    sim.step()
+    assert called["count"] >= 1, "assertion must run when resume=False and reach_names is set"
