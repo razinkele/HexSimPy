@@ -237,6 +237,10 @@ class IntroductionEvent(Event):
         new_idx = population.add_agents(
             n, pos_arr, mass_g=mass, ed_kJ_g=self.initial_ed
         )
+        # Tag natal_reach_id from current cell — see salmon_ibm/delta_routing.py.
+        mesh = landscape.get("mesh")
+        if mesh is not None:
+            population.set_natal_reach_from_cells(new_idx, mesh)
         if population.trait_mgr is not None:
             for trait_name, cat_name in self.initial_traits.items():
                 defn = population.trait_mgr.definitions[trait_name]
