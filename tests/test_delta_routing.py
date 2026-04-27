@@ -39,3 +39,11 @@ def test_split_discharge_zero_input():
     out = delta_routing.split_discharge(q)
     for name, arr in out.items():
         assert np.all(arr == 0.0), f"{name} should be all-zero, got {arr}"
+
+
+def test_split_discharge_handles_list_input():
+    out = delta_routing.split_discharge([100.0, 200.0])
+    import numpy as np
+    np.testing.assert_allclose(out["Skirvyte"], [51.0, 102.0], rtol=1e-6)
+    np.testing.assert_allclose(out["Atmata"],   [27.0, 54.0],  rtol=1e-6)
+    np.testing.assert_allclose(out["Gilija"],   [22.0, 44.0],  rtol=1e-6)
