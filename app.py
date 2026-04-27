@@ -548,10 +548,16 @@ def _load_reach_polygons() -> dict[str, list[list[list[float]]]]:
 
 
 def _build_reach_polygon_layers() -> list[dict]:
-    """One PolygonLayer per reach — outline only, distinct colour, not
-    pickable (cells underneath get the tooltips, not the polygons).
-    Each layer has id ``polygon-<ReachName>`` so the layer-legend
-    widget can toggle them independently."""
+    """One PolygonLayer per reach with semi-transparent fill + thick
+    coloured stroke.  The fill makes the toggle visually obvious (the
+    coloured area disappears when the layer-legend checkbox is
+    unchecked); the thick stroke ensures the outline is visible at
+    any zoom level and matches the swatch colour shown in the legend.
+
+    Layer id ``polygon-<ReachName>`` lets the legend widget toggle
+    each reach independently.  ``pickable=False`` so the H3 cells
+    underneath remain the click/hover target for the tooltip.
+    """
     polys = _load_reach_polygons()
     layers: list[dict] = []
     for name in REACH_ORDER:
@@ -564,13 +570,16 @@ def _build_reach_polygon_layers() -> list[dict]:
             f"polygon-{name}",
             data=data,
             getPolygon="@@=d.polygon",
-            getFillColor=[0, 0, 0, 0],
+            # Light translucent fill so the H3 cells underneath remain
+            # visible but the polygon's coverage is clearly indicated
+            # (and the toggle shows an obvious change when unchecked).
+            getFillColor=[*rgb, 35],
             getLineColor=[*rgb, 255],
-            getLineWidth=1,
-            lineWidthMinPixels=1.5,
-            lineWidthMaxPixels=3,
+            getLineWidth=2,
+            lineWidthMinPixels=2.0,
+            lineWidthMaxPixels=4,
             stroked=True,
-            filled=False,
+            filled=True,
             extruded=False,
             pickable=False,
         ))
