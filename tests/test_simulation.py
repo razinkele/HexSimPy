@@ -265,3 +265,34 @@ def test_seiche_threshold_per_15min_converted_to_hourly():
     assert np.all(sim.pool.behavior[sim.pool.alive] != Behavior.HOLD), (
         "dSSH of 0.05 m/h should NOT trigger seiche pause when thresh is 0.02 m/15min (= 0.08 m/h)"
     )
+
+
+def test_init_raises_when_branch_fractions_keys_missing_from_mesh():
+    """If the mesh's reach_names does not include all BRANCH_FRACTIONS keys,
+    the validator must raise ValueError naming the missing branches."""
+    import pytest
+    from salmon_ibm.simulation import _validate_mesh_for_delta_routing
+
+    class _Mesh:
+        reach_names = ["Nemunas", "CuronianLagoon"]   # missing all 3 branches
+
+    with pytest.raises(ValueError, match="(Atmata|Skirvyte|Gilija)"):
+        _validate_mesh_for_delta_routing(_Mesh())
+
+
+def test_validate_mesh_passes_with_all_branches():
+    from salmon_ibm.simulation import _validate_mesh_for_delta_routing
+
+    class _Mesh:
+        reach_names = ["Nemunas", "Atmata", "Skirvyte", "Gilija", "CuronianLagoon"]
+
+    _validate_mesh_for_delta_routing(_Mesh())  # must not raise
+
+
+def test_validate_mesh_no_op_without_reach_names():
+    from salmon_ibm.simulation import _validate_mesh_for_delta_routing
+
+    class _NoMesh:
+        pass
+
+    _validate_mesh_for_delta_routing(_NoMesh())  # no-op, no exception

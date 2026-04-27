@@ -38,6 +38,7 @@ MAX_N_MICRO_STEPS = 256  # ceiling for budget — at res 11 (~28 m) this
                          # effective no-op upper bound.
 
 
+from salmon_ibm import delta_routing
 from salmon_ibm.agents import AgentPool, Behavior
 from salmon_ibm.behavior import pick_behaviors, apply_overrides
 from salmon_ibm.population import Population
@@ -61,6 +62,25 @@ from salmon_ibm.events import EventSequencer
 from salmon_ibm.events_builtin import MovementEvent, CustomEvent
 from salmon_ibm.mesh import TriMesh
 from salmon_ibm.output import OutputLogger
+
+
+def _validate_mesh_for_delta_routing(mesh) -> None:
+    """Raise ValueError if the mesh is missing any BRANCH_FRACTIONS reach.
+
+    No-op when the mesh has no reach_names (TriMesh / HexMesh fallbacks).
+    """
+    if not getattr(mesh, "reach_names", None):
+        return
+    missing = sorted(
+        br for br in delta_routing.BRANCH_FRACTIONS
+        if br not in mesh.reach_names
+    )
+    if missing:
+        raise ValueError(
+            f"Mesh reach_names is missing delta-branch reaches: {missing}. "
+            f"BRANCH_FRACTIONS expects {sorted(delta_routing.BRANCH_FRACTIONS)}; "
+            f"mesh has {sorted(mesh.reach_names)}."
+        )
 
 
 class Simulation:
@@ -194,11 +214,20 @@ class Simulation:
                 f"unknown initial_cell_strategy: {strategy!r}"
             )
 
+        # Cross-validate BRANCH_FRACTIONS against the constructed mesh.
+        # No-op on backends without reach_names (TriMesh / HexMesh fallbacks).
+        _validate_mesh_for_delta_routing(self.mesh)
+
         self.pool = AgentPool(n=n_agents, start_tri=start_tris, rng_seed=rng_seed)
         # Snapshot for movement diagnostics — see test_at_least_one_agent_moved
         # in tests/test_nemunas_h3_integration.py.
         self.initial_cells = self.pool.tri_idx.copy()
         self.population = Population(name="salmon", pool=self.pool)
+        # Tag initial agents' natal_reach_id from their starting cell.
+        # No-op on backends without reach_names (TriMesh / HexMesh).
+        self.population.set_natal_reach_from_cells(
+            np.arange(self.pool.n), self.mesh
+        )
 
         # Per-cell number of cell-hops budget.  Equal to physical distance
         # travelled (SWIM_SPEED_M_S × DT_S) divided by cell edge length.
