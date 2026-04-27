@@ -22,9 +22,13 @@ NC = PROJECT / "data" / "curonian_h3_multires_landscape.nc"
 # - Atmata: the inSTREAM source shapefile has 2 separated polygon
 #   pieces (a small detached fragment near the lagoon mouth that the
 #   bridge-cell pass cannot span at res 11 / >10-cell distance).
-# - OpenBaltic: NE ocean polygon legitimately fragments at the BBOX
-#   edge into ~6-8 small pieces (bays, islands) the bridge-cell pass
-#   cannot span at res 9 / >10-cell distance.  6 was the v1.4.0 count.
+# - OpenBaltic: legitimately Swiss-cheese-fragmented at res 9 because
+#   the polygon is (NE ocean − BalticCoast − CuronianLagoon) — the
+#   lagoon subtraction (added in v1.5.2 to stop OpenBaltic claiming
+#   cells INSIDE the lagoon) creates a hole that fragments the
+#   tessellation into ~60 small pieces.  v1.5.0 (no lagoon
+#   subtraction) had 8 components but ~16k cells inside the lagoon —
+#   visually wrong.  Trade-off favours visual correctness.
 N_MAX_COMPONENTS = {
     "Nemunas":         1,
     "Atmata":          2,
@@ -35,7 +39,7 @@ N_MAX_COMPONENTS = {
     "Gilija":          1,
     "CuronianLagoon":  1,
     "BalticCoast":     1,
-    "OpenBaltic":     10,
+    "OpenBaltic":     70,
 }
 
 # Minimum cross-reach links — geographically adjacent reaches must

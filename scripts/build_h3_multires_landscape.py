@@ -429,21 +429,23 @@ def main() -> None:
             VALIDATOR_BBOX[3], VALIDATOR_BBOX[2])
     )
     ne_union = unary_union(list(ne_clipped[~ne_clipped.is_empty]))
-    # Subtract the inSTREAM BalticCoast strip from the NE ocean so we
-    # don't double-tessellate that region.  We deliberately do NOT
-    # subtract the lagoon or rivers: doing so creates a Swiss-cheese
-    # ocean polygon that fragments OpenBaltic into 60+ components and
-    # actually INCREASES the number of spurious cross-res lagoon↔
-    # OpenBaltic links (longer shared boundary).  Some lagoon-side
-    # cross-res neighbours into OpenBaltic remain — that's a known
-    # limitation rooted in `find_cross_res_neighbours` walking up to
-    # res 9 from missing lagoon ring members, not in this script.
+    # Subtract BalticCoast AND CuronianLagoon from the NE ocean polygon.
+    # Natural Earth's "ocean" polygon includes the Curonian Lagoon as a
+    # contiguous water body, so without subtraction OpenBaltic's res-9
+    # tessellation claims ~35% of its cells INSIDE the lagoon
+    # (16k of 47k cells in v1.5.0).  Those overlapping cells then
+    # generate ~6,400 spurious cross-res lagoon↔OpenBaltic links via
+    # `find_cross_res_neighbours` walk-up.  We do NOT subtract the
+    # rivers — they're narrow polygons whose subtraction creates
+    # Swiss-cheese fragmentation (observed: 60+ components in earlier
+    # experiments) without meaningfully reducing spurious links.
+    open_baltic = ne_union
     if "BalticCoast" in by_reach.index:
-        open_baltic = ne_union.difference(by_reach["BalticCoast"])
-    else:
-        open_baltic = ne_union
+        open_baltic = open_baltic.difference(by_reach["BalticCoast"])
+    if "CuronianLagoon" in by_reach.index:
+        open_baltic = open_baltic.difference(by_reach["CuronianLagoon"])
     print(f"  inSTREAM reaches: {sorted(by_reach.index)}")
-    print(f"  open Baltic area (ne_ocean − BalticCoast): {open_baltic.area:.4f} sq deg")
+    print(f"  open Baltic area (ne_ocean − BalticCoast − CuronianLagoon): {open_baltic.area:.4f} sq deg")
 
     reach_polygons = {name: by_reach[name] for name in DEFAULT_RES if name in by_reach.index}
     reach_polygons["OpenBaltic"] = open_baltic

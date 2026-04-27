@@ -518,18 +518,21 @@ def _load_reach_polygons() -> dict[str, list[list[list[float]]]]:
             continue
         cache[name] = _polygon_to_rings(by_reach[name])
 
-    # OpenBaltic = (NE ocean ∩ BBOX) − BalticCoast — same definition as
-    # the build script (see scripts/build_h3_multires_landscape.py).
+    # OpenBaltic = (NE ocean ∩ BBOX) − BalticCoast − CuronianLagoon —
+    # same definition as the build script (see
+    # scripts/build_h3_multires_landscape.py).  Subtracting the lagoon
+    # is what keeps OpenBaltic from claiming res-9 cells inside the
+    # lagoon's geographic area.
     try:
         ne_ocean = fetch_natural_earth_ocean()
         clipped = ne_ocean.intersection(
             box(BBOX[1], BBOX[0], BBOX[3], BBOX[2])
         )
-        ne_union = unary_union(list(clipped[~clipped.is_empty]))
+        ob = unary_union(list(clipped[~clipped.is_empty]))
         if "BalticCoast" in by_reach.index:
-            ob = ne_union.difference(by_reach["BalticCoast"])
-        else:
-            ob = ne_union
+            ob = ob.difference(by_reach["BalticCoast"])
+        if "CuronianLagoon" in by_reach.index:
+            ob = ob.difference(by_reach["CuronianLagoon"])
         cache["OpenBaltic"] = _polygon_to_rings(ob)
     except Exception as e:
         # Network-fetch failures (NE CDN) shouldn't block the rest of
