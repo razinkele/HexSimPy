@@ -104,3 +104,36 @@ def test_logger_preallocated_empty_returns_empty_df():
     df = logger.to_dataframe()
     assert len(df) == 0
     assert "time" in df.columns
+
+
+def test_outputlogger_serialises_natal_reach_id(tmp_path):
+    from salmon_ibm.agents import AgentPool
+    from salmon_ibm.population import Population
+    from salmon_ibm.output import OutputLogger
+    import numpy as np
+    pool = AgentPool(n=3, start_tri=np.array([0, 1, 2]))
+    pool.natal_reach_id[:] = np.array([5, 6, 7], dtype=np.int8)
+    pool.exit_branch_id[:] = np.array([8, -1, 9], dtype=np.int8)
+    pop = Population(name="test", pool=pool)
+    logger = OutputLogger(path=str(tmp_path / "out.csv"),
+                          centroids=np.zeros((10, 2)))
+    logger.log_step(t=0, population=pop)
+    df = logger.to_dataframe()
+    assert "natal_reach_id" in df.columns
+    assert df["natal_reach_id"].tolist() == [5, 6, 7]
+
+
+def test_outputlogger_serialises_exit_branch_id(tmp_path):
+    from salmon_ibm.agents import AgentPool
+    from salmon_ibm.population import Population
+    from salmon_ibm.output import OutputLogger
+    import numpy as np
+    pool = AgentPool(n=2, start_tri=np.array([0, 1]))
+    pool.exit_branch_id[:] = np.array([4, -1], dtype=np.int8)
+    pop = Population(name="test", pool=pool)
+    logger = OutputLogger(path=str(tmp_path / "out.csv"),
+                          centroids=np.zeros((10, 2)))
+    logger.log_step(t=0, population=pop)
+    df = logger.to_dataframe()
+    assert "exit_branch_id" in df.columns
+    assert df["exit_branch_id"].tolist() == [4, -1]
