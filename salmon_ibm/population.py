@@ -104,6 +104,22 @@ class Population:
         self.pool.target_spawn_hour = v
 
     @property
+    def natal_reach_id(self) -> np.ndarray:
+        return self.pool.natal_reach_id
+
+    @natal_reach_id.setter
+    def natal_reach_id(self, v):
+        self.pool.natal_reach_id = v
+
+    @property
+    def exit_branch_id(self) -> np.ndarray:
+        return self.pool.exit_branch_id
+
+    @exit_branch_id.setter
+    def exit_branch_id(self, v):
+        self.pool.exit_branch_id = v
+
+    @property
     def cwr_hours(self) -> np.ndarray:
         return self.pool.cwr_hours
 
@@ -211,6 +227,8 @@ class Population:
         new_arrays["alive"][old_n:] = True
         new_arrays["arrived"][old_n:] = False
         new_arrays["temp_history"][old_n:] = 15.0
+        new_arrays["natal_reach_id"][old_n:] = -1
+        new_arrays["exit_branch_id"][old_n:] = -1
 
         # Assign all AgentPool arrays at once
         for attr, arr in new_arrays.items():

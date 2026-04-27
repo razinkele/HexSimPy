@@ -163,3 +163,18 @@ def test_add_agents_extends_genome():
     np.testing.assert_array_equal(pop.genome.genotypes[3:], 0)
     # Old agents should keep their alleles
     np.testing.assert_array_equal(pop.genome.genotypes[:3], 1)
+
+
+def test_add_agents_defaults_natal_and_exit_to_minus_one():
+    from salmon_ibm.agents import AgentPool
+    from salmon_ibm.population import Population
+    import numpy as np
+    pool = AgentPool(n=2, start_tri=0)
+    pop = Population(name="test", pool=pool)
+    pop.natal_reach_id[:] = np.array([5, 7], dtype=np.int8)
+    pop.exit_branch_id[:] = np.array([3, 4], dtype=np.int8)
+    new_idx = pop.add_agents(n=3, positions=np.array([0, 1, 2]))
+    assert (pop.natal_reach_id[new_idx] == -1).all()
+    assert (pop.exit_branch_id[new_idx] == -1).all()
+    assert pop.natal_reach_id[0] == 5
+    assert pop.natal_reach_id[1] == 7
