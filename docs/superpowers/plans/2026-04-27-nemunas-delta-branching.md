@@ -609,13 +609,18 @@ In `salmon_ibm/population.py`, add this method to the `Population` class (placem
         Truth-checks reach_names (a list) rather than reach_id (an ndarray)
         to avoid `if not arr` raising on multi-element numpy arrays. Same
         defensive pattern as delta_routing.update_exit_branch_id.
+
+        Off-mesh agents (tri_idx < 0) are skipped — without the guard,
+        `mesh.reach_id[-1]` would silently return the last cell's reach_id
+        and tag the agent with a wrong reach.
         """
         if not getattr(mesh, "reach_names", None):
             return
         new_idx = np.asarray(new_idx)
-        self.pool.natal_reach_id[new_idx] = mesh.reach_id[
-            self.pool.tri_idx[new_idx]
-        ]
+        tri = self.pool.tri_idx[new_idx]
+        valid = tri >= 0
+        if valid.any():
+            self.pool.natal_reach_id[new_idx[valid]] = mesh.reach_id[tri[valid]]
 ```
 
 - [ ] **Step 5.4: Run tests — must pass**
@@ -865,24 +870,27 @@ git commit -m "feat(events_builtin): ReproductionEvent tags natal_reach_id from 
 
 - [ ] **Step 10.1: Apply the tagging idiom**
 
-In `salmon_ibm/events_phase3.py`, find the block around line 294. The existing code is:
+In `salmon_ibm/events_phase3.py`, the existing code at lines 294–300 is:
 
 ```python
         if hasattr(population, "add_agents"):
             population.add_agents(
                 len(seed_positions),
-                ...
+                seed_positions,
+                mass_g=np.full(len(seed_positions), 1.0),
+                ed_kJ_g=1.0,
             )
 ```
 
-Read the file to confirm the exact form, then change the block to capture `new_idx` and tag:
+Replace it with:
 
 ```python
         if hasattr(population, "add_agents"):
             new_idx = population.add_agents(
                 len(seed_positions),
                 seed_positions,
-                # ... preserve existing kwargs ...
+                mass_g=np.full(len(seed_positions), 1.0),
+                ed_kJ_g=1.0,
             )
             mesh = landscape.get("mesh")
             if mesh is not None and hasattr(population, "set_natal_reach_from_cells"):
@@ -1124,30 +1132,28 @@ micromamba run -n shiny python -m pytest tests/test_simulation.py -v -k "resume"
 
 Expected: `TypeError: __init__() got an unexpected keyword argument 'resume'` or assertion fail.
 
-- [ ] **Step 13.3: Add the resume flag and gate the assertion**
+- [ ] **Step 13.3: Add the resume flag**
 
-In `salmon_ibm/simulation.py`, modify `Simulation.__init__` to accept `resume: bool = False`:
+In `salmon_ibm/simulation.py`, modify `Simulation.__init__` (signature at line 67–68):
 
 ```python
     def __init__(
-        self,
-        # ... existing parameters ...
-        resume: bool = False,
+        self, config, n_agents=100, data_dir="data", rng_seed=None,
+        output_path=None, resume: bool = False,
     ):
-        # ... existing body ...
+```
+
+In the body, near the start of `__init__`, store the flag:
+
+```python
         self.resume = resume
 ```
 
-In `Simulation.step()` (around line 492 per spec — search for `def step`), find where the logging event runs and add the assertion call immediately before it. Looking at the existing event-list pattern, the cleanest place is the `_event_logging` callback or just before it. Add at the top of `_event_logging`:
+- [ ] **Step 13.4: Add the assertion event to the event sequence**
 
-```python
-    def _event_logging(self, population, landscape, t, mask):
-        if not self.resume:
-            self.population.assert_natal_tagged()
-        # ... existing logging body ...
-```
+The existing `_event_logging` (line 466) is **conditional** (`if self.logger:`) — it's gated by whether a logger was configured. The natal-tagging assertion must run *unconditionally* on non-resume runs, so it must be a separate `CustomEvent` rather than embedded in `_event_logging`.
 
-If `_event_logging` is dispatched via the EventSequencer rather than as a method call, instead add a new `assert_natal_tagged` callback to the event list immediately before the logging entry:
+In `_build_default_events` (around line 343), insert before the logging entry:
 
 ```python
             CustomEvent(
@@ -1157,7 +1163,13 @@ If `_event_logging` is dispatched via the EventSequencer rather than as a method
             CustomEvent(name="logging", callback=self._event_logging),
 ```
 
-with the callback method:
+In `_build_callback_registry` (around line 346), add:
+
+```python
+            "assert_natal_tagged": self._event_assert_natal_tagged,
+```
+
+Add the callback method (place it next to `_event_logging`, around line 466):
 
 ```python
     def _event_assert_natal_tagged(self, population, landscape, t, mask):
@@ -1165,9 +1177,7 @@ with the callback method:
             population.assert_natal_tagged()
 ```
 
-(Whichever shape lands, also add `"assert_natal_tagged": self._event_assert_natal_tagged` to `_build_callback_registry` if it returns a dict.)
-
-- [ ] **Step 13.4: Run tests — must pass**
+- [ ] **Step 13.5: Run tests — must pass**
 
 ```bash
 micromamba run -n shiny python -m pytest tests/test_simulation.py -v -k "resume"
@@ -1175,7 +1185,7 @@ micromamba run -n shiny python -m pytest tests/test_simulation.py -v -k "resume"
 
 Expected: PASS.
 
-- [ ] **Step 13.5: Commit**
+- [ ] **Step 13.6: Commit**
 
 ```bash
 git add salmon_ibm/simulation.py tests/test_simulation.py
