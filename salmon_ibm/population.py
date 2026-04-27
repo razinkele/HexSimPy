@@ -306,3 +306,21 @@ class Population:
         valid = tri >= 0
         if valid.any():
             self.pool.natal_reach_id[new_idx[valid]] = mesh.reach_id[tri[valid]]
+
+    def assert_natal_tagged(self) -> None:
+        """Fail loudly if any alive on-mesh agent lacks natal_reach_id tagging.
+
+        Called once per simulation step from Simulation.step() before logging,
+        so any failure surfaces in the same step that introduced the
+        un-tagged agents. Suppressed under Simulation(resume=True).
+        """
+        pool = self.pool
+        on_mesh = pool.alive & (pool.tri_idx >= 0)
+        untagged = pool.natal_reach_id == -1
+        bad = on_mesh & untagged
+        assert not bad.any(), (
+            "Agents introduced without natal_reach_id tagging — every "
+            "code path calling add_agents() must follow up with "
+            "set_natal_reach_from_cells() or equivalent. "
+            f"{int(bad.sum())} agents affected."
+        )

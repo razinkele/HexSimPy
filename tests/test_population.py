@@ -208,3 +208,39 @@ def test_set_natal_reach_from_cells_no_op_without_reach_names():
     pop = Population(name="test", pool=pool)
     pop.set_natal_reach_from_cells(np.arange(2), _NoMesh())
     assert (pop.natal_reach_id == -1).all()
+
+
+def test_assert_natal_tagged_fires_on_untagged_alive_on_mesh():
+    from salmon_ibm.agents import AgentPool
+    from salmon_ibm.population import Population
+    import numpy as np
+    import pytest
+
+    pool = AgentPool(n=3, start_tri=np.array([0, 1, 2]))
+    pop = Population(name="test", pool=pool)
+    pool.natal_reach_id[:] = np.array([5, -1, 7], dtype=np.int8)
+    pool.alive[:] = True
+    with pytest.raises(AssertionError, match="natal_reach_id tagging"):
+        pop.assert_natal_tagged()
+
+
+def test_assert_natal_tagged_silent_when_all_tagged():
+    from salmon_ibm.agents import AgentPool
+    from salmon_ibm.population import Population
+    import numpy as np
+    pool = AgentPool(n=3, start_tri=np.array([0, 1, 2]))
+    pop = Population(name="test", pool=pool)
+    pool.natal_reach_id[:] = np.array([5, 6, 7], dtype=np.int8)
+    pool.alive[:] = True
+    pop.assert_natal_tagged()
+
+
+def test_assert_natal_tagged_ignores_dead_agents():
+    from salmon_ibm.agents import AgentPool
+    from salmon_ibm.population import Population
+    import numpy as np
+    pool = AgentPool(n=3, start_tri=np.array([0, 1, 2]))
+    pop = Population(name="test", pool=pool)
+    pool.natal_reach_id[:] = np.array([5, -1, 7], dtype=np.int8)
+    pool.alive[:] = np.array([True, False, True])
+    pop.assert_natal_tagged()
