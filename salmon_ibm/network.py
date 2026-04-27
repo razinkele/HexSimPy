@@ -191,5 +191,12 @@ class SwitchPopulationEvent(Event):
             return
 
         positions = source.tri_idx[transfer]
-        target.add_agents(len(transfer), positions)
+        new_idx = target.add_agents(len(transfer), positions)
+        # Natal is fixed at birth — preserve from source on transfer.
+        # Note (documented limitation): if source and target use different
+        # meshes, the reach_id encoding may not match. No deployed salmon
+        # scenario uses multi-mesh transfers today.
+        if hasattr(target, "natal_reach_id") and hasattr(source, "natal_reach_id"):
+            target.natal_reach_id[new_idx] = source.natal_reach_id[transfer]
+            target.exit_branch_id[new_idx] = source.exit_branch_id[transfer]
         source.alive[transfer] = False
