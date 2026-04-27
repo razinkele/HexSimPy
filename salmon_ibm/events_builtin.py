@@ -299,6 +299,9 @@ class ReproductionEvent(Event):
             mass_g=offspring_mass,
             ed_kJ_g=self.offspring_ed,
         )
+        mesh = landscape.get("mesh")
+        if mesh is not None:
+            population.set_natal_reach_from_cells(new_idx, mesh)
         if population.trait_mgr is not None and self.offspring_trait_name:
             defn = population.trait_mgr.definitions[self.offspring_trait_name]
             cat_idx = defn.categories.index(self.offspring_trait_value)
