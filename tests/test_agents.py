@@ -127,3 +127,43 @@ def test_push_temperature_backward_compat_without_mask():
     # Last slot updated for all agents.
     assert pool.temp_history[0, -1] == 99.0
     assert pool.temp_history[1, -1] == 99.0
+
+
+def test_array_fields_includes_natal_and_exit_ids():
+    from salmon_ibm.agents import AgentPool
+    assert "natal_reach_id" in AgentPool.ARRAY_FIELDS
+    assert "exit_branch_id" in AgentPool.ARRAY_FIELDS
+
+
+def test_pool_init_defaults_natal_and_exit_to_minus_one():
+    from salmon_ibm.agents import AgentPool
+    pool = AgentPool(n=5, start_tri=0)
+    import numpy as np
+    assert pool.natal_reach_id.dtype == np.int8
+    assert pool.exit_branch_id.dtype == np.int8
+    assert (pool.natal_reach_id == -1).all()
+    assert (pool.exit_branch_id == -1).all()
+
+
+def test_pool_compact_preserves_natal_and_exit_ids():
+    """compact() must propagate the new fields like every other ARRAY_FIELD."""
+    from salmon_ibm.agents import AgentPool
+    from salmon_ibm.population import Population
+    import numpy as np
+    pool = AgentPool(n=4, start_tri=0)
+    pool.natal_reach_id[:] = np.array([1, 2, 3, 4], dtype=np.int8)
+    pool.exit_branch_id[:] = np.array([5, -1, 7, -1], dtype=np.int8)
+    pool.alive[:] = np.array([True, False, True, False])
+    pop = Population.__new__(Population)        # bypass __init__ paths
+    pop.pool = pool
+    pop.group_id = np.zeros(4, dtype=np.int32)
+    pop.agent_ids = np.arange(4, dtype=np.int64)
+    pop.affinity_targets = np.full(4, -1, dtype=np.intp)
+    pop.spatial_affinity = np.zeros(4, dtype=np.float64)
+    pop.accumulator_mgr = None
+    pop.trait_mgr = None
+    pop.genome = None
+    pop.compact()
+    assert pool.n == 2
+    assert (pool.natal_reach_id == np.array([1, 3], dtype=np.int8)).all()
+    assert (pool.exit_branch_id == np.array([5, 7], dtype=np.int8)).all()

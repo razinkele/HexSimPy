@@ -30,6 +30,8 @@ class AgentPool:
         "alive",
         "arrived",
         "temp_history",
+        "natal_reach_id",   # int8: cell's reach_id at introduction; -1 if pre-tagging
+        "exit_branch_id",   # int8: first delta-branch reach_id touched; sticky; -1 if never
     )
 
     def __init__(
@@ -65,6 +67,8 @@ class AgentPool:
         self.alive = np.ones(n, dtype=bool)
         self.arrived = np.zeros(n, dtype=bool)
         self.temp_history = np.full((n, 3), 15.0)
+        self.natal_reach_id = np.full(n, -1, dtype=np.int8)
+        self.exit_branch_id = np.full(n, -1, dtype=np.int8)
 
         # Optional general-purpose state (Phase 1a)
         self.accumulators = None  # AccumulatorManager | None
