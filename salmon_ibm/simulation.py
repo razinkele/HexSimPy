@@ -363,6 +363,12 @@ class Simulation:
                 n_micro_steps=3,
                 cwr_threshold=self.beh_params.temp_bins[0],
             ),
+            # NEW: tag exit_branch_id (sticky first-touch) before any
+            # post-movement event reads or kills agents in delta-branch cells.
+            CustomEvent(
+                name="update_exit_branch",
+                callback=self._event_update_exit_branch,
+            ),
             # Fish predation fires AFTER movement so agents are killed
             # at their final cell of this step (not their starting cell).
             # No-ops on backends without reach_id (TriMesh, HexMesh).
@@ -385,6 +391,7 @@ class Simulation:
             "behavior_selection": self._event_behavior_selection,
             "estuarine_overrides": self._event_estuarine_overrides,
             "update_cwr_counters": self._event_update_cwr_counters,
+            "update_exit_branch": self._event_update_exit_branch,
             "fish_predation": self._event_fish_predation,
             "update_timers": self._event_update_timers,
             "bioenergetics": self._event_bioenergetics,
@@ -421,6 +428,10 @@ class Simulation:
 
     def _event_update_cwr_counters(self, population, landscape, t, mask):
         self._update_cwr_counters()
+
+    def _event_update_exit_branch(self, population, landscape, t, mask):
+        """First-touch sticky tagging of exit_branch_id by delta branch."""
+        delta_routing.update_exit_branch_id(population.pool, self.mesh)
 
     def _event_fish_predation(self, population, landscape, t, mask):
         """Per-cell Bernoulli mortality from fish predation.
