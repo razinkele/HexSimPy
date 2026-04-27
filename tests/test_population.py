@@ -178,3 +178,33 @@ def test_add_agents_defaults_natal_and_exit_to_minus_one():
     assert (pop.exit_branch_id[new_idx] == -1).all()
     assert pop.natal_reach_id[0] == 5
     assert pop.natal_reach_id[1] == 7
+
+
+def test_set_natal_reach_from_cells_writes_correct_reach_ids():
+    from salmon_ibm.agents import AgentPool
+    from salmon_ibm.population import Population
+    import numpy as np
+
+    class _FakeMesh:
+        reach_names = ["Nemunas", "Atmata", "Skirvyte"]
+        reach_id = np.array([0, 0, 1, 2, 1], dtype=np.int8)  # 5 cells
+
+    pool = AgentPool(n=3, start_tri=np.array([1, 3, 4]))  # cells 1,3,4
+    pop = Population(name="test", pool=pool)
+    pop.set_natal_reach_from_cells(np.arange(3), _FakeMesh())
+    expected = np.array([0, 2, 1], dtype=np.int8)  # Nemunas, Skirvyte, Atmata
+    assert (pop.natal_reach_id == expected).all()
+
+
+def test_set_natal_reach_from_cells_no_op_without_reach_names():
+    from salmon_ibm.agents import AgentPool
+    from salmon_ibm.population import Population
+    import numpy as np
+
+    class _NoMesh:
+        pass
+
+    pool = AgentPool(n=2, start_tri=0)
+    pop = Population(name="test", pool=pool)
+    pop.set_natal_reach_from_cells(np.arange(2), _NoMesh())
+    assert (pop.natal_reach_id == -1).all()

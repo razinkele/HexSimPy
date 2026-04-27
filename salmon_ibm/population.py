@@ -286,3 +286,23 @@ class Population:
             self.genome.genotypes = new_geno
             self.genome.n_agents = new_n
         return np.arange(old_n, new_n)
+
+    def set_natal_reach_from_cells(self, new_idx, mesh) -> None:
+        """Tag new agents' natal_reach_id by looking up the mesh reach_id at
+        their current cell. Called by every add_agents call site.
+
+        Truth-checks reach_names (a list) rather than reach_id (an ndarray)
+        to avoid `if not arr` raising on multi-element numpy arrays. Same
+        defensive pattern as delta_routing.update_exit_branch_id.
+
+        Off-mesh agents (tri_idx < 0) are skipped — without the guard,
+        `mesh.reach_id[-1]` would silently return the last cell's reach_id
+        and tag the agent with a wrong reach.
+        """
+        if not getattr(mesh, "reach_names", None):
+            return
+        new_idx = np.asarray(new_idx)
+        tri = self.pool.tri_idx[new_idx]
+        valid = tri >= 0
+        if valid.any():
+            self.pool.natal_reach_id[new_idx[valid]] = mesh.reach_id[tri[valid]]
