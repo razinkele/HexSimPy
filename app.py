@@ -60,14 +60,18 @@ ACCENT_COLOR_LIGHT = "#8a7040"
 BEH_NAMES = ["Hold", "Random", "CWR", "Upstream", "Downstream"]
 BEH_COLORS = ["#7a8b7a", "#4a8fa8", "#3d9b8f", "#d4826a", "#b8963e"]
 
-# Bathymetric colorscale
+# Bathymetric colorscale — shifted toward saturated cyan/teal at the
+# shallow end so river and lagoon cells (depth 0-5 m) stand out
+# against the CARTO basemap's pale-green land tint.  The previous
+# [0.0, "#c8e6c9"] was visually indistinguishable from the basemap,
+# making shallow water appear "empty" even when fully tessellated.
 BATHY_COLORSCALE = [
-    [0.0, "#c8e6c9"],
-    [0.2, "#7ac4a5"],
-    [0.4, "#50b8a8"],
-    [0.6, "#3a9090"],
-    [0.8, "#2a6070"],
-    [1.0, "#1a3d50"],
+    [0.0, "#9ed8e3"],
+    [0.2, "#5db8a5"],
+    [0.4, "#3a9090"],
+    [0.6, "#2a6070"],
+    [0.8, "#1a3d50"],
+    [1.0, "#0a1e30"],
 ]
 
 TEMP_COLORSCALE = [
@@ -1821,15 +1825,30 @@ def server(input, output, session):
             # H3Mesh.centroids is [lat, lon] in degrees — no scale, no flip.
             water = np.where(mesh.water_mask)[0]
             if len(water):
-                lat = float(np.median(mesh.centroids[water, 0]))
-                lon = float(np.median(mesh.centroids[water, 1]))
+                lats = mesh.centroids[water, 0]
+                lons = mesh.centroids[water, 1]
             else:
-                lat = float(np.median(mesh.centroids[:, 0]))
-                lon = float(np.median(mesh.centroids[:, 1]))
-            # Zoom: pin ≥3 px per H3 edge.
-            import h3 as _h3
-            edge_m = _h3.average_hexagon_edge_length(mesh.resolution, unit="m")
-            zoom = float(np.log2(3 * 156543.03 / max(edge_m, 1.0)))
+                lats = mesh.centroids[:, 0]
+                lons = mesh.centroids[:, 1]
+            # Centre on the bbox midpoint, not the median — the median
+            # picks a very dense cluster (the lagoon) which can leave the
+            # rivers + Baltic outside the viewport at common zoom levels.
+            lat_lo, lat_hi = float(lats.min()), float(lats.max())
+            lon_lo, lon_hi = float(lons.min()), float(lons.max())
+            lat = 0.5 * (lat_lo + lat_hi)
+            lon = 0.5 * (lon_lo + lon_hi)
+            # Zoom to fit the entire bbox with a margin.  At zoom 0 the
+            # world fits in 256 px; the deck.gl map widget is ~800-
+            # 1000 px wide, so add ~1.5 levels to fill that container.
+            # The +1.5 was tuned against the Curonian-Lagoon bbox
+            # (~0.9° lat × 1.5° lon) so the lagoon + rivers + Baltic
+            # strait fill ~70 % of the viewport.
+            extent = max(
+                (lat_hi - lat_lo) * 1.2,
+                (lon_hi - lon_lo) * 1.2 / max(np.cos(np.radians(lat)), 0.1),
+                0.05,
+            )
+            zoom = float(np.log2(360.0 / extent)) + 1.5
             zoom = float(max(0.0, min(22.0, zoom)))
             return {"longitude": lon, "latitude": lat, "zoom": zoom}
         # TriMesh — mesh.nodes stores [lat, lon] in degrees (degrees because
