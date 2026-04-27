@@ -35,7 +35,7 @@ listed below in "Deferred work".
 |---|---|---|
 | 1 | Three branches (Atmata + Skirvytė + Gilija). Pakalnė dropped. | Pakalnė is a small distributary off Atmata, absent from the inSTREAM `BalticExample.shp` source; the Lithuanian sediment-budget literature lumps it into Atmata anyway. Geographic correction also flagged: "Rusnė" is the *island* between the channels, not a branch. |
 | 2 | Two new agent fields: `natal_reach_id` and `exit_branch_id`. | One field alone limits future analyses. `natal_reach_id` enables future homing work; `exit_branch_id` enables per-branch passage analyses. ~16 bits per agent. |
-| 3 | Both landscapes get the change (multi-res production + Nemunas test landscape). | Production landscape ships the feature to the deployed app; test landscape keeps the fast (~30 s rebuild) integration loop. Shared module ensures consistency. |
+| 3 | Both landscapes get the change. (Realised during self-review pass 3: discharge is *not* in the landscape NC — it lives in `data/nemunas_discharge.nc`, loaded separately. So the landscape build scripts get no changes; only the discharge fetch script does. Both landscapes share the discharge file, so this is one-NC-modification, not two.) | Production landscape ships the feature to the deployed app; test landscape keeps the fast (~30 s rebuild) integration loop. Shared module ensures consistency. |
 | 4 | "Hybrid" approach (Approach 3): per-branch discharge in NC schema, but agent-side update is a plain function call (not a registered Event). | Data shape extensible for future per-branch mortality; runtime stays minimal. |
 | 5 | `BRANCH_FRACTIONS` lives in code (`delta_routing.py`), not YAML. | Geographic constants, not scenario-tunable. Sweeps are a research question for a follow-up plan. |
 
@@ -65,16 +65,19 @@ Three logical layers, one new module, no new registered Event subclasses.
 
 ```
                 ┌────────────────────────────────────────┐
-  build-time    │  scripts/build_h3_multires_landscape.py│
-  (data shape)  │  scripts/build_nemunas_h3_landscape.py │
-                │       │                                │
+  build-time    │  scripts/fetch_nemunas_discharge.py    │
+  (data shape)  │       │                                │
                 │       │ writes new NC vars             │
                 │       ▼                                │
-                │  data/*.nc:                            │
-                │    discharge_per_branch[branch, time]  │  ← NEW
+                │  data/nemunas_discharge.nc:            │
+                │    Q[time]                            ← existing
+                │    Q_per_branch[branch, time]          │  ← NEW
                 │    branch_names (global attr)          │  ← NEW
                 │    branch_fractions_source (attr)      │  ← NEW
-                │    + existing reach_id, reach_names    │
+                │                                        │
+                │  data/*_landscape.nc                   │
+                │    (no change — discharge is a         │
+                │     separate forcing file)             │
                 └────────────────────────────────────────┘
                                 │
                                 │  (NC variable available for any future
@@ -112,10 +115,11 @@ Three logical layers, one new module, no new registered Event subclasses.
    `pool` and `mesh` by duck-type. Stays consumable by tests without spinning
    up a `Simulation`. Matches the pattern of `geomconst.py` and
    `baltic_params.py`.
-3. **NC schema is *additive only*.** No existing variables removed or renamed.
-   Simulations loading older NCs without `discharge_per_branch` keep working —
-   `simulation.py` doesn't read it. Deliberate "ship schema first, wire later"
-   design.
+3. **NC schema is *additive only*.** No existing variables removed or renamed
+   in `data/nemunas_discharge.nc`. Simulations loading older NCs without
+   `Q_per_branch` keep working — the existing `forcings.river_discharge`
+   loader (`environment.py:31`) only reads `Q`. Deliberate "ship schema
+   first, wire later" design.
 
 ## Components
 
@@ -179,9 +183,10 @@ new_arrays["natal_reach_id"][old_n:] = -1   # caller fills explicitly when known
 new_arrays["exit_branch_id"][old_n:] = -1
 ```
 
-New helper `Population.set_natal_reach_from_cells(idx_range, mesh)` writes
+New helper `Population.set_natal_reach_from_cells(new_idx, mesh)` writes
 `natal_reach_id` from the agents' `tri_idx` lookup against `mesh.reach_id`.
-Called from the introduction events (see Data Flow §1 below).
+Called by every `add_agents` call site (see Data Flow → "Agent introduction
+— all `add_agents` call sites").
 
 ### 4. `salmon_ibm/simulation.py` — event-sequence insertion
 
@@ -194,32 +199,59 @@ CustomEvent(name="fish_predation", callback=self._event_fish_predation),
 The callback is a one-liner:
 `delta_routing.update_exit_branch_id(population.pool, self.mesh)`.
 
-### 5. Build scripts — NC schema additions
+### 5. Discharge fetch script — `scripts/fetch_nemunas_discharge.py`
 
-`scripts/build_h3_multires_landscape.py` and `scripts/build_nemunas_h3_landscape.py`
-both gain, after the existing Nemunas discharge load:
+The Nemunas discharge climatology is a *separate* NetCDF (not part of the
+landscape NC), built by `scripts/fetch_nemunas_discharge.py`. The script
+synthesises `Q(t)` (variable name `Q`, shape `(time,)`, 5114 daily values
+2011–2024). After the existing `synthesize_climatology()` returns the
+dataset, extend it:
 
 ```python
+from salmon_ibm import delta_routing
+
+ds = synthesize_climatology()                                    # existing
 fractions = list(delta_routing.BRANCH_FRACTIONS.items())
 branch_names = [br for br, _ in fractions]
-discharge_per_branch = np.stack(
-    [discharge_nemunas * f for _, f in fractions]
-)  # shape: (n_branches, time)
+Q_per_branch = np.stack(
+    [ds["Q"].values * f for _, f in fractions]
+).astype(np.float32)                                              # (n_branches, n_time)
 
-ds["discharge_per_branch"] = (("branch", "time"), discharge_per_branch)
+ds["Q_per_branch"] = (("branch", "time"), Q_per_branch)
 ds.attrs["branch_names"] = ",".join(branch_names)
 ds.attrs["branch_fractions_source"] = (
     "Ramsar Site 629 Information Sheet (Nemunas Delta), 2010"
 )
 ```
 
-Variable is *written*, never read by the runtime. Forward-looking by design.
+Both landscape build scripts (`build_h3_multires_landscape.py` and
+`build_nemunas_h3_landscape.py`) get **no changes** — discharge is a separate
+forcing file in this codebase. After re-running the fetch script once, both
+the deployed multi-res scenarios and the test-landscape integration runs use
+the new variable (or, more precisely, *will* use it once a future event reads
+it).
 
-### 6. Output — no new columns this plan
+The new variable is *written*, never read by the runtime in this plan. The
+runtime keeps using `forcings.river_discharge` → `Q[t]` only.
 
-`OutputLogger`'s existing per-agent dump path picks up the two new int8 fields
-automatically (it serialises `ARRAY_FIELDS`). Per-branch entry/exit counts are
-computed in post-processing:
+### 6. Output — explicit additions to `OutputLogger`
+
+`OutputLogger.append_step` (`salmon_ibm/output.py:64–85`) *cherry-picks* fields
+it serialises (`tri_idx`, `ed_kJ_g`, `behavior`, `alive`, `arrived`) — it does
+**not** iterate `ARRAY_FIELDS`. The method has **two parallel branches**: a
+columnar pre-allocated array path (`_max_agents` set, lines 64–75) and a
+list-append fallback (lines 76–85). Both must be extended.
+
+1. `OutputLogger.__init__` allocates **paired storage in both modes**:
+   columnar: `self._natal_reach_id_arr` and `self._exit_branch_id_arr` (int8,
+   shape `(max_steps, max_agents)`); list-append: `self._natal_reach_id` and
+   `self._exit_branch_id` (lists of int8 arrays).
+2. `OutputLogger.append_step` writes both branches (columnar slice assignment
+   in the first; `.copy()` append in the second).
+3. `OutputLogger.to_dataframe` and the empty-output column list (line 88) gain
+   two int8 columns.
+
+Per-branch entry/exit counts are then computed in post-processing:
 
 ```python
 import xarray as xr
@@ -236,15 +268,20 @@ follow-up plan adds a small accumulator. Not now.
 ### Build-time (one-shot, manual)
 
 ```
-inSTREAM polygons + Nemunas discharge climatology
+Nemunas discharge climatology (synthesised in fetch script)
             │
             ▼
-build_h3_multires_landscape.py / build_nemunas_h3_landscape.py
-            │  (existing) tessellate, tag reach_id, sample bathy/CMEMS
-            │  (existing) load Nemunas q[t] climatology
-            │  (NEW)      apply delta_routing.split_discharge(q[t])
+fetch_nemunas_discharge.py
+            │  (existing) synthesise daily Q(t) climatology
+            │  (NEW)      Q_per_branch = stack([Q * f for f in FRACS])
             ▼
-data/*_landscape.nc
+data/nemunas_discharge.nc:
+    Q[time]                    ← existing
+    Q_per_branch[branch, time] ← NEW
+    branch_names attr          ← NEW
+    branch_fractions_source    ← NEW
+
+(Landscape build scripts unchanged — discharge is a separate forcing file.)
 ```
 
 ### Simulation init
@@ -261,22 +298,43 @@ Sequencer event order:
     → fish_predation → update_timers → bioenergetics → logging
 ```
 
-### Agent introduction (two distinct paths)
+### Agent introduction — all `add_agents` call sites
 
-**Path 1 — `IntroductionEvent` (`events_builtin.py`, registered `"introduction"`).**
-After the existing `Population.add_agents(n_new, cells, ...)` call:
+`Population.add_agents(n, positions, *, mass_g=None, ed_kJ_g=6.5, group_id=-1)`
+is invoked from **five places** in the codebase. The contract: every call must
+be followed by `population.set_natal_reach_from_cells(new_idx, mesh)` *unless*
+the call site explicitly preserves `natal_reach_id` from a source agent (the
+transfer case).
+
+| Call site | Event / context | Tagging contract |
+|---|---|---|
+| `events_builtin.py:237` | `IntroductionEvent.step` (`@register_event("introduction")`) | **Set natal from cell.** New agents start at scenario-defined positions. |
+| `events_hexsim.py:418` | `PatchIntroductionEvent.step` (`@register_event("patch_introduction")`) | **Set natal from cell.** Same as above for HexSim-style scenarios. |
+| `events_builtin.py:292` | `ReproductionEvent.step` (`@register_event("reproduction")`) | **Set natal from cell.** Offspring inherit parent's `tri_idx`; natal becomes the parent's spawn cell — biologically the right answer. Currently unused by deployed salmon scenarios but the assertion fires if enabled without tagging. |
+| `events_phase3.py:295` | Phase-3 vegetation seedling event (non-fish) | **Set natal from cell.** Out-of-domain for the salmon IBM, but the assertion still applies; tagged for consistency. |
+| `network.py:194` | `TransferEvent.step` (multi-population transfer) | **Preserve from source.** Transferred agents inherit `natal_reach_id` from the source population — natal is fixed at birth, not at transfer. Implementation: the `TransferEvent` copies the field from `source.natal_reach_id[transfer]` to `target.natal_reach_id[new_idx]`. **Note:** if the source and target populations use different meshes, the reach_id encoding may not match — documented limitation. |
+
+The canonical idiom for the four "set natal from cell" cases:
 
 ```python
-new_idx = slice(prev_n, prev_n + n_new)
-population.natal_reach_id[new_idx] = mesh.reach_id[population.tri_idx[new_idx]]
+new_idx = population.add_agents(n, positions, ...)   # returns the new-agent slice
+population.set_natal_reach_from_cells(new_idx, mesh)
 ```
 
-**Path 2 — `PatchIntroductionEvent` (`events_hexsim.py`, registered
-`"patch_introduction"`).** Identical addition after the existing placement step.
+`set_natal_reach_from_cells` is implemented as:
 
-**Future recruitment events** (any code path that calls `add_agents` mid-run)
-must do the same. The pattern is documented in `delta_routing.py`'s module
-docstring; the `Population.compact()` assertion (below) enforces it.
+```python
+def set_natal_reach_from_cells(self, new_idx, mesh) -> None:
+    # Use reach_names (a list) for the truthiness check, NOT reach_id (an
+    # ndarray — `if not arr` raises on multi-element arrays). Matches the
+    # pattern in delta_routing.update_exit_branch_id().
+    if not getattr(mesh, "reach_names", None):
+        return                                         # TriMesh / HexMesh — no-op
+    self.pool.natal_reach_id[new_idx] = mesh.reach_id[self.pool.tri_idx[new_idx]]
+```
+
+The pattern is documented in `delta_routing.py`'s module docstring;
+`Population.assert_natal_tagged()` (below) enforces it at runtime.
 
 ### Per-step
 
@@ -304,8 +362,10 @@ Negligible vs. movement (~10 ms).
 
 ### Output
 
-OutputLogger dumps `ARRAY_FIELDS` automatically — both new fields appear in
-`data/run_output.nc` as int8 columns. No new aggregator. Post-processing user-side.
+`OutputLogger` requires explicit additions (see Component §6) — both new
+int8 fields are appended in `append_step` (both columnar and list-append
+branches) and emitted in `to_dataframe`. No new aggregator. Per-branch
+counts are computed post-processing, user-side.
 
 ## Error handling and invariants
 
@@ -314,10 +374,16 @@ OutputLogger dumps `ARRAY_FIELDS` automatically — both new fields appear in
 | Invariant | Where | Failure mode caught |
 |---|---|---|
 | `sum(BRANCH_FRACTIONS.values()) ≈ 1.0` (tol 1e-9) | module-level assert in `delta_routing.py` | typo silently mis-allocating discharge |
-| `set(BRANCH_FRACTIONS) ⊆ set(reach_names)` | build script after reach tagging | renamed reach in shapefile, LUT key out of date |
-| `discharge_per_branch.sum(axis=0) ≈ discharge` (rtol 1e-6) | build script | floating-point bug in split |
-| `discharge_per_branch.shape == (n_branches, n_time)` | build script | dim ordering slip |
-| LUT and `branch_names` global attr in identical order | build script writes `branch_names` from `list(BRANCH_FRACTIONS)` | NC consumer indexing wrong branch |
+| `Q_per_branch.sum(axis=0) ≈ Q` (rtol 1e-6) | `fetch_nemunas_discharge.py` | floating-point bug in split |
+| `Q_per_branch.shape == (n_branches, n_time)` | `fetch_nemunas_discharge.py` | dim ordering slip |
+| LUT and `branch_names` global attr in identical order | fetch script writes `branch_names` from `list(BRANCH_FRACTIONS)` | NC consumer indexing wrong branch |
+
+### Init-time invariants (Simulation startup)
+
+| Invariant | Where | Failure mode caught |
+|---|---|---|
+| `set(BRANCH_FRACTIONS) ⊆ set(mesh.reach_names)` | `Simulation.__init__` after mesh load, raises `ValueError` if missing | renamed reach in inSTREAM source / mesh + LUT key drift |
+| `Q_per_branch` axis-1 length matches `Q` length, *if both present* | discharge loader (deferred — only matters when a future event reads `Q_per_branch`) | discharge file modified by hand in a way that breaks consistency |
 
 ### Runtime invariants
 
@@ -327,9 +393,8 @@ same step that introduced the un-tagged agents (not a step later, when the
 trace is harder to follow). Implemented as `Population.assert_natal_tagged()`:
 
 ```python
+# In Population:
 def assert_natal_tagged(self) -> None:
-    if self._resume:                        # option α — see schema evolution
-        return
     pool = self.pool
     on_mesh = pool.alive & (pool.tri_idx >= 0)
     untagged = pool.natal_reach_id == -1
@@ -340,7 +405,15 @@ def assert_natal_tagged(self) -> None:
         "set_natal_reach_from_cells() or equivalent. "
         f"{int(bad.sum())} agents affected."
     )
+
+# In Simulation.step(), called before _event_logging:
+if not self.resume:                          # option α — see schema evolution
+    self.population.assert_natal_tagged()
 ```
+
+The `resume` flag lives on `Simulation` (where session state belongs); Population
+stays stateless about replay. Simulation already has constructor surface for
+flags like `seed`; `resume: bool = False` is added alongside.
 
 **Why not in `Population.compact()`:** `compact()` early-returns when everyone
 is alive, and overwrites `pool.alive` to all-True afterwards — checking there
@@ -362,11 +435,11 @@ reach_id_of("Atmata")` at end.
 
 | Concern | Mitigation |
 |---|---|
-| Old NC (no `discharge_per_branch`) loaded with new code | `Environment.load` doesn't read it — no KeyError |
-| Old NC (no `branch_names` attr) loaded | Not consumed at runtime; missing attr → no error |
+| Old discharge NC (no `Q_per_branch`) loaded with new code | `forcings.river_discharge` only reads `Q` — no KeyError |
+| Old discharge NC (no `branch_names` attr) loaded | Not consumed at runtime; missing attr → no error |
 | Old run-output NC (no `natal_reach_id` column) re-opened | Existing code didn't expect the column; absence invisible. Post-processing scripts that read it must guard with `if "natal_reach_id" in out:` — documented |
-| New NC loaded with old code (pre-this-plan) | Old `Environment.load` ignores unknown variables; runs as before |
-| Resumed simulation from a pre-tagged checkpoint | Agents have both fields = `-1`. Compaction assertion **disabled for resume runs** via a `Simulation(..., resume=True)` flag — option **α** (suppress, don't lie). Resume runs are rare; user can re-run from scratch if natal-tagging is needed. |
+| New discharge NC loaded with old code (pre-this-plan) | Old loader ignores unknown variables; runs as before |
+| Resumed simulation from a pre-tagged checkpoint | Agents have both fields = `-1`. The natal-tagging assertion (`Population.assert_natal_tagged`) **disabled for resume runs** via a `Simulation(..., resume=True)` flag — option **α** (suppress, don't lie). Resume runs are rare; user can re-run from scratch if natal-tagging is needed. |
 
 ### Documented limitations (intentionally not addressed)
 
@@ -380,6 +453,14 @@ reach_id_of("Atmata")` at end.
    semantic is degenerate for that cohort. Post-processing should filter on
    `natal_reach_id != exit_branch_id` if asking "which branch did
    Nemunas-natal smolts use?"
+3. **Multi-mesh `TransferEvent` reach-id encoding drift.** When source and
+   target populations use *different* meshes, `TransferEvent` copies
+   `natal_reach_id` byte-for-byte from source to target — but the integer
+   encoding indexes into different `reach_names` lists, so the natal label
+   becomes meaningless on the target side. No deployed salmon scenario uses
+   multi-mesh transfers, so the assertion does not fire today. If multi-mesh
+   transfers ever ship, the transfer logic must remap via
+   `source.mesh.reach_names[natal_id]` → `target.mesh.reach_names.index(name)`.
 
 ## Testing
 
@@ -411,28 +492,48 @@ test_pool_init_defaults_natal_and_exit_to_minus_one
 test_compact_preserves_natal_and_exit_ids
 ```
 
-### Population extension — `tests/test_population.py` (+4)
+### Population extension — `tests/test_population.py` (+3)
 
 ```
 test_add_agents_defaults_natal_and_exit_to_minus_one
 test_set_natal_reach_from_cells_writes_correct_reach_ids
-test_assert_natal_tagged_fires_on_untagged_alive_agents
-test_assert_natal_tagged_silent_when_resume_flag_set
+test_assert_natal_tagged_fires_on_untagged_alive_on_mesh
 ```
 
-### Grid-quality extension — `tests/test_h3_grid_quality.py` (+1)
+(The resume-flag bypass is tested in `tests/test_simulation.py` since the
+flag lives on `Simulation`, not `Population`.)
+
+### Discharge schema — `tests/test_nemunas_discharge.py` (NEW, +1)
 
 ```
-test_discharge_per_branch_present_and_consistent
-    - "discharge_per_branch" variable exists
-    - shape (n_branches, n_time)
-    - branch_names attr matches BRANCH_FRACTIONS keys
-    - sum(axis=0) ≈ Nemunas discharge total within rtol 1e-5
-    - branch_fractions_source attr is non-empty string
+test_q_per_branch_present_and_consistent
+    Loads data/nemunas_discharge.nc.
+    Asserts:
+      - "Q_per_branch" variable exists
+      - shape (n_branches, n_time) where n_time == len(Q)
+      - branch_names global attr matches list(BRANCH_FRACTIONS) order
+      - Q_per_branch.sum(axis=0) ≈ Q within rtol 1e-5
+      - branch_fractions_source attr is non-empty string
 ```
 
-Skips with a clear message when the NC is not built locally — matches
-existing skip pattern.
+Skips with a clear message when `data/nemunas_discharge.nc` lacks the new
+variable (i.e., user hasn't re-run `fetch_nemunas_discharge.py` since this
+plan landed) — matches the existing skip-on-missing-data pattern in
+`tests/test_h3_grid_quality.py:71`.
+
+### `Simulation` extension — `tests/test_simulation.py` (+2)
+
+```
+test_init_raises_when_branch_fractions_keys_missing_from_mesh
+    Build a fake mesh with reach_names = ["Nemunas", "CuronianLagoon"]
+    (missing all three branches). Construct Simulation with this mesh.
+    Assert ValueError raised with a message naming the missing branch.
+
+test_step_skips_natal_assertion_when_resume_flag_set
+    Construct Simulation(resume=True), inject an alive agent with
+    natal_reach_id = -1 and tri_idx >= 0, run one step. Assert no
+    AssertionError raised. (Repeat with resume=False — assertion fires.)
+```
 
 ### Integration extension — `tests/test_nemunas_h3_integration.py` (+1)
 
@@ -448,6 +549,13 @@ The implementation plan calibrates against an actual run and sets
 `threshold = floor(observed × 0.6)`, matching the discipline in
 `MIN_CROSS_REACH_LINKS` (`tests/test_h3_grid_quality.py`).
 
+### Output extension — `tests/test_output.py` (+2)
+
+```
+test_outputlogger_serialises_natal_reach_id
+test_outputlogger_serialises_exit_branch_id
+```
+
 ### Performance regression — `tests/test_movement_metric.py` (+1)
 
 Assert that the full step time (with new `update_exit_branch` event) hasn't
@@ -460,21 +568,23 @@ regressions if anyone replaces the vectorised update.
 |---|---|
 | `test_delta_routing.py` (new) | +12 |
 | `test_agents.py` extension | +3 |
-| `test_population.py` extension | +4 |
-| `test_h3_grid_quality.py` extension | +1 |
+| `test_population.py` extension | +3 |
+| `test_nemunas_discharge.py` (new) | +1 |
+| `test_simulation.py` extension | +2 |
 | `test_nemunas_h3_integration.py` extension | +1 |
+| `test_output.py` extension | +2 |
 | `test_movement_metric.py` extension | +1 |
-| **Total** | **+22** |
+| **Total** | **+25** |
 
-Suite: 557 → 579 tests. Runtime impact: ~+10 s.
+Suite: 557 → 582 tests. Runtime impact: ~+10 s.
 
 ## Deferred work (carry-forward limitations)
 
 This spec deliberately does **not** include the following — each becomes its
 own future plan:
 
-1. **Per-branch differential mortality fields.** Reading `discharge_per_branch`
-   into events; per-branch survival probabilities. Needs Kaliningrad fisheries
+1. **Per-branch differential mortality fields.** Reading `Q_per_branch` into
+   events; per-branch survival probabilities. Needs Kaliningrad fisheries
    data we don't have for Skirvytė.
 2. **Natal-tributary homing for Žeimena/Merkys/Dubysa.** Needs ~200 km
    eastward domain extension to reach the actual natal tributaries. The
@@ -485,13 +595,9 @@ own future plan:
 4. **Dynamic branch fractions.** Current spec uses static climatological
    midpoints. Real fractions vary with stage and discharge. Needs per-branch
    gauges that don't exist in EPA Smalininkai records.
-5. **`exit_branch_id` mid-step trajectory awareness.** The first-touch
-   semantics (above) miss agents that traverse two branches in one step. A
-   sub-step trajectory log would resolve this; deferred until any analysis
-   actually depends on the distinction.
-6. **Live per-branch counts in the Shiny dashboard.** Post-processing only
+5. **Live per-branch counts in the Shiny dashboard.** Post-processing only
    for now.
-7. **Branch-specific habitat attributes.** `BalticExample.shp` already
+6. **Branch-specific habitat attributes.** `BalticExample.shp` already
    carries `FRACSPWN`, `FRACVSHL`, `NUM_HIDING`, `M_TO_ESC` per polygon;
    none consumed by the IBM today. Separate deferred-realism item (see
    `curonian_deferred.md` item 1).
