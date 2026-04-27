@@ -415,7 +415,10 @@ class PatchIntroductionEvent(Event):
         nonzero_cells = np.where(layer != 0)[0]
         if len(nonzero_cells) == 0:
             return
-        population.add_agents(len(nonzero_cells), nonzero_cells)
+        new_idx = population.add_agents(len(nonzero_cells), nonzero_cells)
+        mesh = landscape.get("mesh")
+        if mesh is not None:
+            population.set_natal_reach_from_cells(new_idx, mesh)
 
 
 @register_event("data_lookup")
