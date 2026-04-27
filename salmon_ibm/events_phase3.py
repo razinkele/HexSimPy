@@ -292,9 +292,12 @@ class PlantDynamicsEvent(Event):
 
         # Create new agents (seedlings) at viable positions
         if hasattr(population, "add_agents"):
-            population.add_agents(
+            new_idx = population.add_agents(
                 len(seed_positions),
                 seed_positions,
                 mass_g=np.full(len(seed_positions), 1.0),
                 ed_kJ_g=1.0,
             )
+            mesh = landscape.get("mesh")
+            if mesh is not None and hasattr(population, "set_natal_reach_from_cells"):
+                population.set_natal_reach_from_cells(new_idx, mesh)
