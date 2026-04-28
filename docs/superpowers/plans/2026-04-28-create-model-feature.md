@@ -16,7 +16,7 @@
 
 **New files:**
 - `salmon_ibm/h3_tessellate.py` — extracted tessellation primitives + new upload-flow entry points + `_fetch_emodnet_for_bbox` + `PreviewMesh` dataclass + `suffix_from_filename` helper. ~250 LoC.
-- `tests/test_h3_tessellate.py` — 19 unit tests for the new module (16 spec-listed + 1 cell-cap regression + 1 EMODnet cache test + 1 suffix helper).
+- `tests/test_h3_tessellate.py` — 20 unit tests for the new module (16 spec-listed + 1 cell-cap regression + 1 EMODnet cache test + 1 polygon-trust-on-bathy path + 1 suffix helper).
 - `tests/fixtures/create_model/tiny.geojson` — 1 small polygon, EPSG:4326.
 - `tests/fixtures/create_model/tiny_wgs84.gpkg` — 1 small polygon, EPSG:4326.
 - `tests/fixtures/create_model/tiny_3035.shp.zip` — 3 polygons, EPSG:3035 (tests dissolve + reproject).
@@ -1539,7 +1539,7 @@ The `_uploaded_preview` reactive is now scoped to the Shiny session (one per bro
 micromamba run -n shiny python -m pytest tests/test_h3_tessellate.py -v
 ```
 
-Expected: 19 tests pass (18 prior + 1 new suffix test).
+Expected: 20 tests pass (19 prior + 1 new suffix test).
 
 The reactive glue itself (`_on_create_model_preview`) is exercised by the manual Playwright smoke (Task 19.2).
 
@@ -1902,6 +1902,6 @@ No NC SCP needed for this release — Create Model doesn't change the landscape 
 | Manual Playwright smoke | Task 19 |
 | Documented limitations | Spec only — no implementation |
 
-**Test count actual:** +20 (was +25 in spec). 19 in `test_h3_tessellate.py`, 2 sidebar, 1 perf. Suite: 787 → 807.
+**Test count actual:** +23 (was +25 in spec). 20 in `test_h3_tessellate.py`, 2 sidebar, 1 perf. Suite: 787 → 810.
 
 All sections implemented.
