@@ -45,3 +45,20 @@ def test_polygon_trust_water_mask_flips_dry_to_wet():
     expected_depth = np.array([5.0, 1.0, 3.0, 2.0, 0.0], dtype=np.float32)
     np.testing.assert_array_equal(new_water, expected_water)
     np.testing.assert_array_equal(new_depth, expected_depth)
+
+
+import io
+from pathlib import Path
+
+FIXTURES = Path(__file__).resolve().parent / "fixtures" / "create_model"
+
+
+def test_parse_upload_geojson_round_trips():
+    bytes_ = (FIXTURES / "tiny.geojson").read_bytes()
+    geom = h3_tessellate.parse_upload(bytes_, ".geojson")
+    assert geom is not None
+    assert geom.geom_type in ("Polygon", "MultiPolygon")
+    # Round-trip: bbox should contain the centroid (21.21, 55.31).
+    minx, miny, maxx, maxy = geom.bounds
+    assert minx <= 21.21 <= maxx
+    assert miny <= 55.31 <= maxy

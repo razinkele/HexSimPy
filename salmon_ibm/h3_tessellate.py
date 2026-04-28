@@ -159,3 +159,56 @@ def polygon_trust_water_mask(
     new_depth = np.where(forced & (depth < 1.0),
                          np.float32(1.0), depth).astype(np.float32)
     return new_water, new_depth
+
+
+import io
+import zipfile
+from pathlib import Path
+
+import geopandas as gpd
+import shapely
+from shapely.ops import unary_union
+
+
+def parse_upload(file_bytes: bytes, suffix: str):
+    """Read shp.zip / gpkg / geojson → dissolve → reproject to WGS84.
+
+    Returns a single (Multi)Polygon geometry. Raises ValueError on
+    unparseable input, missing CRS, no geometry, non-polygon features,
+    or antimeridian crossing.
+
+    suffix: one of ".geojson", ".gpkg", ".shp.zip" (case-insensitive).
+    """
+    suffix = suffix.lower()
+    if suffix == ".geojson":
+        gdf = gpd.read_file(io.BytesIO(file_bytes))
+    else:
+        raise ValueError(f"Unsupported format: {suffix}")
+    return _dissolve_and_validate(gdf)
+
+
+def _dissolve_and_validate(gdf: gpd.GeoDataFrame):
+    """Common post-read processing: dissolve, reproject, validate."""
+    if gdf.empty or gdf.geometry.is_empty.all():
+        raise ValueError("File contains no polygon geometry.")
+    if gdf.crs is None:
+        raise ValueError(
+            "File has no CRS — please re-export with a defined coordinate system."
+        )
+    if not all(g.geom_type in ("Polygon", "MultiPolygon")
+               for g in gdf.geometry if not g.is_empty):
+        raise ValueError("File must contain Polygon or MultiPolygon features.")
+    gdf_wgs = gdf.to_crs("EPSG:4326")
+    geom = unary_union([g for g in gdf_wgs.geometry if not g.is_empty])
+    if geom.is_empty:
+        raise ValueError("File contains no polygon geometry.")
+    if not geom.is_valid:
+        from shapely.validation import make_valid
+        geom = make_valid(geom)
+    minx, _, maxx, _ = geom.bounds
+    if maxx - minx > 180:
+        raise ValueError(
+            "Polygons crossing the antimeridian aren't supported. "
+            "Split into eastern and western parts."
+        )
+    return geom
