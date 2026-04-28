@@ -1300,7 +1300,7 @@ git commit -m "feat(h3_tessellate): preview() bathymetry path with polygon-trust
 
 **Files:**
 - Modify: `ui/sidebar.py`
-- Test: `tests/test_sidebar.py`
+- Create: `tests/test_sidebar.py` (does not currently exist)
 
 - [ ] **Step 14.1: Read existing sidebar to confirm accordion pattern**
 
@@ -1351,9 +1351,9 @@ In `ui/sidebar.py`, find the closing of the "Landscape" accordion_panel (around 
             ),
 ```
 
-- [ ] **Step 14.3: Add wiring tests to `tests/test_sidebar.py`**
+- [ ] **Step 14.3: Create `tests/test_sidebar.py` with wiring tests**
 
-If `tests/test_sidebar.py` doesn't exist, create it. Otherwise append:
+The file does not exist today. Create it with:
 
 ```python
 def test_sidebar_includes_create_model_accordion():
@@ -1398,7 +1398,8 @@ git commit -m "feat(ui): Create Model accordion section in sidebar"
 
 **Files:**
 - Modify: `app.py`
-- Test: `tests/test_create_model_reactive.py`
+- Modify: `salmon_ibm/h3_tessellate.py` (add `suffix_from_filename`)
+- Modify: `tests/test_h3_tessellate.py` (one new test)
 
 - [ ] **Step 15.1: Decide test strategy — no `tests/test_create_model_reactive.py`**
 
@@ -1451,29 +1452,18 @@ Expected: PASS.
 
 - [ ] **Step 15.3: Add module-level helpers + reactive infrastructure inside `server()`**
 
-In `app.py`, **at module scope** (top of file, after the imports), add:
-
-```python
-def _uploaded_preview_default():
-    """Initial value for the _uploaded_preview reactive. Exposed as a
-    module-level function so tests can call it without instantiating a
-    Shiny session."""
-    return None
-```
-
-Add the necessary imports near the top of `app.py` if not already present:
+In `app.py`, ensure these imports are at the top of the file:
 
 ```python
 import os
 from salmon_ibm import h3_tessellate
 ```
 
-Now in `app.py` find `def server(input, output, session):` (around line 1176). Existing pattern shows reactives like `sim_state = reactive.Value(None)` at the top of `server()`. Add **inside `server()`**, near those existing reactives (e.g., right after `step_stats = reactive.Value(...)`):
+Then find `def server(input, output, session):` (around line 1176). Existing pattern shows reactives like `sim_state = reactive.Value(None)` at the top of `server()`. Add **inside `server()`**, near those existing reactives (e.g., right after `step_stats = reactive.Value(...)`):
 
 ```python
     # Create Model — ephemeral viewer-only preview.
-    # Module-level _uploaded_preview_default() is the testable initial value.
-    _uploaded_preview = reactive.Value(_uploaded_preview_default())
+    _uploaded_preview = reactive.Value(None)
 
     @reactive.effect
     @reactive.event(input.create_model_preview_btn)
@@ -1548,11 +1538,10 @@ git commit -m "feat(app): _uploaded_preview reactive + Preview button handler"
 
 ---
 
-### Task 16: `app.py` — mesh override + study-area reset
+### Task 16: `app.py` — `current_mesh()` reactive + study-area reset
 
 **Files:**
 - Modify: `app.py`
-- Test: `tests/test_create_model_reactive.py`
 
 - [ ] **Step 16.1: No new test (reactive glue covered by manual smoke)**
 
@@ -1604,7 +1593,7 @@ In `app.py`, **inside `def server(...)`**, alongside the `_on_create_model_previ
     def _on_landscape_change_reset_preview():
         """Clear the upload preview when the user picks a different study area."""
         if _uploaded_preview() is not None:
-            _uploaded_preview.set(_uploaded_preview_default())
+            _uploaded_preview.set(None)
 ```
 
 Note: matches the `ignore_none=False` pattern used by the existing `btn_reset` reactive at app.py:1186.
@@ -1630,7 +1619,6 @@ git commit -m "feat(app): current_mesh reactive + study-area-change reset for up
 
 **Files:**
 - Modify: `app.py`
-- Test: `tests/test_create_model_reactive.py`
 
 - [ ] **Step 17.1: No new test (reactive glue covered by manual smoke)**
 
