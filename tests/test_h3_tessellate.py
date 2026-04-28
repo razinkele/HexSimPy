@@ -161,6 +161,13 @@ def test_preview_with_bathy_off_returns_zero_depth():
     assert (mesh.depth == 0.0).all(), "with_bathy=False → depth all zero"
 
 
+def test_preview_caps_cell_count_at_max_cells():
+    bytes_ = (FIXTURES / "tiny.geojson").read_bytes()
+    geom = h3_tessellate.parse_upload(bytes_, ".geojson")
+    with pytest.raises(ValueError, match=r"would produce.*cells.*max"):
+        h3_tessellate.preview(geom, resolution=9, max_cells=1)
+
+
 def test_preview_mesh_dataclass_post_init_assertion():
     """All array fields must have matching length."""
     n = 5
