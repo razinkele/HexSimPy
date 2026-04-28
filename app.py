@@ -1323,6 +1323,41 @@ def server(input, output, session):
             _uploaded_preview.set(None)
 
     @reactive.effect
+    @reactive.event(input.create_model_with_bathy)
+    def _on_create_model_with_bathy_toggle():
+        """When the user toggles bathymetry, re-run preview() with new flag.
+        Re-uses the most recent FileInfo if available; otherwise no-op."""
+        mesh = _uploaded_preview()
+        if mesh is None:
+            return  # nothing to update yet
+        file_info = input.create_model_file()
+        if not file_info:
+            return
+        file = file_info[0]
+        name = file["name"]
+        bytes_ = open(file["datapath"], "rb").read()
+        suffix = h3_tessellate.suffix_from_filename(name)
+        if suffix is None:
+            return
+
+        res = int(input.create_model_resolution())
+        with_bathy = bool(input.create_model_with_bathy())
+        max_cells = int(os.environ.get("HEXSIM_PREVIEW_MAX_CELLS", "1000000"))
+
+        try:
+            geom = h3_tessellate.parse_upload(bytes_, suffix)
+            new_mesh = h3_tessellate.preview(
+                geom, resolution=res,
+                with_bathy=with_bathy, max_cells=max_cells)
+        except Exception as e:
+            ui.notification_show(
+                f"EMODnet bathymetry unavailable: {e}",
+                type="warning", duration=8)
+            ui.update_switch("create_model_with_bathy", value=False)
+            return
+        _uploaded_preview.set(new_mesh)
+
+    @reactive.effect
     @reactive.event(input.btn_reset, input.landscape, ignore_none=False)
     async def _init_sim():
         await _do_init_sim()
