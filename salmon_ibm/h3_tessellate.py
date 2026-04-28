@@ -276,7 +276,7 @@ def preview(
             [[float(x), float(y)] for x, y in part.exterior.coords]
         )
 
-    return PreviewMesh(
+    mesh = PreviewMesh(
         h3_ids=h3_ids,
         resolutions=resolutions,
         centroids=centroids,
@@ -286,6 +286,45 @@ def preview(
         water_mask=water_mask,
         polygon_outlines=polygon_outlines,
     )
+
+    if with_bathy:
+        bbox = polygon.bounds  # (minlon, minlat, maxlon, maxlat)
+        depth_grid, _ = _fetch_emodnet_for_bbox(bbox)
+        sampled = _sample_depth_at_centroids(depth_grid, bbox, mesh.centroids)
+        # Derive water_mask from EMODnet first (depth>0 → wet), then run
+        # polygon_trust to flip false-dry buffer cells back to wet. Without
+        # the EMODnet-first step the polygon-trust predicate
+        # `water_mask == 0` never fires and the override is a no-op.
+        initial_water = (sampled > 0).astype(np.uint8)
+        new_water, new_depth = polygon_trust_water_mask(
+            mesh.reach_id, initial_water, sampled
+        )
+        mesh.water_mask = new_water
+        mesh.depth = new_depth
+
+    return mesh
+
+
+def _sample_depth_at_centroids(
+    depth_grid: np.ndarray,
+    bbox: tuple[float, float, float, float],
+    centroids: np.ndarray,
+) -> np.ndarray:
+    """Nearest-neighbour sample from a regular lat/lon depth grid.
+
+    bbox: (minlon, minlat, maxlon, maxlat).
+    centroids: (n, 2) of (lat, lon) per cell.
+    Returns: (n,) float32. NaN values become 0.0.
+    """
+    h, w = depth_grid.shape
+    minlon, minlat, maxlon, maxlat = bbox
+    lats = centroids[:, 0]
+    lons = centroids[:, 1]
+    rows = np.clip(((maxlat - lats) / max(maxlat - minlat, 1e-9) * (h - 1)).astype(int), 0, h - 1)
+    cols = np.clip(((lons - minlon) / max(maxlon - minlon, 1e-9) * (w - 1)).astype(int), 0, w - 1)
+    sampled = depth_grid[rows, cols]
+    sampled = np.where(np.isnan(sampled), 0.0, sampled).astype(np.float32)
+    return sampled
 
 
 import hashlib

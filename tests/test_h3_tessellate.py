@@ -191,6 +191,23 @@ def test_fetch_emodnet_uses_disk_cache_when_present(tmp_path, monkeypatch):
     assert float(depth[0, 0]) == 5.0
 
 
+def test_polygon_trust_applied_on_bathy_path(monkeypatch):
+    """When with_bathy=True, the polygon-trust override must run so that
+    buffer cells whose EMODnet depth is 0 get water_mask=1 + depth=1."""
+    bytes_ = (FIXTURES / "tiny.geojson").read_bytes()
+    geom = h3_tessellate.parse_upload(bytes_, ".geojson")
+
+    def fake_fetch(bbox):
+        return np.zeros((10, 10), dtype=np.float32), bbox
+    monkeypatch.setattr(h3_tessellate, "_fetch_emodnet_for_bbox", fake_fetch)
+
+    mesh = h3_tessellate.preview(geom, resolution=9, with_bathy=True)
+    assert (mesh.water_mask == 1).all()
+    assert (mesh.depth >= 1.0).all(), (
+        "polygon-trust must force depth >= 1.0 for tagged cells"
+    )
+
+
 def test_preview_caps_cell_count_at_max_cells():
     bytes_ = (FIXTURES / "tiny.geojson").read_bytes()
     geom = h3_tessellate.parse_upload(bytes_, ".geojson")
