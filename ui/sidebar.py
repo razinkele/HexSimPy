@@ -53,6 +53,40 @@ def sidebar_panel():
                 _hint("Parameter changes take effect on Reset."),
             ),
             ui.accordion_panel(
+                "Create Model",
+                ui.input_file(
+                    "create_model_file",
+                    "Polygon file",
+                    accept=[".shp.zip", ".gpkg", ".geojson"],
+                    multiple=False,
+                ),
+                ui.input_radio_buttons(
+                    "create_model_resolution",
+                    "H3 resolution",
+                    choices={
+                        "8": "8 (~530 m)",
+                        "9": "9 (~200 m)",
+                        "10": "10 (~76 m)",
+                        "11": "11 (~28 m)",
+                    },
+                    selected="9",
+                    inline=True,
+                ),
+                ui.input_switch(
+                    "create_model_with_bathy",
+                    "Show bathymetry",
+                    value=False,
+                ),
+                ui.input_action_button(
+                    "create_model_preview_btn",
+                    "Preview",
+                    class_="btn-primary",
+                ),
+                ui.output_text("create_model_status"),
+                _hint("Ephemeral preview: lives only for this session."),
+                value="create_model",
+            ),
+            ui.accordion_panel(
                 "Run",
                 ui.div(
                     ui.input_action_button("btn_run", "Run", class_="btn-run"),
