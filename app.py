@@ -894,6 +894,61 @@ viewer_map_widget = MapWidget(
     parameters={"clearColor": [11 / 255, 31 / 255, 44 / 255, 1]},
 )
 
+# ── Create Model preview-layer builder ───────────────────────────────────────
+
+
+def _build_preview_h3_layer(mesh) -> list:
+    """Build deck.gl layers for a Create Model upload preview.
+
+    No env-field sampling, no agent rendering — just an H3HexagonLayer
+    coloured by depth (if mesh.depth has positive values) or uniform
+    light blue (if depth is all zero), plus a polygon overlay for the
+    source polygon outlines.
+    """
+    n = len(mesh.h3_ids)
+    if mesh.depth.max() > 0:
+        # Bathymetry-on path: deeper → darker blue.
+        d_max = max(float(mesh.depth.max()), 1.0)
+        d_norm = np.clip(mesh.depth / d_max, 0, 1)
+        rgb = np.stack([
+            (200 - 150 * d_norm).astype(np.uint8),
+            (220 - 80 * d_norm).astype(np.uint8),
+            np.full(n, 240, dtype=np.uint8),
+        ], axis=1)
+    else:
+        rgb = np.tile(np.array([158, 216, 227], dtype=np.uint8), (n, 1))
+
+    data_rows = [
+        {
+            "hex": h3.int_to_str(int(mesh.h3_ids[k])),
+            "color": [int(rgb[k, 0]), int(rgb[k, 1]), int(rgb[k, 2]), 220],
+        }
+        for k in range(n)
+    ]
+    layers = [h3_hexagon_layer(
+        "water",
+        data=data_rows,
+        getHexagon="@@=d.hex",
+        getFillColor="@@=d.color",
+        filled=True,
+        stroked=False,
+        pickable=True,
+    )]
+    for i, ring in enumerate(mesh.polygon_outlines):
+        layers.append(polygon_layer(
+            f"polygon-uploaded-{i}",
+            data=[{"polygon": ring}],
+            getPolygon="@@=d.polygon",
+            getFillColor=[120, 180, 160, 36],
+            getLineColor=[120, 180, 160, 220],
+            lineWidthMinPixels=2,
+            stroked=True,
+            filled=True,
+            pickable=False,
+        ))
+    return layers
+
+
 # ── HexSim workspace discovery ───────────────────────────────────────────────
 
 
@@ -1238,6 +1293,34 @@ def server(input, output, session):
         if mesh is None:
             return "No preview loaded."
         return f"Preview: {len(mesh.h3_ids):,} cells at res {mesh.resolutions[0]}."
+
+    @reactive.effect
+    @reactive.event(_uploaded_preview)
+    async def _push_create_model_preview():
+        """When _uploaded_preview is set (or cleared), push preview layers
+        to the main map widget. Setting to None falls back to the sim layers
+        on the next sim tick or landscape change."""
+        mesh = _uploaded_preview()
+        if mesh is None:
+            return
+        try:
+            layers = _build_preview_h3_layer(mesh)
+            await map_widget.update(
+                session,
+                layers=layers,
+                views=[map_view(controller=True)],
+                widgets=[loading_widget(), reset_view_widget()],
+            )
+        except Exception as e:
+            ui.notification_show(
+                f"Failed to render preview: {e}", type="error", duration=8)
+
+    @reactive.effect
+    @reactive.event(input.landscape)
+    def _on_landscape_change_reset_preview():
+        """Clear the upload preview when the user picks a different study area."""
+        if _uploaded_preview() is not None:
+            _uploaded_preview.set(None)
 
     @reactive.effect
     @reactive.event(input.btn_reset, input.landscape, ignore_none=False)
@@ -2009,6 +2092,10 @@ def server(input, output, session):
     async def _full_update(sim, landscape=None):
         """Send everything: positions + colors + agents (~3 MB)."""
         nonlocal _cached_water_n, _cached_water_layer
+        # Create Model upload preview takes precedence — when a preview
+        # is loaded, leave its layers on the map and skip the sim flow.
+        if _uploaded_preview() is not None:
+            return
         z, cscale = _resolve_field(sim)
         idx = _water_idx(sim)
         is_h3 = hasattr(sim.mesh, "resolution")
