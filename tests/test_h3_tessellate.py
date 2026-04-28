@@ -133,3 +133,30 @@ def test_parse_upload_raises_on_antimeridian_crossing():
     gdf = gpd.GeoDataFrame(geometry=[poly], crs="EPSG:4326")
     with pytest.raises(ValueError, match="antimeridian"):
         h3_tessellate._dissolve_and_validate(gdf)
+
+
+def test_preview_mesh_dataclass_post_init_assertion():
+    """All array fields must have matching length."""
+    n = 5
+    pm = h3_tessellate.PreviewMesh(
+        h3_ids=np.zeros(n, dtype=np.uint64),
+        resolutions=np.full(n, 9, dtype=np.int8),
+        centroids=np.zeros((n, 2)),
+        reach_id=np.zeros(n, dtype=np.int8),
+        reach_names=["uploaded_polygon"],
+        depth=np.zeros(n, dtype=np.float32),
+        water_mask=np.ones(n, dtype=np.uint8),
+        polygon_outlines=[],
+    )
+    assert pm.h3_ids.shape == (n,)
+    with pytest.raises(AssertionError):
+        h3_tessellate.PreviewMesh(
+            h3_ids=np.zeros(n, dtype=np.uint64),
+            resolutions=np.full(n - 1, 9, dtype=np.int8),
+            centroids=np.zeros((n, 2)),
+            reach_id=np.zeros(n, dtype=np.int8),
+            reach_names=["uploaded_polygon"],
+            depth=np.zeros(n, dtype=np.float32),
+            water_mask=np.ones(n, dtype=np.uint8),
+            polygon_outlines=[],
+        )

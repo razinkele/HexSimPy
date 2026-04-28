@@ -163,11 +163,38 @@ def polygon_trust_water_mask(
 
 import io
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 
 import geopandas as gpd
 import shapely
 from shapely.ops import unary_union
+
+
+@dataclass
+class PreviewMesh:
+    """Duck-typed mesh produced by `preview()` for the Create Model
+    feature. The existing rendering machinery in app.py reads these
+    attributes to render hex layers; no subclass of H3MultiResMesh
+    required.
+    """
+    h3_ids: np.ndarray
+    resolutions: np.ndarray
+    centroids: np.ndarray
+    reach_id: np.ndarray
+    reach_names: list[str]
+    depth: np.ndarray
+    water_mask: np.ndarray
+    polygon_outlines: list
+
+    def __post_init__(self):
+        n = len(self.h3_ids)
+        for name in ("resolutions", "centroids", "reach_id",
+                     "depth", "water_mask"):
+            arr = getattr(self, name)
+            assert len(arr) == n, (
+                f"PreviewMesh.{name} has length {len(arr)}, expected {n}"
+            )
 
 
 def parse_upload(file_bytes: bytes, suffix: str):
