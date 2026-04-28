@@ -161,6 +161,36 @@ def test_preview_with_bathy_off_returns_zero_depth():
     assert (mesh.depth == 0.0).all(), "with_bathy=False → depth all zero"
 
 
+def test_fetch_emodnet_uses_disk_cache_when_present(tmp_path, monkeypatch):
+    """If a cache file exists for the bbox key, _fetch_emodnet_for_bbox
+    must read from disk and not hit the network."""
+    import hashlib
+    import rasterio
+    import rasterio.transform
+
+    monkeypatch.setattr(h3_tessellate, "_EMODNET_CACHE_DIR", tmp_path)
+
+    bbox = (21.0, 55.0, 21.5, 55.5)
+    key = hashlib.sha1(repr(bbox).encode()).hexdigest()[:16]
+    cache_path = tmp_path / f"emodnet_{key}.tif"
+
+    with rasterio.open(
+        cache_path, "w",
+        driver="GTiff", height=1, width=1, count=1, dtype="float32",
+        crs="EPSG:4326",
+        transform=rasterio.transform.from_origin(21.0, 55.5, 0.5, 0.5),
+    ) as dst:
+        dst.write(np.array([[-5.0]], dtype=np.float32), 1)
+
+    def must_not_call(url, **kwargs):
+        raise AssertionError("Cache should be used; should not hit network.")
+    monkeypatch.setattr("requests.get", must_not_call)
+
+    depth, _ = h3_tessellate._fetch_emodnet_for_bbox(bbox)
+    assert depth.shape == (1, 1)
+    assert float(depth[0, 0]) == 5.0
+
+
 def test_preview_caps_cell_count_at_max_cells():
     bytes_ = (FIXTURES / "tiny.geojson").read_bytes()
     geom = h3_tessellate.parse_upload(bytes_, ".geojson")

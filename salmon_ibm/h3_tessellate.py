@@ -288,6 +288,50 @@ def preview(
     )
 
 
+import hashlib
+
+_EMODNET_WCS_URL = (
+    "https://ows.emodnet-bathymetry.eu/wcs"
+    "?service=WCS&version=2.0.1&request=GetCoverage"
+    "&CoverageId=emodnet:mean"
+    "&format=image/tiff"
+)
+_EMODNET_CACHE_DIR = Path(".superpowers/cache")
+
+
+def _fetch_emodnet_for_bbox(
+    bbox: tuple[float, float, float, float],
+) -> tuple[np.ndarray, tuple[float, float, float, float]]:
+    """Fetch EMODnet bathymetry for the bbox. Cached to .superpowers/cache/.
+
+    Returns (depth_grid_2d, bbox_actual). Depth values are POSITIVE
+    metres; cells outside coverage are NaN.
+
+    Raises requests.RequestException on network failure (caller should
+    catch and surface a UI warning).
+    """
+    import requests
+    import rasterio
+
+    _EMODNET_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    key = hashlib.sha1(repr(bbox).encode()).hexdigest()[:16]
+    cache_path = _EMODNET_CACHE_DIR / f"emodnet_{key}.tif"
+    if not cache_path.exists():
+        minlon, minlat, maxlon, maxlat = bbox
+        url = (
+            f"{_EMODNET_WCS_URL}"
+            f"&subset=Long({minlon},{maxlon})"
+            f"&subset=Lat({minlat},{maxlat})"
+        )
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        cache_path.write_bytes(resp.content)
+    with rasterio.open(cache_path) as src:
+        elev = src.read(1).astype(np.float32)
+        depth = np.where(np.isnan(elev) | (elev > 0), np.nan, -elev)
+    return depth, bbox
+
+
 def _read_shp_zip(file_bytes: bytes) -> gpd.GeoDataFrame:
     """Extract a zipped shapefile bundle to a temp dir and read it.
 
