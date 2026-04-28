@@ -28,3 +28,20 @@ def test_bridge_components_connects_two_pieces():
     out = h3_tessellate.bridge_components([a, b], resolution=11, max_bridge_len=10)
     assert a in out and b in out
     assert len(out) > 2, "bridge should add intermediate cells between two distance-3 components"
+
+
+def test_polygon_trust_water_mask_flips_dry_to_wet():
+    # 5 cells: cells 0-3 tagged with reach_id=0; cell 4 untagged.
+    # cells 1 and 4 are "dry" per EMODnet (depth=0, water_mask=0).
+    # Trust override should flip cell 1 (tagged AND dry) but leave cell 4.
+    reach_id = np.array([0, 0, 0, 0, -1], dtype=np.int8)
+    water_mask = np.array([1, 0, 1, 1, 0], dtype=np.uint8)
+    depth = np.array([5.0, 0.0, 3.0, 2.0, 0.0], dtype=np.float32)
+
+    new_water, new_depth = h3_tessellate.polygon_trust_water_mask(
+        reach_id, water_mask, depth)
+
+    expected_water = np.array([1, 1, 1, 1, 0], dtype=np.uint8)  # cell 1 flipped, cell 4 left
+    expected_depth = np.array([5.0, 1.0, 3.0, 2.0, 0.0], dtype=np.float32)
+    np.testing.assert_array_equal(new_water, expected_water)
+    np.testing.assert_array_equal(new_depth, expected_depth)

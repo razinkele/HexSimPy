@@ -133,3 +133,29 @@ def bridge_components(
         print(f"  bridge-cell pass: added {bridges_added} cells across "
               f"{len(components) - 1} component gaps")
     return sorted(cell_set)
+
+
+def polygon_trust_water_mask(
+    reach_id_arr: np.ndarray,
+    water_mask: np.ndarray,
+    depth: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Force water_mask=1 and depth>=1.0 where reach_id != -1.
+
+    The v1.6.1 fix (commit d187ac9): tessellate_reach buffers each
+    polygon by half-a-cell-edge to ensure narrow channels get cells.
+    The buffer captures cells whose centroids sit up to ~14 m beyond
+    the polygon edge — EMODnet reports many of those as dry.  Without
+    this override, ~16% of tagged cells (47-87% of river cells) end
+    up with reach_id != -1 but water_mask=0; the viewer drops them
+    silently.
+
+    Returns (new_water_mask, new_depth) — both arrays modified.
+
+    See tests/test_h3_grid_quality.py::test_reach_id_implies_water_mask.
+    """
+    forced = (reach_id_arr != -1) & (water_mask == 0)
+    new_water = np.where(forced, np.uint8(1), water_mask).astype(np.uint8)
+    new_depth = np.where(forced & (depth < 1.0),
+                         np.float32(1.0), depth).astype(np.float32)
+    return new_water, new_depth
