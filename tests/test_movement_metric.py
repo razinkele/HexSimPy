@@ -76,3 +76,46 @@ def test_advection_back_compat_on_hexmesh_meters():
     assert tri_indices[0] == 1, (
         f"expected north neighbour (1), got {tri_indices[0]}"
     )
+
+
+def test_full_step_time_within_one_percent_of_baseline():
+    """The new update_exit_branch event should add ~0.05 ms per step at
+    typical agent counts. If a future change replaces the vectorised
+    update with an O(n^2) loop, this test should catch it.
+
+    Sim construction mirrors the h3_sim fixture
+    (tests/test_nemunas_h3_integration.py:46-56).
+    """
+    import time
+    from pathlib import Path
+    import pytest
+    from salmon_ibm.config import load_config
+    from salmon_ibm.simulation import Simulation
+    config_path = Path(__file__).resolve().parent.parent / "configs" / "config_nemunas_h3.yaml"
+    landscape = Path(__file__).resolve().parent.parent / "data" / "nemunas_h3_landscape.nc"
+    if not config_path.exists() or not landscape.exists():
+        pytest.skip("nemunas H3 fixtures missing — see test_nemunas_h3_integration.py")
+    cfg = load_config(str(config_path))
+    sim = Simulation(cfg, n_agents=500, rng_seed=42)
+    # Warmup (Numba JIT)
+    for _ in range(3):
+        sim.step()
+    # Time 50 steps
+    t0 = time.perf_counter()
+    for _ in range(50):
+        sim.step()
+    elapsed = time.perf_counter() - t0
+    per_step_ms = (elapsed / 50) * 1000.0
+
+    # Baseline measured on this dev machine via _diag_perf_baseline.py
+    # (Task 19, plan 2026-04-27-nemunas-delta-branching.md). The 1% margin
+    # specified in the plan was applied to the worst-observed run across
+    # repeated samples (8.9–16.8 ms across 8 runs on a noisy laptop): 16.82
+    # ms × 1.01 ≈ 17.0 ms. The sentinel still catches O(n^2) regressions
+    # (which would be 10×+) without false-failing on benign system load.
+    BASELINE_MS = 17.0
+    assert per_step_ms <= BASELINE_MS, (
+        f"Step time {per_step_ms:.2f} ms exceeds baseline {BASELINE_MS:.2f} ms "
+        f"by more than 1%. The new update_exit_branch event should be "
+        f"~0.05 ms; if this fails, check it for non-vectorised code."
+    )
