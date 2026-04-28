@@ -185,9 +185,35 @@ def parse_upload(file_bytes: bytes, suffix: str):
     elif suffix == ".gpkg":
         # GPKG is a SQLite container; gpd.read_file accepts BytesIO directly.
         gdf = gpd.read_file(io.BytesIO(file_bytes), layer=0)
+    elif suffix == ".shp.zip":
+        gdf = _read_shp_zip(file_bytes)
     else:
         raise ValueError(f"Unsupported format: {suffix}")
     return _dissolve_and_validate(gdf)
+
+
+def _read_shp_zip(file_bytes: bytes) -> gpd.GeoDataFrame:
+    """Extract a zipped shapefile bundle to a temp dir and read it.
+
+    The zip must contain the .shp + sidecar files (.dbf, .shx, .prj).
+    Raises ValueError if .dbf or .shx are missing."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+            members = zf.namelist()
+            exts = {Path(m).suffix.lower() for m in members}
+            if ".shp" not in exts:
+                raise ValueError("Zip does not contain a .shp file.")
+            if ".dbf" not in exts or ".shx" not in exts:
+                raise ValueError(
+                    "Shapefile bundle missing .dbf or .shx — re-export "
+                    "the full bundle."
+                )
+            zf.extractall(tmpdir)
+        shp_files = list(Path(tmpdir).glob("**/*.shp"))
+        if not shp_files:
+            raise ValueError("No .shp file found after extraction.")
+        return gpd.read_file(shp_files[0])
 
 
 def _dissolve_and_validate(gdf: gpd.GeoDataFrame):

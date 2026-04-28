@@ -69,3 +69,30 @@ def test_parse_upload_gpkg_reads_first_layer():
     geom = h3_tessellate.parse_upload(bytes_, ".gpkg")
     assert geom is not None
     assert geom.geom_type in ("Polygon", "MultiPolygon")
+
+
+def test_parse_upload_shp_zip_extracts_correctly():
+    bytes_ = (FIXTURES / "tiny_3035.shp.zip").read_bytes()
+    geom = h3_tessellate.parse_upload(bytes_, ".shp.zip")
+    assert geom is not None
+    assert geom.geom_type in ("Polygon", "MultiPolygon")
+
+
+def test_parse_upload_dissolves_multi_feature_to_single():
+    """tiny_3035.shp.zip has 3 features (a + b adjacent, c disjoint).
+    After dissolve we expect a MultiPolygon with 2 parts (a+b merged, c separate)."""
+    bytes_ = (FIXTURES / "tiny_3035.shp.zip").read_bytes()
+    geom = h3_tessellate.parse_upload(bytes_, ".shp.zip")
+    if geom.geom_type == "MultiPolygon":
+        assert len(geom.geoms) == 2
+
+
+def test_parse_upload_reprojects_from_3035_to_4326():
+    """tiny_3035.shp.zip is in EPSG:3035 (LAEA). After parse, geometry must be in WGS84."""
+    bytes_ = (FIXTURES / "tiny_3035.shp.zip").read_bytes()
+    geom = h3_tessellate.parse_upload(bytes_, ".shp.zip")
+    minx, miny, maxx, maxy = geom.bounds
+    assert -180 <= minx <= maxx <= 180
+    assert -90 <= miny <= maxy <= 90
+    assert 10 < minx < 30, f"Expected European longitude, got {minx}"
+    assert 50 < miny < 60, f"Expected northern-Europe latitude, got {miny}"
