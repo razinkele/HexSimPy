@@ -135,6 +135,32 @@ def test_parse_upload_raises_on_antimeridian_crossing():
         h3_tessellate._dissolve_and_validate(gdf)
 
 
+def test_preview_returns_consistent_dataclass():
+    bytes_ = (FIXTURES / "tiny.geojson").read_bytes()
+    geom = h3_tessellate.parse_upload(bytes_, ".geojson")
+    mesh = h3_tessellate.preview(geom, resolution=9)
+    assert isinstance(mesh, h3_tessellate.PreviewMesh)
+    assert mesh.h3_ids.dtype == np.uint64
+    assert mesh.water_mask.dtype == np.uint8
+    assert mesh.depth.dtype == np.float32
+
+
+def test_preview_water_mask_all_ones():
+    bytes_ = (FIXTURES / "tiny.geojson").read_bytes()
+    geom = h3_tessellate.parse_upload(bytes_, ".geojson")
+    mesh = h3_tessellate.preview(geom, resolution=9)
+    assert (mesh.water_mask == 1).all(), (
+        "By construction, all cells in the upload preview are water"
+    )
+
+
+def test_preview_with_bathy_off_returns_zero_depth():
+    bytes_ = (FIXTURES / "tiny.geojson").read_bytes()
+    geom = h3_tessellate.parse_upload(bytes_, ".geojson")
+    mesh = h3_tessellate.preview(geom, resolution=9, with_bathy=False)
+    assert (mesh.depth == 0.0).all(), "with_bathy=False → depth all zero"
+
+
 def test_preview_mesh_dataclass_post_init_assertion():
     """All array fields must have matching length."""
     n = 5

@@ -219,6 +219,75 @@ def parse_upload(file_bytes: bytes, suffix: str):
     return _dissolve_and_validate(gdf)
 
 
+def preview(
+    polygon,
+    resolution: int,
+    *,
+    with_bathy: bool = False,
+    max_cells: int = 1_000_000,
+) -> PreviewMesh:
+    """Tessellate polygon at H3 resolution → PreviewMesh ready to render.
+
+    Geometry-only when with_bathy=False (depth all zero, water_mask all 1).
+    See Task 13 for the with_bathy=True branch.
+
+    Raises ValueError if would-be cell count exceeds max_cells.
+    """
+    cells = tessellate_reach(polygon, resolution)
+    if not cells:
+        raise ValueError(
+            f"Polygon is smaller than a single H3 cell at res {resolution}. "
+            f"Try a finer resolution."
+        )
+    if len(cells) > max_cells:
+        raise ValueError(
+            f"Tessellation at res {resolution} would produce "
+            f"{len(cells):,} cells (max {max_cells:,}). "
+            f"Pick a coarser resolution or smaller polygon."
+        )
+    cells = bridge_components(cells, resolution)
+    if len(cells) > max_cells:
+        raise ValueError(
+            f"Tessellation at res {resolution} produced {len(cells):,} cells "
+            f"after bridging (max {max_cells:,}). "
+            f"Pick a coarser resolution or smaller polygon."
+        )
+
+    n = len(cells)
+    h3_ids = np.array([h3.str_to_int(c) for c in cells], dtype=np.uint64)
+    centroids = np.array(
+        [h3.cell_to_latlng(c) for c in cells], dtype=np.float64
+    )
+    resolutions = np.full(n, resolution, dtype=np.int8)
+    reach_id = np.zeros(n, dtype=np.int8)
+    reach_names = ["uploaded_polygon"]
+    water_mask = np.ones(n, dtype=np.uint8)
+    depth = np.zeros(n, dtype=np.float32)
+
+    if isinstance(polygon, MultiPolygon):
+        parts = list(polygon.geoms)
+    else:
+        parts = [polygon]
+    polygon_outlines = []
+    for part in parts:
+        if part.is_empty:
+            continue
+        polygon_outlines.append(
+            [[float(x), float(y)] for x, y in part.exterior.coords]
+        )
+
+    return PreviewMesh(
+        h3_ids=h3_ids,
+        resolutions=resolutions,
+        centroids=centroids,
+        reach_id=reach_id,
+        reach_names=reach_names,
+        depth=depth,
+        water_mask=water_mask,
+        polygon_outlines=polygon_outlines,
+    )
+
+
 def _read_shp_zip(file_bytes: bytes) -> gpd.GeoDataFrame:
     """Extract a zipped shapefile bundle to a temp dir and read it.
 
