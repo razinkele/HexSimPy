@@ -119,3 +119,37 @@ def test_full_step_time_within_one_percent_of_baseline():
         f"by more than 1%. The new update_exit_branch event should be "
         f"~0.05 ms; if this fails, check it for non-vectorised code."
     )
+
+
+def test_h3_tessellate_extract_no_perf_regression():
+    """tessellate_reach must complete a small fixture polygon in
+    BASELINE_MS or less. Catches accidental over-instrumentation
+    introduced by the extract refactor (Task 4 of plan
+    2026-04-28-create-model-feature.md)."""
+    import time
+    from pathlib import Path
+    from salmon_ibm import h3_tessellate
+
+    fix = Path(__file__).resolve().parent / "fixtures" / "create_model" / "tiny.geojson"
+    if not fix.exists():
+        import pytest
+        pytest.skip("tiny.geojson fixture missing")
+    bytes_ = fix.read_bytes()
+    geom = h3_tessellate.parse_upload(bytes_, ".geojson")
+    for _ in range(3):
+        h3_tessellate.tessellate_reach(geom, resolution=9)
+    t0 = time.perf_counter()
+    for _ in range(50):
+        h3_tessellate.tessellate_reach(geom, resolution=9)
+    elapsed = time.perf_counter() - t0
+    per_call_ms = (elapsed / 50) * 1000.0
+
+    # Measured baseline ~2.75 ms on a ThinkPad X1 Gen 11. We pick 10.0 ms
+    # (~3.6×) so the test catches a real regression (e.g., 10× slowdown
+    # from accidental over-instrumentation) without false-failing under
+    # benign system load.
+    BASELINE_MS = 10.0
+    assert per_call_ms <= BASELINE_MS, (
+        f"tessellate_reach took {per_call_ms:.2f} ms (baseline {BASELINE_MS:.2f}); "
+        f"check for accidental over-instrumentation in the refactor."
+    )
