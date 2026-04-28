@@ -4,7 +4,7 @@
 
 **Goal:** Add a "Create Model" sidebar accordion that lets users upload `shp.zip` / `gpkg` / `geojson` polygon files and preview them as an H3 tessellation overlaid on the map (viewer-only ephemeral, with an optional bathymetry-shading toggle).
 
-**Architecture:** Extract-first refactor. `tessellate_reach`, `bridge_components`, and the v1.6.1 `polygon_trust_water_mask` logic move from `scripts/build_h3_multires_landscape.py` into a new library module `salmon_ibm/h3_tessellate.py`. The build script becomes a thin wrapper (no behavior change). The new sidebar UI calls `h3_tessellate.parse_upload` + `h3_tessellate.preview` and stores the result in a Shiny reactive that the existing mesh-rendering pipeline duck-types.
+**Architecture:** Extract-first refactor. `tessellate_reach`, `bridge_components`, and the v1.6.1 `polygon_trust_water_mask` logic move from `scripts/build_h3_multires_landscape.py` into a new library module `salmon_ibm/h3_tessellate.py`. The build script becomes a thin wrapper (no behavior change). The new sidebar UI calls `h3_tessellate.parse_upload` + `h3_tessellate.preview` and stores the result in a Shiny reactive `_uploaded_preview`. When set, a parallel deck.gl layer builder (`_build_preview_h3_layer`) renders the upload directly, short-circuiting the existing `sim.mesh`-coupled flow (env-field sampling, agent rendering, color scales) — those paths stay untouched.
 
 **Tech Stack:** Python 3.10+ via micromamba env `shiny`; `geopandas` + `shapely` + `pyproj` (already used by build pipeline); `h3` (already a dep); Shiny for Python (UI). No new third-party deps.
 
@@ -900,12 +900,13 @@ class PreviewMesh:
     """
     h3_ids: np.ndarray              # uint64
     resolutions: np.ndarray         # int8
-    centroids: np.ndarray           # (n, 2) lat/lon
+    centroids: np.ndarray           # (n, 2) lat, lon (h3.cell_to_latlng order)
     reach_id: np.ndarray            # int8 — uniform 0 (single dissolved reach)
     reach_names: list[str]          # ["uploaded_polygon"]
     depth: np.ndarray               # float32
     water_mask: np.ndarray          # uint8 — uniform 1 by construction
-    polygon_outlines: list          # list of (lat, lon) loops for PolygonLayer
+    polygon_outlines: list          # list[list[list[float]]] — rings of [lon, lat]
+                                    # pairs, matching app.py:_polygon_to_rings format
 
     def __post_init__(self):
         n = len(self.h3_ids)
@@ -992,6 +993,7 @@ def preview(
             f"Polygon is smaller than a single H3 cell at res {resolution}. "
             f"Try a finer resolution."
         )
+    # Pre-bridge cap check — fast feedback for clearly oversized polygons.
     if len(cells) > max_cells:
         raise ValueError(
             f"Tessellation at res {resolution} would produce "
@@ -999,6 +1001,15 @@ def preview(
             f"Pick a coarser resolution or smaller polygon."
         )
     cells = bridge_components(cells, resolution)
+    # Post-bridge cap check — bridge_components can add cells (rare but
+    # possible if the polygon has many far-apart components). Re-check
+    # so the final cell count is genuinely <= max_cells.
+    if len(cells) > max_cells:
+        raise ValueError(
+            f"Tessellation at res {resolution} produced {len(cells):,} cells "
+            f"after bridging (max {max_cells:,}). "
+            f"Pick a coarser resolution or smaller polygon."
+        )
 
     n = len(cells)
     h3_ids = np.array([h3.str_to_int(c) for c in cells], dtype=np.uint64)
@@ -1011,8 +1022,11 @@ def preview(
     water_mask = np.ones(n, dtype=np.uint8)
     depth = np.zeros(n, dtype=np.float32)
 
-    # Polygon outlines for the PolygonLayer overlay (same lat/lon order as
-    # the existing inSTREAM polygon overlay machinery).
+    # Polygon outlines for the PolygonLayer overlay. Format matches the
+    # existing _polygon_to_rings helper in app.py:474 — a list of rings,
+    # each ring being a list of [lon, lat] floats. shapely's
+    # `part.exterior.coords` yields (x, y) = (lon, lat) tuples, so the
+    # list comprehension preserves the (lon, lat) order.
     if isinstance(polygon, MultiPolygon):
         parts = list(polygon.geoms)
     else:
@@ -1022,7 +1036,7 @@ def preview(
         if part.is_empty:
             continue
         polygon_outlines.append(
-            [(y, x) for x, y in part.exterior.coords]
+            [[float(x), float(y)] for x, y in part.exterior.coords]
         )
 
     return PreviewMesh(
@@ -1538,10 +1552,12 @@ git commit -m "feat(app): _uploaded_preview reactive + Preview button handler"
 
 ---
 
-### Task 16: `app.py` — `current_mesh()` reactive + study-area reset
+### Task 16: `app.py` — preview layer builder + study-area reset
 
 **Files:**
 - Modify: `app.py`
+
+This task adds a parallel deck.gl layer builder for the upload preview that short-circuits the sim.mesh-based rendering flow. The duck-typed-mesh approach in early drafts didn't work because `sim.mesh` is threaded through env-field sampling, color scaling, and agent-render paths — a naive substitution breaks them.
 
 - [ ] **Step 16.1: No new test (reactive glue covered by manual smoke)**
 
@@ -1549,39 +1565,80 @@ This task is implementation-only. The existing `tests/test_h3_grid_quality.py` r
 
 - [ ] **Step 16.2: Modify the existing layer-build code to honor `_uploaded_preview`**
 
-**Important:** the existing app.py does NOT have a single mesh reactive; mesh is accessed via `sim.mesh` from the simulation object (search for `sim.mesh`, esp. lines around 1453 / 1554 where `mesh = sim.mesh` is assigned for layer construction).
+**Important:** the existing app.py threads `sim.mesh` through env-field sampling, color-scaling, and agent-render code (e.g., line 1453 in agent positions, line 1970 in the H3 layer block, plus `_build_h3_data_rows` at line 795 reads `mesh.h3_ids`, `mesh.reach_id`, etc., AND `sim.env.fields` separately). A naive duck-type swap doesn't work cleanly.
 
-The cleanest approach: introduce a new reactive helper `current_mesh()` inside `server()` and update the layer-build sites to use it.
+**Approach: parallel layer-build for the upload preview.** Instead of trying to re-route the existing `sim.mesh`-coupled flow, build a **separate, simpler** layer set when `_uploaded_preview` is non-None, and short-circuit the existing `is_h3` branch at line 1964ish.
 
-Add this `@reactive.calc` inside `server()` (alongside the other Create Model reactives from Task 15.3):
-
-```python
-    @reactive.calc
-    def current_mesh():
-        """The mesh used for hex/polygon layer rendering.
-
-        Create Model upload preview takes precedence over the
-        simulation mesh; otherwise fall through to sim.mesh from the
-        active study area.
-        """
-        preview = _uploaded_preview()
-        if preview is not None:
-            return preview
-        sim = sim_state.get()
-        if sim is None:
-            return None
-        return sim.mesh
-```
-
-Then find each `mesh = sim.mesh` line in app.py (start with line 1453 and line 1554) and replace with:
+Add this helper at module scope in `app.py` (after `_build_h3_data_rows` at line ~795):
 
 ```python
-            mesh = current_mesh()
-            if mesh is None:
-                return  # nothing to render yet
+def _build_preview_h3_layer(mesh) -> list[dict]:
+    """Build deck.gl layers for a Create Model upload preview.
+
+    No env-field sampling, no agent rendering — just an H3HexagonLayer
+    coloured by depth (if mesh.depth has positive values) or uniform
+    light blue (if depth is all zero), plus PolygonLayer overlays for
+    the source polygon outlines.
+    """
+    n = len(mesh.h3_ids)
+    if mesh.depth.max() > 0:
+        # Bathymetry-on path: shade by depth (deeper = darker blue).
+        d_norm = np.clip(mesh.depth / max(mesh.depth.max(), 1.0), 0, 1)
+        rgb = np.stack([
+            (200 - 150 * d_norm).astype(np.uint8),  # R
+            (220 - 80 * d_norm).astype(np.uint8),   # G
+            (240).astype(np.uint8) * np.ones(n, dtype=np.uint8),  # B
+        ], axis=1)
+    else:
+        rgb = np.tile(np.array([158, 216, 227], dtype=np.uint8), (n, 1))
+
+    import h3 as _h3
+    data_rows = [
+        {
+            "hex": _h3.int_to_str(int(mesh.h3_ids[k])),
+            "color": [int(rgb[k, 0]), int(rgb[k, 1]), int(rgb[k, 2]), 220],
+        }
+        for k in range(n)
+    ]
+    layers = [{
+        "@@type": "H3HexagonLayer",
+        "id": "water",
+        "data": data_rows,
+        "getHexagon": "@@=d.hex",
+        "getFillColor": "@@=d.color",
+        "filled": True,
+        "stroked": False,
+        "pickable": True,
+    }]
+    # Polygon outlines (matching app.py:_build_reach_polygon_layers shape).
+    for i, ring in enumerate(mesh.polygon_outlines):
+        layers.append({
+            "@@type": "PolygonLayer",
+            "id": f"polygon-uploaded-{i}",
+            "data": [{"polygon": ring}],
+            "getPolygon": "@@=d.polygon",
+            "getFillColor": [120, 180, 160, 36],
+            "getLineColor": [120, 180, 160, 220],
+            "lineWidthMinPixels": 2,
+            "stroked": True,
+            "filled": True,
+            "pickable": False,
+        })
+    return layers
 ```
 
-The existing `_build_h3_data_rows` and the H3HexagonLayer / PolygonLayer construction blocks already accept any mesh-like object with the duck-typed attributes — `PreviewMesh` provides them.
+In the existing layer reactive (search for `is_h3` around line 1964), branch BEFORE the existing H3 path:
+
+```python
+        # Create Model upload preview takes precedence — render its
+        # layers and skip the sim.mesh-derived flow entirely.
+        upload = _uploaded_preview()
+        if upload is not None:
+            return _build_preview_h3_layer(upload)
+        # ... existing sim.mesh-based code follows unchanged ...
+```
+
+The exact reactive name and indentation depend on which reactive owns layer construction; follow the existing structure (typically a `@reactive.calc` near the deck-spec building).
 
 - [ ] **Step 16.3: Add the study-area-change reset effect (inside `server()`)**
 
@@ -1610,7 +1667,7 @@ Expected: all pass; no regressions.
 
 ```bash
 git add app.py
-git commit -m "feat(app): current_mesh reactive + study-area-change reset for upload preview"
+git commit -m "feat(app): _build_preview_h3_layer + study-area-change reset for upload preview"
 ```
 
 ---
