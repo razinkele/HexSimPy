@@ -474,7 +474,38 @@ def main() -> None:
     depth = np.maximum(np.where(np.isnan(elev), 0.0, -elev), 0.0).astype(np.float32)
     water_mask = (depth > 0).astype(np.uint8)
     print(f"  depth range: {depth.min():.2f} – {depth.max():.2f} m, "
-          f"water cells: {int(water_mask.sum()):,}")
+          f"water cells (EMODnet): {int(water_mask.sum()):,}")
+
+    # Approach F (v1.6.1): trust inSTREAM polygons over EMODnet bathymetry
+    # for cells inside any reach polygon. The half-cell buffer in
+    # tessellate_reach (added v1.5.0 to fix narrow-channel sparseness)
+    # over-captures cells up to ~14m beyond the polygon edge — EMODnet
+    # often reports those cells as dry because its sampling is coarser
+    # than the digitised polygon edges. Without this override, ~16% of
+    # tagged cells (47-87% of river cells) have reach_id but
+    # water_mask=False; the viewer (app.py:1811 filters by water_mask)
+    # drops them silently — polygon outlines appear unfilled.
+    #
+    # Approach C (drop reach_id for dry tagged cells) was tried first but
+    # catastrophically fragmented connectivity (Nemunas → 160 components,
+    # CuronianLagoon → 291 components, Atmata↔Lagoon edges → 0). The
+    # buffer cells were doing double duty: visual padding + connectivity
+    # glue. Approach F restores the glue by treating polygon membership
+    # as authoritative — same pattern the script already uses for
+    # OpenBaltic = ne_ocean − BalticCoast − CuronianLagoon.
+    #
+    # See tests/test_h3_grid_quality.py::test_reach_id_implies_water_mask.
+    forced_water = (reach_id_arr != -1) & (water_mask == 0)
+    n_overridden = int(forced_water.sum())
+    water_mask = np.where(forced_water, np.uint8(1), water_mask).astype(np.uint8)
+    # Buffer cells are at the polygon edge — shallow by definition.
+    # 1m is a placeholder depth that lets bioenergetics/movement work
+    # without claiming bathymetric accuracy at the polygon fringe.
+    depth = np.where(forced_water & (depth < 1.0),
+                     np.float32(1.0), depth).astype(np.float32)
+    print(f"  polygon-trust override: {n_overridden:,} buffer cells "
+          f"flipped water_mask=False→True (depth set to 1m where 0)")
+    print(f"  water cells (final): {int(water_mask.sum()):,}")
 
     print(f"\n[3.5/4] Sampling CMEMS forcing [{args.start} .. {args.end}]…")
     times, forcing = sample_cmems(

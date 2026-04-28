@@ -121,6 +121,48 @@ def test_each_reach_is_connected():
     )
 
 
+def test_reach_id_implies_water_mask():
+    """Every cell with reach_id != -1 must have water_mask == True.
+
+    The build script tessellates each reach polygon with a half-cell-edge
+    buffer to ensure narrow channels get cells (otherwise centroid-in-
+    polygon test produces sparse, disconnected sets — the v1.5.0 issue).
+    But the buffer can capture cells whose centroids sit on dry land
+    beyond the actual water's edge.  Without a post-filter, those cells
+    end up tagged with reach_id but have water_mask=False because EMODnet
+    bathymetry says they're dry.
+
+    Symptom: the viewer (app.py:1811) filters by water_mask=True, dropping
+    47-87% of river cells from the rendered hex layer — polygon outlines
+    appear visually unfilled.
+
+    Fix: build_h3_multires_landscape.py:475 unsets reach_id (-1) for
+    cells with water_mask=False.
+
+    This test pins the contract: a cell's reach_id and water_mask must
+    agree about whether the cell is water.
+    """
+    ds = _load_nc()
+    reach_id = ds["reach_id"].values
+    water_mask = ds["water_mask"].values.astype(bool)
+    tagged_dry = (reach_id != -1) & ~water_mask
+    n_bad = int(tagged_dry.sum())
+    if n_bad:
+        # Per-reach breakdown for the failure message.
+        names = ds.attrs["reach_names"].split(",")
+        per_reach = []
+        for rid in sorted(set(reach_id[tagged_dry].tolist())):
+            n = int(((reach_id == rid) & ~water_mask).sum())
+            name = names[rid] if 0 <= rid < len(names) else f"<id={rid}>"
+            per_reach.append(f"  {name}: {n} dry cells tagged")
+        ds.close()
+        raise AssertionError(
+            f"{n_bad} cells have reach_id != -1 but water_mask=False:\n"
+            + "\n".join(per_reach)
+        )
+    ds.close()
+
+
 def test_cross_reach_link_thresholds():
     ds = _load_nc()
     reach_names = ds.attrs["reach_names"].split(",")
