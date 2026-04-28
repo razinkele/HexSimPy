@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from pathlib import Path
 
@@ -29,6 +30,7 @@ from shiny_deckgl import (
 )
 import h3
 
+from salmon_ibm import h3_tessellate
 from salmon_ibm.config import load_config
 from salmon_ibm.bioenergetics import BioParams
 from salmon_ibm.simulation import Simulation
@@ -1181,6 +1183,61 @@ def server(input, output, session):
         {"t": 0, "alive": 0, "dead": 0, "arrived": 0, "behaviors": {}}
     )
     trip_buffer = TripBuffer()
+
+    # Create Model — ephemeral viewer-only preview (Approach A).
+    # See docs/superpowers/specs/2026-04-28-create-model-feature-design.md.
+    _uploaded_preview = reactive.Value(None)
+
+    @reactive.effect
+    @reactive.event(input.create_model_preview_btn)
+    def _on_create_model_preview():
+        file_info = input.create_model_file()
+        if not file_info:
+            ui.notification_show(
+                "Pick a file first.", type="warning", duration=4)
+            return
+
+        file = file_info[0]
+        name = file["name"]
+        bytes_ = open(file["datapath"], "rb").read()
+
+        suffix = h3_tessellate.suffix_from_filename(name)
+        if suffix is None:
+            ui.notification_show(
+                f"Unsupported format: {name}", type="error", duration=8)
+            return
+
+        res = int(input.create_model_resolution())
+        with_bathy = bool(input.create_model_with_bathy())
+        max_cells = int(os.environ.get("HEXSIM_PREVIEW_MAX_CELLS", "1000000"))
+
+        try:
+            geom = h3_tessellate.parse_upload(bytes_, suffix)
+            mesh = h3_tessellate.preview(
+                geom, resolution=res,
+                with_bathy=with_bathy, max_cells=max_cells)
+        except ValueError as e:
+            ui.notification_show(str(e), type="error", duration=8)
+            return
+        except Exception as e:
+            ui.notification_show(
+                f"Unexpected error: {e}", type="error", duration=8)
+            return
+
+        _uploaded_preview.set(mesh)
+        n = len(mesh.h3_ids)
+        ui.notification_show(
+            f"Preview ready: {n:,} cells at res {res}.",
+            type="message", duration=4,
+        )
+
+    @output
+    @render.text
+    def create_model_status():
+        mesh = _uploaded_preview()
+        if mesh is None:
+            return "No preview loaded."
+        return f"Preview: {len(mesh.h3_ids):,} cells at res {mesh.resolutions[0]}."
 
     @reactive.effect
     @reactive.event(input.btn_reset, input.landscape, ignore_none=False)

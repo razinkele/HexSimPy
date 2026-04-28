@@ -171,6 +171,21 @@ import shapely
 from shapely.ops import unary_union
 
 
+def suffix_from_filename(name: str) -> str | None:
+    """Detect the upload suffix from a filename. Case-insensitive.
+
+    Returns ".shp.zip" / ".gpkg" / ".geojson" or None if unrecognised.
+    """
+    lo = name.lower()
+    if lo.endswith(".shp.zip"):
+        return ".shp.zip"
+    if lo.endswith(".gpkg"):
+        return ".gpkg"
+    if lo.endswith(".geojson"):
+        return ".geojson"
+    return None
+
+
 @dataclass
 class PreviewMesh:
     """Duck-typed mesh produced by `preview()` for the Create Model

@@ -191,6 +191,17 @@ def test_fetch_emodnet_uses_disk_cache_when_present(tmp_path, monkeypatch):
     assert float(depth[0, 0]) == 5.0
 
 
+def test_suffix_from_filename():
+    sff = h3_tessellate.suffix_from_filename
+    assert sff("tiny.geojson") == ".geojson"
+    assert sff("TINY.GeoJSON") == ".geojson"
+    assert sff("data.gpkg") == ".gpkg"
+    assert sff("DATA.GPKG") == ".gpkg"
+    assert sff("shoreline.shp.zip") == ".shp.zip"
+    assert sff("foo.txt") is None
+    assert sff("just_zip.zip") is None  # zip without .shp.
+
+
 def test_polygon_trust_applied_on_bathy_path(monkeypatch):
     """When with_bathy=True, the polygon-trust override must run so that
     buffer cells whose EMODnet depth is 0 get water_mask=1 + depth=1."""
