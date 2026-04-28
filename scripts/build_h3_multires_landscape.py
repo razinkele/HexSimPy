@@ -96,6 +96,11 @@ from _water_polygons import (
     fetch_instream_polygons,
     fetch_natural_earth_ocean,
 )
+from salmon_ibm.h3_tessellate import (
+    tessellate_reach,
+    bridge_components,
+    polygon_trust_water_mask,
+)
 
 
 PROJECT = Path(__file__).resolve().parent.parent
@@ -199,152 +204,6 @@ def parse_resolution_overrides(spec: str) -> dict[str, int]:
         name, val = tok.split("=", 1)
         out[name.strip()] = int(val.strip())
     return out
-
-
-def tessellate_reach(polygon, resolution: int) -> list[str]:
-    """Return the H3 cells tessellating a buffered version of polygon.
-
-    Buffer = half the H3 edge length at the target resolution.  This
-    ensures cells whose centroid sits within half-a-cell of the
-    polygon edge are included — without it, a thin meandering river
-    polygon at res 10 (~75 m cells) tessellates as a sparse, often
-    disconnected, cell set because polygon_to_cells uses a strict
-    centroid-in-polygon test.
-
-    Buffer is applied in degrees: convert metres → degrees at lat 55°
-    (the bbox centre) using 1 deg ≈ 111 km.
-
-    For multi-polygon inputs, each part is buffered + tessellated
-    independently and the cell sets are unioned.
-    """
-    from shapely.geometry import MultiPolygon
-
-    edge_m = h3.average_hexagon_edge_length(resolution, unit="m")
-    # Buffer in degrees: half a cell edge at lat 55°.
-    buffer_deg = (edge_m / 2.0) / 111_000.0
-
-    if isinstance(polygon, MultiPolygon):
-        parts = list(polygon.geoms)
-    else:
-        parts = [polygon]
-
-    cells: set[str] = set()
-    for part in parts:
-        if part.is_empty:
-            continue
-        buffered = part.buffer(buffer_deg)
-        # Buffer can return a MultiPolygon when the original was thin
-        # (the dilation merges previously-separate pieces).  Normalise
-        # to a list of single Polygons.
-        if hasattr(buffered, "geoms"):
-            inner_parts = list(buffered.geoms)
-        else:
-            inner_parts = [buffered]
-        for ip in inner_parts:
-            if ip.is_empty:
-                continue
-            ext = [(y, x) for x, y in ip.exterior.coords]
-            holes = [
-                [(y, x) for x, y in interior.coords]
-                for interior in ip.interiors
-            ]
-            try:
-                poly = h3.LatLngPoly(ext, *holes)
-            except Exception as e:
-                print(f"  ! skipping polygon part: {e}")
-                continue
-            for c in h3.polygon_to_cells(poly, resolution):
-                cells.add(c)
-    return sorted(cells)
-
-
-def bridge_components(
-    cells: list[str], resolution: int, max_bridge_len: int = 10
-) -> list[str]:
-    """Merge disconnected H3 components into a single graph by adding
-    shortest-path cells between adjacent components.
-
-    **Precondition: all input cells must be at the same H3 resolution**
-    (passed as the ``resolution`` argument).  ``h3.grid_ring`` and
-    ``h3.grid_distance`` only work between same-resolution cells; mixing
-    resolutions would silently produce spurious component splits and
-    nonsensical bridge paths.  In `build_cell_list` (Step 2.2) this is
-    guaranteed because each call sees only one reach's cells, all at
-    that reach's resolution.
-
-    For each pair of components A and B, find the cell pair (a ∈ A,
-    b ∈ B) with the shortest H3 grid distance.  If that distance is
-    ≤ ``max_bridge_len`` cells, add the intermediate cells from
-    `h3.grid_path_cells(a, b)` to the cell set.  This connects
-    near-adjacent fragments without grafting on huge unrelated zones.
-
-    Returns the augmented cell list, sorted.
-    """
-    if not cells or len(cells) < 2:
-        return cells
-    cell_set = set(cells)
-
-    # BFS within cell_set using grid_ring(1) to find components.
-    components: list[set[str]] = []
-    seen: set[str] = set()
-    for start in cell_set:
-        if start in seen:
-            continue
-        comp: set[str] = set()
-        stack = [start]
-        while stack:
-            c = stack.pop()
-            if c in seen:
-                continue
-            seen.add(c)
-            comp.add(c)
-            for nb in h3.grid_ring(c, 1):
-                if nb in cell_set and nb not in seen:
-                    stack.append(nb)
-        components.append(comp)
-
-    if len(components) <= 1:
-        return cells
-
-    # Pick the largest component as the "anchor".  For each smaller
-    # component, find the nearest cell to the anchor and bridge.
-    components.sort(key=len, reverse=True)
-    anchor = components[0]
-    bridges_added = 0
-    for orphan in components[1:]:
-        # Find the (anchor_cell, orphan_cell) pair with shortest grid
-        # distance.  O(|anchor|·|orphan|) — fine for the small
-        # components (typically <100 cells each).
-        best_dist = max_bridge_len + 1
-        best_pair = None
-        for a in orphan:
-            for b in anchor:
-                d = h3.grid_distance(a, b)
-                if d < best_dist:
-                    best_dist = d
-                    best_pair = (a, b)
-                    if d == 1:
-                        break
-            if best_pair and best_dist == 1:
-                break
-        if best_pair is None or best_dist > max_bridge_len:
-            print(
-                f"  ! orphan component of {len(orphan)} cells too far "
-                f"from anchor (>{max_bridge_len} cells) — leaving "
-                f"disconnected"
-            )
-            continue
-        # Add intermediate path cells to bridge.
-        path = list(h3.grid_path_cells(best_pair[0], best_pair[1]))
-        for pc in path:
-            if pc not in cell_set:
-                cell_set.add(pc)
-                bridges_added += 1
-
-    if bridges_added:
-        print(f"  bridge-cell pass: added {bridges_added} cells across "
-              f"{len(components) - 1} component gaps")
-    return sorted(cell_set)
 
 
 def build_cell_list(
@@ -495,14 +354,8 @@ def main() -> None:
     # OpenBaltic = ne_ocean − BalticCoast − CuronianLagoon.
     #
     # See tests/test_h3_grid_quality.py::test_reach_id_implies_water_mask.
-    forced_water = (reach_id_arr != -1) & (water_mask == 0)
-    n_overridden = int(forced_water.sum())
-    water_mask = np.where(forced_water, np.uint8(1), water_mask).astype(np.uint8)
-    # Buffer cells are at the polygon edge — shallow by definition.
-    # 1m is a placeholder depth that lets bioenergetics/movement work
-    # without claiming bathymetric accuracy at the polygon fringe.
-    depth = np.where(forced_water & (depth < 1.0),
-                     np.float32(1.0), depth).astype(np.float32)
+    n_overridden = int(((reach_id_arr != -1) & (water_mask == 0)).sum())
+    water_mask, depth = polygon_trust_water_mask(reach_id_arr, water_mask, depth)
     print(f"  polygon-trust override: {n_overridden:,} buffer cells "
           f"flipped water_mask=False→True (depth set to 1m where 0)")
     print(f"  water cells (final): {int(water_mask.sum()):,}")
