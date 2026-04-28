@@ -96,3 +96,40 @@ def test_parse_upload_reprojects_from_3035_to_4326():
     assert -90 <= miny <= maxy <= 90
     assert 10 < minx < 30, f"Expected European longitude, got {minx}"
     assert 50 < miny < 60, f"Expected northern-Europe latitude, got {miny}"
+
+
+import pytest
+
+
+def test_parse_upload_raises_on_missing_crs():
+    import geopandas as gpd
+    from shapely.geometry import Polygon
+    gdf = gpd.GeoDataFrame(
+        geometry=[Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])], crs=None)
+    with pytest.raises(ValueError, match="no CRS"):
+        h3_tessellate._dissolve_and_validate(gdf)
+
+
+def test_parse_upload_raises_on_no_geometry():
+    import geopandas as gpd
+    gdf = gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
+    with pytest.raises(ValueError, match="no polygon geometry"):
+        h3_tessellate._dissolve_and_validate(gdf)
+
+
+def test_parse_upload_raises_on_non_polygon_features():
+    import geopandas as gpd
+    from shapely.geometry import LineString
+    gdf = gpd.GeoDataFrame(
+        geometry=[LineString([(0, 0), (1, 1)])], crs="EPSG:4326")
+    with pytest.raises(ValueError, match="Polygon or MultiPolygon"):
+        h3_tessellate._dissolve_and_validate(gdf)
+
+
+def test_parse_upload_raises_on_antimeridian_crossing():
+    import geopandas as gpd
+    from shapely.geometry import Polygon
+    poly = Polygon([(170, 0), (170, 10), (-170, 10), (-170, 0)])
+    gdf = gpd.GeoDataFrame(geometry=[poly], crs="EPSG:4326")
+    with pytest.raises(ValueError, match="antimeridian"):
+        h3_tessellate._dissolve_and_validate(gdf)
