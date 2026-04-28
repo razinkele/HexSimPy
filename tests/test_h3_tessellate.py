@@ -62,3 +62,10 @@ def test_parse_upload_geojson_round_trips():
     minx, miny, maxx, maxy = geom.bounds
     assert minx <= 21.21 <= maxx
     assert miny <= 55.31 <= maxy
+
+
+def test_parse_upload_gpkg_reads_first_layer():
+    bytes_ = (FIXTURES / "tiny_wgs84.gpkg").read_bytes()
+    geom = h3_tessellate.parse_upload(bytes_, ".gpkg")
+    assert geom is not None
+    assert geom.geom_type in ("Polygon", "MultiPolygon")

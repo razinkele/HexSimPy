@@ -182,6 +182,9 @@ def parse_upload(file_bytes: bytes, suffix: str):
     suffix = suffix.lower()
     if suffix == ".geojson":
         gdf = gpd.read_file(io.BytesIO(file_bytes))
+    elif suffix == ".gpkg":
+        # GPKG is a SQLite container; gpd.read_file accepts BytesIO directly.
+        gdf = gpd.read_file(io.BytesIO(file_bytes), layer=0)
     else:
         raise ValueError(f"Unsupported format: {suffix}")
     return _dissolve_and_validate(gdf)
