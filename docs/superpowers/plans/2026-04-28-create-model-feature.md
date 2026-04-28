@@ -15,12 +15,13 @@
 ## File Structure
 
 **New files:**
-- `salmon_ibm/h3_tessellate.py` — extracted tessellation primitives + new upload-flow entry points + `_fetch_emodnet_for_bbox` + `PreviewMesh` dataclass. ~250 LoC.
-- `tests/test_h3_tessellate.py` — 17 unit tests for the new module.
-- `tests/test_create_model_reactive.py` — 5 tests for the Shiny reactive flow.
+- `salmon_ibm/h3_tessellate.py` — extracted tessellation primitives + new upload-flow entry points + `_fetch_emodnet_for_bbox` + `PreviewMesh` dataclass + `suffix_from_filename` helper. ~250 LoC.
+- `tests/test_h3_tessellate.py` — 19 unit tests for the new module (16 spec-listed + 1 cell-cap regression + 1 EMODnet cache test + 1 suffix helper).
 - `tests/fixtures/create_model/tiny.geojson` — 1 small polygon, EPSG:4326.
 - `tests/fixtures/create_model/tiny_wgs84.gpkg` — 1 small polygon, EPSG:4326.
 - `tests/fixtures/create_model/tiny_3035.shp.zip` — 3 polygons, EPSG:3035 (tests dissolve + reproject).
+
+**Reactive-test deferral:** the spec called for `tests/test_create_model_reactive.py` (5 tests), but `app.py` is not unit-test-importable in this codebase (Shiny side-effects on import; documented in `tests/test_trip_buffer.py:20`). The reactive glue is covered by the manual Playwright smoke (Task 19.2). The pure-function logic worth extracting (filename → suffix) is unit-tested in Task 15.2.
 
 **Modified files:**
 - `scripts/build_h3_multires_landscape.py` — three internal functions removed; the script imports them from the new module. Behavior identical.
@@ -312,13 +313,15 @@ def test_tessellate_reach_simple_polygon():
 
 
 def test_bridge_components_connects_two_pieces():
-    # Two disjoint single-cell components 3 cells apart.
+    # Two disjoint single-cell components exactly 3 cells apart.
+    # h3.grid_ring(a, 3) returns cells at distance EXACTLY 3 from a.
+    # (h3.grid_disk(a, k) returns cells at distance <= k including a.)
     a = h3.latlng_to_cell(55.30, 21.20, 11)
-    # Walk 3 cells east to get a clearly-disjoint cell.
-    b = list(h3.grid_disk(a, 3))[5]  # any cell ≥3 cells away from a
+    b = list(h3.grid_ring(a, 3))[0]
+    assert h3.grid_distance(a, b) == 3, "fixture: b should be 3 cells from a"
     out = h3_tessellate.bridge_components([a, b], resolution=11, max_bridge_len=10)
     assert a in out and b in out
-    assert len(out) > 2, "bridge should add intermediate cells"
+    assert len(out) > 2, "bridge should add intermediate cells between two distance-3 components"
 ```
 
 - [ ] **Step 2.3: Run tests — must pass**
@@ -1092,40 +1095,41 @@ git commit -m "test(h3_tessellate): cell-count cap regression"
 
 This task adds the EMODnet WCS fetch helper used by the bathymetry-toggle path. Cache lives in `.superpowers/cache/` (gitignored already, since `.superpowers/` is in the ignore list).
 
-- [ ] **Step 12.1: Append test (network-skipped)**
+- [ ] **Step 12.1: Append test (cache-hit path; no live WCS fetch needed)**
+
+The cache-miss path requires a live EMODnet WCS round-trip — too brittle for a CI test. We test only the cache-hit path: pre-write a valid GeoTIFF at the expected cache key, monkey-patch `requests.get` to raise, and verify the function returns without hitting the network.
 
 ```python
-def test_fetch_emodnet_caches_to_disk(tmp_path, monkeypatch):
-    """Mock the WCS request. Verify the result is cached and the second
-    call doesn't hit the network."""
-    monkeypatch.setattr(
-        h3_tessellate, "_EMODNET_CACHE_DIR", tmp_path)
-    call_count = {"n": 0}
-    def fake_get(url, **kwargs):
-        call_count["n"] += 1
-        # Return a tiny valid GeoTIFF (1×1 pixel, depth=5m).
-        import rasterio
-        import rasterio.transform
-        from io import BytesIO
-        out = BytesIO()
-        with rasterio.open(
-            out, "w", driver="GTiff",
-            height=1, width=1, count=1, dtype="float32",
-            crs="EPSG:4326",
-            transform=rasterio.transform.from_origin(0, 1, 1, 1),
-        ) as dst:
-            dst.write(np.array([[-5.0]], dtype=np.float32), 1)
-        class FakeResp:
-            content = out.getvalue()
-            status_code = 200
-            def raise_for_status(self): pass
-        return FakeResp()
-    monkeypatch.setattr("requests.get", fake_get)
+def test_fetch_emodnet_uses_disk_cache_when_present(tmp_path, monkeypatch):
+    """If a cache file exists for the bbox key, _fetch_emodnet_for_bbox
+    must read from disk and not hit the network."""
+    import hashlib
+    import rasterio
+    import rasterio.transform
+
+    monkeypatch.setattr(h3_tessellate, "_EMODNET_CACHE_DIR", tmp_path)
 
     bbox = (21.0, 55.0, 21.5, 55.5)
-    h3_tessellate._fetch_emodnet_for_bbox(bbox)
-    h3_tessellate._fetch_emodnet_for_bbox(bbox)  # cached, no second call
-    assert call_count["n"] == 1, "second call should be served from cache"
+    key = hashlib.sha1(repr(bbox).encode()).hexdigest()[:16]
+    cache_path = tmp_path / f"emodnet_{key}.tif"
+
+    # Write a 1×1 GeoTIFF: elevation = -5 m → depth = 5 m after sign flip.
+    with rasterio.open(
+        cache_path, "w",
+        driver="GTiff", height=1, width=1, count=1, dtype="float32",
+        crs="EPSG:4326",
+        transform=rasterio.transform.from_origin(21.0, 55.5, 0.5, 0.5),
+    ) as dst:
+        dst.write(np.array([[-5.0]], dtype=np.float32), 1)
+
+    # Any network call would fail this test.
+    def must_not_call(url, **kwargs):
+        raise AssertionError("Cache should be used; should not hit network.")
+    monkeypatch.setattr("requests.get", must_not_call)
+
+    depth, _ = h3_tessellate._fetch_emodnet_for_bbox(bbox)
+    assert depth.shape == (1, 1)
+    assert float(depth[0, 0]) == 5.0
 ```
 
 - [ ] **Step 12.2: Append `_fetch_emodnet_for_bbox`**
@@ -1235,11 +1239,15 @@ In `salmon_ibm/h3_tessellate.py`, replace the `preview` function body's tail (af
         bbox = polygon.bounds  # (minx, miny, maxx, maxy) = (minlon, minlat, maxlon, maxlat)
         depth_grid, _ = _fetch_emodnet_for_bbox(bbox)
         sampled = _sample_depth_at_centroids(depth_grid, bbox, mesh.centroids)
-        # Apply polygon-trust override (v1.6.1 logic) so buffered cells
-        # beyond the polygon edge that EMODnet reports as dry get
-        # water_mask=1 + depth=1.0.
+        # Mirror the build script flow exactly so polygon_trust does what
+        # it does there: derive water_mask from depth FIRST (EMODnet's
+        # verdict), THEN apply polygon-trust to flip water_mask=0 → 1 at
+        # tagged cells.  Without this, water_mask is uniformly 1 by upload
+        # construction and polygon_trust's `water_mask == 0` predicate is
+        # never true → no override fires → "dry" stripes still appear.
+        initial_water = (sampled > 0).astype(np.uint8)
         new_water, new_depth = polygon_trust_water_mask(
-            mesh.reach_id, mesh.water_mask, sampled
+            mesh.reach_id, initial_water, sampled
         )
         mesh.water_mask = new_water
         mesh.depth = new_depth
@@ -1392,99 +1400,65 @@ git commit -m "feat(ui): Create Model accordion section in sidebar"
 - Modify: `app.py`
 - Test: `tests/test_create_model_reactive.py`
 
-- [ ] **Step 15.1: Create the test file with a placeholder failing test**
+- [ ] **Step 15.1: Decide test strategy — no `tests/test_create_model_reactive.py`**
 
-Create `tests/test_create_model_reactive.py`:
+`app.py` is not importable from tests because it runs Shiny at module-load time (this is documented in `tests/test_trip_buffer.py:20`: *"We can't import app.py directly (it runs Shiny)"*). Unit-testing Shiny reactives in this codebase is not currently possible.
+
+**Decision:** drop the planned `tests/test_create_model_reactive.py` (5 tests). The reactive glue is exercised by the manual Playwright smoke (Task 19.2). Logic worth unit-testing — file-suffix detection from a filename string — gets one test in `tests/test_h3_tessellate.py` against a small helper function (Task 15.2).
+
+This matches the spec's `Documented limitations` section's spirit (some test coverage is deferred when the harness doesn't exist) and is consistent with the project's existing workaround (the trip-buffer extraction approach).
+
+- [ ] **Step 15.2: Add `suffix_from_filename` helper + test**
+
+Append to `salmon_ibm/h3_tessellate.py`:
 
 ```python
-"""Reactive-flow tests for the Create Model feature.
+def suffix_from_filename(name: str) -> str | None:
+    """Detect the upload suffix from a filename. Case-insensitive.
 
-Mocks h3_tessellate.preview to control return values / exceptions and
-asserts the reactive value transitions.
-"""
-import pytest
-
-
-def test_uploaded_preview_default_none():
-    """The _uploaded_preview reactive defaults to None at session start."""
-    from app import _uploaded_preview_default
-    assert _uploaded_preview_default() is None
+    Returns ".shp.zip" / ".gpkg" / ".geojson" or None if unrecognised.
+    """
+    lo = name.lower()
+    if lo.endswith(".shp.zip"):
+        return ".shp.zip"
+    if lo.endswith(".gpkg"):
+        return ".gpkg"
+    if lo.endswith(".geojson"):
+        return ".geojson"
+    return None
 ```
 
-- [ ] **Step 15.2: Run — should fail (no _uploaded_preview_default)**
+Append to `tests/test_h3_tessellate.py`:
 
-- [ ] **Step 15.3: Add the reactive infrastructure to `app.py`**
+```python
+def test_suffix_from_filename():
+    sff = h3_tessellate.suffix_from_filename
+    assert sff("tiny.geojson") == ".geojson"
+    assert sff("TINY.GeoJSON") == ".geojson"
+    assert sff("data.gpkg") == ".gpkg"
+    assert sff("DATA.GPKG") == ".gpkg"
+    assert sff("shoreline.shp.zip") == ".shp.zip"
+    assert sff("foo.txt") is None
+    assert sff("just_zip.zip") is None  # zip without .shp.
+```
 
-In `app.py`, near the existing study-area reactive (search for `input.landscape` or `study_area`), add:
+Run:
+```bash
+micromamba run -n shiny python -m pytest tests/test_h3_tessellate.py::test_suffix_from_filename -v
+```
+
+Expected: PASS.
+
+- [ ] **Step 15.3: Add module-level helpers + reactive infrastructure inside `server()`**
+
+In `app.py`, **at module scope** (top of file, after the imports), add:
 
 ```python
 def _uploaded_preview_default():
     """Initial value for the _uploaded_preview reactive. Exposed as a
-    function so tests can call it without instantiating a Shiny session."""
+    module-level function so tests can call it without instantiating a
+    Shiny session."""
     return None
-
-
-_uploaded_preview = reactive.Value(_uploaded_preview_default())
-
-
-@reactive.effect
-@reactive.event(input.create_model_preview_btn)
-def _on_create_model_preview():
-    file_info = input.create_model_file()
-    if not file_info:
-        ui.notification_show(
-            "Pick a file first.", type="warning", duration=4)
-        return
-
-    file = file_info[0]
-    name = file["name"]
-    bytes_ = open(file["datapath"], "rb").read()
-
-    # Determine suffix: .geojson, .gpkg, or .shp.zip
-    name_low = name.lower()
-    if name_low.endswith(".shp.zip"):
-        suffix = ".shp.zip"
-    elif name_low.endswith(".gpkg"):
-        suffix = ".gpkg"
-    elif name_low.endswith(".geojson"):
-        suffix = ".geojson"
-    else:
-        ui.notification_show(
-            f"Unsupported format: {name}", type="error", duration=8)
-        return
-
-    res = int(input.create_model_resolution())
-    with_bathy = bool(input.create_model_with_bathy())
-    max_cells = int(os.environ.get("HEXSIM_PREVIEW_MAX_CELLS", "1000000"))
-
-    try:
-        geom = h3_tessellate.parse_upload(bytes_, suffix)
-        mesh = h3_tessellate.preview(
-            geom, resolution=res,
-            with_bathy=with_bathy, max_cells=max_cells)
-    except ValueError as e:
-        ui.notification_show(str(e), type="error", duration=8)
-        return
-    except Exception as e:
-        ui.notification_show(
-            f"Unexpected error: {e}", type="error", duration=8)
-        return
-
-    _uploaded_preview.set(mesh)
-    n = len(mesh.h3_ids)
-    ui.notification_show(
-        f"Preview ready: {n:,} cells at res {res}.",
-        type="message", duration=4,
-    )
-
-
-@output
-@render.text
-def create_model_status():
-    mesh = _uploaded_preview()
-    if mesh is None:
-        return "No preview loaded."
-    return f"Preview: {len(mesh.h3_ids):,} cells at res {mesh.resolutions[0]}."
 ```
 
 Add the necessary imports near the top of `app.py` if not already present:
@@ -1494,16 +1468,81 @@ import os
 from salmon_ibm import h3_tessellate
 ```
 
-- [ ] **Step 15.4: Run — `_uploaded_preview_default` must be importable**
+Now in `app.py` find `def server(input, output, session):` (around line 1176). Existing pattern shows reactives like `sim_state = reactive.Value(None)` at the top of `server()`. Add **inside `server()`**, near those existing reactives (e.g., right after `step_stats = reactive.Value(...)`):
+
+```python
+    # Create Model — ephemeral viewer-only preview.
+    # Module-level _uploaded_preview_default() is the testable initial value.
+    _uploaded_preview = reactive.Value(_uploaded_preview_default())
+
+    @reactive.effect
+    @reactive.event(input.create_model_preview_btn)
+    def _on_create_model_preview():
+        file_info = input.create_model_file()
+        if not file_info:
+            ui.notification_show(
+                "Pick a file first.", type="warning", duration=4)
+            return
+
+        file = file_info[0]
+        name = file["name"]
+        bytes_ = open(file["datapath"], "rb").read()
+
+            suffix = h3_tessellate.suffix_from_filename(name)
+        if suffix is None:
+            ui.notification_show(
+                f"Unsupported format: {name}", type="error", duration=8)
+            return
+
+        res = int(input.create_model_resolution())
+        with_bathy = bool(input.create_model_with_bathy())
+        max_cells = int(os.environ.get("HEXSIM_PREVIEW_MAX_CELLS", "1000000"))
+
+        try:
+            geom = h3_tessellate.parse_upload(bytes_, suffix)
+            mesh = h3_tessellate.preview(
+                geom, resolution=res,
+                with_bathy=with_bathy, max_cells=max_cells)
+        except ValueError as e:
+            ui.notification_show(str(e), type="error", duration=8)
+            return
+        except Exception as e:
+            ui.notification_show(
+                f"Unexpected error: {e}", type="error", duration=8)
+            return
+
+        _uploaded_preview.set(mesh)
+        n = len(mesh.h3_ids)
+        ui.notification_show(
+            f"Preview ready: {n:,} cells at res {res}.",
+            type="message", duration=4,
+        )
+
+    @output
+    @render.text
+    def create_model_status():
+        mesh = _uploaded_preview()
+        if mesh is None:
+            return "No preview loaded."
+        return f"Preview: {len(mesh.h3_ids):,} cells at res {mesh.resolutions[0]}."
+```
+
+The `_uploaded_preview` reactive is now scoped to the Shiny session (one per browser tab), as is the convention in this `app.py`. Module-level state would not survive across sessions and would also error at import time on systems without a session context.
+
+- [ ] **Step 15.4: Run the suffix test + smoke-import the existing tests**
 
 ```bash
-micromamba run -n shiny python -m pytest tests/test_create_model_reactive.py::test_uploaded_preview_default_none -v
+micromamba run -n shiny python -m pytest tests/test_h3_tessellate.py -v
 ```
+
+Expected: 19 tests pass (18 prior + 1 new suffix test).
+
+The reactive glue itself (`_on_create_model_preview`) is exercised by the manual Playwright smoke (Task 19.2).
 
 - [ ] **Step 15.5: Commit**
 
 ```bash
-git add app.py tests/test_create_model_reactive.py
+git add app.py salmon_ibm/h3_tessellate.py tests/test_h3_tessellate.py
 git commit -m "feat(app): _uploaded_preview reactive + Preview button handler"
 ```
 
@@ -1515,78 +1554,74 @@ git commit -m "feat(app): _uploaded_preview reactive + Preview button handler"
 - Modify: `app.py`
 - Test: `tests/test_create_model_reactive.py`
 
-- [ ] **Step 16.1: Append failing tests**
+- [ ] **Step 16.1: No new test (reactive glue covered by manual smoke)**
+
+This task is implementation-only. The existing `tests/test_h3_grid_quality.py` regression contract still holds (Task 4 verified it). The mesh-override and reset-effect logic are exercised by the manual Playwright smoke at Task 19.2.
+
+- [ ] **Step 16.2: Modify the existing layer-build code to honor `_uploaded_preview`**
+
+**Important:** the existing app.py does NOT have a single mesh reactive; mesh is accessed via `sim.mesh` from the simulation object (search for `sim.mesh`, esp. lines around 1453 / 1554 where `mesh = sim.mesh` is assigned for layer construction).
+
+The cleanest approach: introduce a new reactive helper `current_mesh()` inside `server()` and update the layer-build sites to use it.
+
+Add this `@reactive.calc` inside `server()` (alongside the other Create Model reactives from Task 15.3):
 
 ```python
-def test_preview_button_sets_uploaded_preview_on_success(monkeypatch):
-    """Mock h3_tessellate.preview to return a fake PreviewMesh.
-    The handler must call _uploaded_preview.set(...) on success."""
-    from salmon_ibm import h3_tessellate
-    import numpy as np
+    @reactive.calc
+    def current_mesh():
+        """The mesh used for hex/polygon layer rendering.
 
-    fake_mesh = h3_tessellate.PreviewMesh(
-        h3_ids=np.zeros(3, dtype=np.uint64),
-        resolutions=np.full(3, 9, dtype=np.int8),
-        centroids=np.zeros((3, 2)),
-        reach_id=np.zeros(3, dtype=np.int8),
-        reach_names=["uploaded_polygon"],
-        depth=np.zeros(3, dtype=np.float32),
-        water_mask=np.ones(3, dtype=np.uint8),
-        polygon_outlines=[],
-    )
-
-    # The full reactive integration test requires a Shiny test session.
-    # Here we just confirm the helper function exists and returns sensible types.
-    import app
-    assert hasattr(app, "_uploaded_preview")
-    assert hasattr(app, "_on_create_model_preview")
-
-
-def test_study_area_dropdown_change_resets_uploaded_preview():
-    """When input.landscape changes, _uploaded_preview must be cleared."""
-    import app
-    # The reset happens via @reactive.effect on input.landscape.
-    # Confirm the function is wired (search for the decorator on the effect).
-    import inspect
-    src = inspect.getsource(app)
-    assert "input.landscape" in src
-    assert "_uploaded_preview.set(None)" in src or "_uploaded_preview.set(_uploaded_preview_default())" in src
+        Create Model upload preview takes precedence over the
+        simulation mesh; otherwise fall through to sim.mesh from the
+        active study area.
+        """
+        preview = _uploaded_preview()
+        if preview is not None:
+            return preview
+        sim = sim_state.get()
+        if sim is None:
+            return None
+        return sim.mesh
 ```
 
-- [ ] **Step 16.2: Modify the existing mesh reactive to honor `_uploaded_preview`**
-
-In `app.py`, find the existing mesh reactive (search for `def mesh(` or `@reactive.calc` near study_area). At the top of the function body, insert:
+Then find each `mesh = sim.mesh` line in app.py (start with line 1453 and line 1554) and replace with:
 
 ```python
-    # Create Model preview takes precedence over the study-area mesh.
-    preview_mesh = _uploaded_preview()
-    if preview_mesh is not None:
-        return preview_mesh
-    # ... existing study-area-mesh code follows unchanged ...
+            mesh = current_mesh()
+            if mesh is None:
+                return  # nothing to render yet
 ```
 
-- [ ] **Step 16.3: Add the study-area-change reset effect**
+The existing `_build_h3_data_rows` and the H3HexagonLayer / PolygonLayer construction blocks already accept any mesh-like object with the duck-typed attributes — `PreviewMesh` provides them.
+
+- [ ] **Step 16.3: Add the study-area-change reset effect (inside `server()`)**
+
+In `app.py`, **inside `def server(...)`**, alongside the `_on_create_model_preview` effect added in Task 15.3, append:
 
 ```python
-@reactive.effect
-@reactive.event(input.landscape)
-def _on_landscape_change_reset_preview():
-    """Clear the upload preview when the user picks a different study area."""
-    if _uploaded_preview() is not None:
-        _uploaded_preview.set(None)
+    @reactive.effect
+    @reactive.event(input.landscape)
+    def _on_landscape_change_reset_preview():
+        """Clear the upload preview when the user picks a different study area."""
+        if _uploaded_preview() is not None:
+            _uploaded_preview.set(_uploaded_preview_default())
 ```
 
-- [ ] **Step 16.4: Run tests — must pass**
+Note: matches the `ignore_none=False` pattern used by the existing `btn_reset` reactive at app.py:1186.
+
+- [ ] **Step 16.4: Run the existing test suite as a smoke check**
 
 ```bash
-micromamba run -n shiny python -m pytest tests/test_create_model_reactive.py -v
+micromamba run -n shiny python -m pytest tests/test_h3_grid_quality.py tests/test_h3_tessellate.py tests/test_sidebar.py -v
 ```
+
+Expected: all pass; no regressions.
 
 - [ ] **Step 16.5: Commit**
 
 ```bash
-git add app.py tests/test_create_model_reactive.py
-git commit -m "feat(app): mesh override + study-area-change reset for upload preview"
+git add app.py
+git commit -m "feat(app): current_mesh reactive + study-area-change reset for upload preview"
 ```
 
 ---
@@ -1597,76 +1632,62 @@ git commit -m "feat(app): mesh override + study-area-change reset for upload pre
 - Modify: `app.py`
 - Test: `tests/test_create_model_reactive.py`
 
-- [ ] **Step 17.1: Append failing test**
+- [ ] **Step 17.1: No new test (reactive glue covered by manual smoke)**
+
+The bathymetry-toggle reactive is implementation-only; covered by the manual Playwright smoke (Task 19.2 step 8: toggle bathymetry on / verify hexes change color).
+
+- [ ] **Step 17.2: Add the bathymetry-toggle effect (inside `server()`)**
+
+In `app.py`, **inside `def server(...)`**, alongside the other Create Model reactives added in Tasks 15.3 and 16.3, append:
 
 ```python
-def test_bathy_toggle_effect_wired():
-    """Confirm the @reactive.effect on input.create_model_with_bathy exists."""
-    import app
-    import inspect
-    src = inspect.getsource(app)
-    assert "input.create_model_with_bathy" in src
-    assert "_fetch_emodnet_for_bbox" in src or "with_bathy" in src
+    @reactive.effect
+    @reactive.event(input.create_model_with_bathy)
+    def _on_create_model_with_bathy_toggle():
+        """When the user toggles bathymetry, re-run preview() with new flag.
+        Re-uses the most recent FileInfo if available; otherwise warns."""
+        mesh = _uploaded_preview()
+        if mesh is None:
+            return  # nothing to update yet
+        file_info = input.create_model_file()
+        if not file_info:
+            return
+        file = file_info[0]
+        name = file["name"]
+        bytes_ = open(file["datapath"], "rb").read()
+        suffix = h3_tessellate.suffix_from_filename(name)
+        if suffix is None:
+            return
+
+        res = int(input.create_model_resolution())
+        with_bathy = bool(input.create_model_with_bathy())
+        max_cells = int(os.environ.get("HEXSIM_PREVIEW_MAX_CELLS", "1000000"))
+
+        try:
+            geom = h3_tessellate.parse_upload(bytes_, suffix)
+            new_mesh = h3_tessellate.preview(
+                geom, resolution=res,
+                with_bathy=with_bathy, max_cells=max_cells)
+        except Exception as e:
+            ui.notification_show(
+                f"EMODnet bathymetry unavailable: {e}",
+                type="warning", duration=8)
+            # Auto-flip the switch off so we don't keep retrying.
+            ui.update_switch("create_model_with_bathy", value=False)
+            return
+        _uploaded_preview.set(new_mesh)
 ```
 
-- [ ] **Step 17.2: Add the bathymetry-toggle effect**
-
-In `app.py`, append:
-
-```python
-@reactive.effect
-@reactive.event(input.create_model_with_bathy)
-def _on_create_model_with_bathy_toggle():
-    """When the user toggles bathymetry, re-run preview() with new flag.
-    Re-uses the most recent FileInfo if available; otherwise warns."""
-    mesh = _uploaded_preview()
-    if mesh is None:
-        return  # nothing to update yet
-    file_info = input.create_model_file()
-    if not file_info:
-        return
-    file = file_info[0]
-    name = file["name"]
-    bytes_ = open(file["datapath"], "rb").read()
-    name_low = name.lower()
-    if name_low.endswith(".shp.zip"):
-        suffix = ".shp.zip"
-    elif name_low.endswith(".gpkg"):
-        suffix = ".gpkg"
-    elif name_low.endswith(".geojson"):
-        suffix = ".geojson"
-    else:
-        return
-
-    res = int(input.create_model_resolution())
-    with_bathy = bool(input.create_model_with_bathy())
-    max_cells = int(os.environ.get("HEXSIM_PREVIEW_MAX_CELLS", "1000000"))
-
-    try:
-        geom = h3_tessellate.parse_upload(bytes_, suffix)
-        new_mesh = h3_tessellate.preview(
-            geom, resolution=res,
-            with_bathy=with_bathy, max_cells=max_cells)
-    except Exception as e:
-        ui.notification_show(
-            f"EMODnet bathymetry unavailable: {e}",
-            type="warning", duration=8)
-        # Auto-flip the switch off so we don't keep retrying.
-        ui.update_switch("create_model_with_bathy", value=False)
-        return
-    _uploaded_preview.set(new_mesh)
-```
-
-- [ ] **Step 17.3: Run — must pass**
+- [ ] **Step 17.3: Smoke test — existing tests still green**
 
 ```bash
-micromamba run -n shiny python -m pytest tests/test_create_model_reactive.py -v
+micromamba run -n shiny python -m pytest tests/test_h3_tessellate.py tests/test_sidebar.py -v
 ```
 
 - [ ] **Step 17.4: Commit**
 
 ```bash
-git add app.py tests/test_create_model_reactive.py
+git add app.py
 git commit -m "feat(app): bathymetry-toggle effect for upload preview"
 ```
 
@@ -1831,9 +1852,11 @@ No NC SCP needed for this release — Create Model doesn't change the landscape 
 | Test fixtures | Task 1 |
 | h3_tessellate unit tests (17) | Tasks 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13 |
 | Sidebar wiring tests (+2) | Task 14 |
-| Reactive logic tests (+5) | Tasks 15, 16, 17 |
+| Reactive logic tests (+5) | **Deferred** — `app.py` not unit-test-importable. Replaced by `suffix_from_filename` helper test (Task 15.2) + manual Playwright smoke (Task 19.2). |
 | Performance regression sentinel (+1) | Task 18 |
 | Manual Playwright smoke | Task 19 |
 | Documented limitations | Spec only — no implementation |
+
+**Test count actual:** +20 (was +25 in spec). 19 in `test_h3_tessellate.py`, 2 sidebar, 1 perf. Suite: 787 → 807.
 
 All sections implemented.
