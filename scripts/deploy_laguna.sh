@@ -33,7 +33,7 @@ set -euo pipefail
 
 HOST="razinka@laguna.ku.lt"
 DEST="/srv/shiny-server/HexSimPy"
-URL="http://laguna.ku.lt/HexSimPy/"
+URL="https://laguna.ku.lt/HexSimPy/"
 
 # Always operate from the repo root so `git ls-tree` and rsync paths
 # line up.
