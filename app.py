@@ -926,7 +926,7 @@ def _build_preview_h3_layer(mesh) -> list:
         for k in range(n)
     ]
     layers = [h3_hexagon_layer(
-        "water",
+        "upload-water",
         data=data_rows,
         getHexagon="@@=d.hex",
         getFillColor="@@=d.color",
