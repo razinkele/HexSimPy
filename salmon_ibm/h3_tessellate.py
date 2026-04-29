@@ -9,9 +9,18 @@ script imports.
 """
 from __future__ import annotations
 
+import hashlib
+import io
+import zipfile
+from dataclasses import dataclass
+from pathlib import Path
+
+import geopandas as gpd
 import h3
 import numpy as np
+import shapely
 from shapely.geometry import MultiPolygon
+from shapely.ops import unary_union
 
 
 def tessellate_reach(polygon, resolution: int) -> list[str]:
@@ -159,16 +168,6 @@ def polygon_trust_water_mask(
     new_depth = np.where(forced & (depth < 1.0),
                          np.float32(1.0), depth).astype(np.float32)
     return new_water, new_depth
-
-
-import io
-import zipfile
-from dataclasses import dataclass
-from pathlib import Path
-
-import geopandas as gpd
-import shapely
-from shapely.ops import unary_union
 
 
 def suffix_from_filename(name: str) -> str | None:
@@ -341,8 +340,6 @@ def _sample_depth_at_centroids(
     sampled = np.where(np.isnan(sampled), 0.0, sampled).astype(np.float32)
     return sampled
 
-
-import hashlib
 
 _EMODNET_WCS_URL = (
     "https://ows.emodnet-bathymetry.eu/wcs"
