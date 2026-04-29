@@ -1,5 +1,10 @@
 # Create Model — v1.7.1 follow-up notes
 
+> **STATUS: ✅ ALL 6 FINDINGS RESOLVED 2026-04-29** — findings 1, 2, 4, 6
+> shipped in **v1.7.1** (PR #1, commits `50bdfd0`–`832243d`); findings 3,
+> 5 shipped in **v1.7.2** (commits `cd6e09f`, `fd10a79`). All deployed
+> to https://laguna.ku.lt/HexSimPy/ same day.
+
 Findings from the Task 19.2 manual Playwright smoke (2026-04-29) of plan
 `2026-04-28-create-model-feature.md`. None of these block the v1.7.0
 ship; each is a small follow-up worth tracking.
@@ -11,6 +16,12 @@ landscape switch, production layers fully restore.
 ---
 
 ## 1. Layer-id collision: `"water"` is overloaded across layer types
+
+**Resolved in:** v1.7.1 (commit `50bdfd0`). `_build_preview_h3_layer` now
+emits `id="upload-water"`. New test
+`tests/test_sidebar.py::test_upload_preview_layer_id_is_namespaced`
+locks the namespace requirement. Production-confirmed: post-fix smoke
+showed zero new `shaderInputs` errors during landscape switch (was 2 pre-fix).
 
 **Severity:** medium — produces console errors and could cause render
 glitches on landscape switch.
@@ -49,6 +60,12 @@ is not `"water"`.
 
 ## 2. Stale legend metadata while upload preview is active
 
+**Resolved in:** v1.7.1 (commit `4b17721`). Approach (b) from below
+implemented: `map_legend()` early-returns a minimal `Upload preview
+(N cells)` badge while `_uploaded_preview` is not None. Test
+`tests/test_sidebar.py::test_map_legend_swaps_to_upload_badge_during_preview`
+locks the wiring.
+
 **Severity:** low — cosmetic; in-sidebar status is authoritative.
 
 **Where:** the top-right map legend box continues to read
@@ -76,6 +93,15 @@ text.
 ---
 
 ## 3. Bbox-fit doesn't re-trigger on bathymetry toggle or second Preview click
+
+**Resolved in:** v1.7.2 (commit `fd10a79`). New `_upload_view_state(mesh)`
+helper mirrors the H3 branch of `_view_state(sim)`;
+`_push_create_model_preview` now passes `view_state=` on every layer
+push. Visual smoke confirms camera snaps back from a panned-out view to
+the upload bbox on bathymetry toggle. Surprise UX win — turns out the
+"fight the user" concern was theoretical: making sure they actually see
+the result of their action is more valuable than preserving whatever
+zoom they had.
 
 **Severity:** low — debatable whether to "fix" or call it intentional.
 
@@ -106,6 +132,10 @@ documented quirk in v1.7.0.
 
 ## 4. Import statements scattered through `salmon_ibm/h3_tessellate.py`
 
+**Resolved in:** v1.7.1 (commit `1dff6c9`). All imports hoisted to the
+top block in PEP-8 order. Behavior unchanged; all 20 `test_h3_tessellate.py`
+tests still pass.
+
 **Severity:** very low — cosmetic only, no behavior impact.
 
 **Where:**
@@ -131,6 +161,13 @@ commit, no behavior change.
 
 ## 5. Console warning "handler must be a function that takes one argument"
 
+**Resolved in:** v1.7.2 (commit `cd6e09f`). The "predates Create Model"
+guess was wrong — root cause was `Shiny.addCustomMessageHandler(
+'map_loader_hide', function() { ... })` at app.py:1128 (zero-arg handler;
+Shiny.js requires exactly one parameter). Fix: changed `function()` to
+`function(msg)` with `msg` unused. Console error count dropped 2 → 1 on
+fresh page load. (Bonus v1.7.2-tail favicon fix later took it to 0.)
+
 **Severity:** very low — fires once at page load, no observed effect.
 
 **Where:** browser console, ~668 ms after initial page load. No stack
@@ -153,6 +190,10 @@ exactly one argument; fix the signature.
 ---
 
 ## 6. Deploy script prints HTTP URL but laguna serves HTTPS
+
+**Resolved in:** v1.7.1 (commit `832243d`). One-line change to the
+`URL=` var in `scripts/deploy_laguna.sh`. Self-validating: the very
+next deploy printed `URL: https://laguna.ku.lt/HexSimPy/` correctly.
 
 **Severity:** very low — cosmetic; users still reach the site fine due
 to HTTP→HTTPS auto-redirect.
@@ -180,3 +221,27 @@ For a v1.7.1 patch release: items 1, 2, 4, 6 together (small, low-risk,
 all toolchain-improvement) — defer 3 (UX judgment call, may not need a
 fix) and 5 (predates this feature, deserves its own session and may not
 even be related to Create Model).
+
+---
+
+## Actual outcome (recorded 2026-04-29)
+
+The suggested grouping mostly held. Findings 1, 2, 4, 6 shipped together
+in v1.7.1 (PR #1, manual same-day implementation rather than the
+2026-05-13 routine — the routine is now disabled). The "deferred"
+findings 3 and 5 turned out to be cheap to fix in the same afternoon,
+shipped in v1.7.2 a few hours later. Total elapsed time from this doc's
+authorship to all-resolved: roughly one working day.
+
+Two of the calls in this doc turned out to be wrong:
+- Finding 3 was framed as a UX judgment call. Implementation showed the
+  bbox-fit-on-every-push behaviour is unambiguously better — you pretty
+  much always want the user to see the result of their action. No
+  "fights the user" downside materialised in smoke testing.
+- Finding 5 was framed as "predates Create Model" and "may not even be
+  related". Wrong — root cause was `function()` instead of `function(msg)`
+  in our own inline `app.py` JS. Fix was one parameter declaration.
+
+Lesson: the "needs separate debug session" framing for low-severity
+items can over-defer trivial fixes. Worth a quick grep before assuming
+a console warning is from a third-party library.
