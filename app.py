@@ -1864,6 +1864,22 @@ def server(input, output, session):
         if sim is None:
             return ui.HTML("")
 
+        # Finding 2 (closes 2026-04-29-create-model-followups.md): when an
+        # upload preview is active, the production legend (cell count, color
+        # bar, behavior chips) is misleading — agents don't render, the
+        # active field doesn't apply, and the cell count belongs to the
+        # production mesh, not the upload. Replace with a minimal badge.
+        upload = _uploaded_preview()
+        if upload is not None:
+            n_upload = len(upload.h3_ids)
+            return ui.HTML(
+                f'<div class="map-legend">'
+                f'<div class="map-legend-section">'
+                f'Upload preview ({n_upload:,} cells)'
+                f'</div>'
+                f'</div>'
+            )
+
         field_name = input.map_field()
         if field_name == "depth":
             cscale = BATHY_COLORSCALE
