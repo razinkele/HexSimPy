@@ -1125,7 +1125,10 @@ app_ui = ui.page_sidebar(
                             clearInterval(_poll);
                         }, 30000);
                     });
-                    Shiny.addCustomMessageHandler('map_loader_hide', function() {
+                    Shiny.addCustomMessageHandler('map_loader_hide', function(msg) {
+                        // msg unused — Shiny.js requires the handler to declare
+                        // exactly one parameter (warns "handler must be a
+                        // function that takes one argument" otherwise).
                         var el = document.getElementById('map-loader-overlay');
                         if (el) { el.style.display = 'none'; }
                         if (_loaderTimeout) { clearTimeout(_loaderTimeout); _loaderTimeout = null; }
