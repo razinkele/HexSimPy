@@ -897,6 +897,33 @@ viewer_map_widget = MapWidget(
 # ── Create Model preview-layer builder ───────────────────────────────────────
 
 
+def _upload_view_state(mesh) -> dict:
+    """Bbox-fit view state for an upload PreviewMesh.
+
+    Mirrors the H3 branch of _view_state(sim) — same algorithm, but
+    operates on a PreviewMesh so it can be called from the upload-preview
+    push path before any sim is loaded. Closes finding 3 from
+    docs/superpowers/plans/2026-04-29-create-model-followups.md: without
+    this, bathymetry toggles and Preview re-clicks preserve the user's
+    pan/zoom, which silently looks broken if the user has zoomed away
+    from the patch.
+    """
+    lats = mesh.centroids[:, 0]
+    lons = mesh.centroids[:, 1]
+    lat_lo, lat_hi = float(lats.min()), float(lats.max())
+    lon_lo, lon_hi = float(lons.min()), float(lons.max())
+    lat = 0.5 * (lat_lo + lat_hi)
+    lon = 0.5 * (lon_lo + lon_hi)
+    extent = max(
+        (lat_hi - lat_lo) * 1.2,
+        (lon_hi - lon_lo) * 1.2 / max(np.cos(np.radians(lat)), 0.1),
+        0.05,
+    )
+    zoom = float(np.log2(360.0 / extent)) + 1.5
+    zoom = float(max(0.0, min(22.0, zoom)))
+    return {"longitude": lon, "latitude": lat, "zoom": zoom}
+
+
 def _build_preview_h3_layer(mesh) -> list:
     """Build deck.gl layers for a Create Model upload preview.
 
@@ -1311,6 +1338,7 @@ def server(input, output, session):
             await map_widget.update(
                 session,
                 layers=layers,
+                view_state=_upload_view_state(mesh),
                 views=[map_view(controller=True)],
                 widgets=[loading_widget(), reset_view_widget()],
             )

@@ -26,6 +26,40 @@ def test_sidebar_create_model_inputs_have_expected_ids():
         assert input_id in rendered, f"missing input id: {input_id}"
 
 
+def test_upload_preview_recenters_camera_on_layer_push():
+    """Finding 3 from 2026-04-29-create-model-followups.md: when an upload
+    preview is pushed (first preview, bathymetry toggle, Preview re-click),
+    the deck.gl camera should re-fit to the upload polygon's bbox so the
+    user always sees the result of their action. Pre-fix, _push_create_model_preview
+    omitted the view_state argument and deck.gl preserved the user's pan/
+    zoom — silently looks broken if the user zoomed away from the patch.
+    """
+    from pathlib import Path
+
+    app_py = (Path(__file__).resolve().parent.parent / "app.py").read_text(
+        encoding="utf-8"
+    )
+    lines = app_py.splitlines()
+    start = next(
+        (i for i, ln in enumerate(lines)
+         if "def _push_create_model_preview" in ln),
+        None,
+    )
+    assert start is not None, "_push_create_model_preview not found in app.py"
+    end = next(
+        (i for i in range(start + 1, min(start + 50, len(lines)))
+         if lines[i].lstrip().startswith(("def ", "@", "# ──"))
+         and i > start + 1),
+        len(lines),
+    )
+    fn_body = "\n".join(lines[start:end])
+    assert "view_state=_upload_view_state(mesh)" in fn_body, (
+        "_push_create_model_preview must pass view_state=_upload_view_state(mesh) "
+        "in its map_widget.update() call so bathymetry toggles + Preview re-clicks "
+        "recenter on the upload bbox (Finding 3)."
+    )
+
+
 def test_map_legend_swaps_to_upload_badge_during_preview():
     """Finding 2 from 2026-04-29-create-model-followups.md: while
     _uploaded_preview is set, the map legend should render a simple
