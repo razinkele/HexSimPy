@@ -17,7 +17,7 @@ class BioParams:
     ED_MORTAL: float = 4.0
     T_OPT: float = 16.0  # optimal temperature for respiration (Macnaughton 2019)
     T_MAX: float = 26.0  # upper lethal temperature
-    ED_TISSUE: float = 5.0  # energy density of catabolized tissue (kJ/g)
+    ED_TISSUE: float = 36.0  # lipid catabolism (Brett 1995 / Breck 2008)
     MASS_FLOOR_FRACTION: float = 0.5  # minimum mass as fraction of current mass
     activity_by_behavior: dict[int, float] = field(
         default_factory=lambda: {
@@ -70,17 +70,21 @@ def update_energy(
     salinity_cost: np.ndarray,
     params: BioParams,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    # Lipid-first catabolism (Option A; Brett 1995 / Breck 2008). Mass lost
+    # per joule respired is set by ED_TISSUE (energy density of catabolized
+    # tissue, ~36 kJ/g for pure lipid). Because ED_TISSUE > whole-body ED,
+    # mass declines slower than total energy → remaining body's mean ED
+    # smoothly drops toward ED_MORTAL. The proportional-mass formula
+    # previously here kept ED flat by construction (only the mass-floor
+    # engaged it, abruptly), which masked starvation mortality.
     r_hourly = (
         hourly_respiration(mass_g, temperature_c, activity_mult, params) * salinity_cost
     )
     e_total_j = ed_kJ_g * 1000.0 * mass_g
     new_e_total_j = np.maximum(e_total_j - r_hourly, 0.0)
-    # Proportional mass loss: mass shrinks in proportion to energy loss.
-    # This keeps ED constant under pure respiration (standard Wisconsin model).
-    energy_fraction = np.where(e_total_j > 0, new_e_total_j / e_total_j, 0.0)
-    new_mass = mass_g * energy_fraction
-    # Floor at MASS_FLOOR_FRACTION of original mass to prevent numerical collapse
-    new_mass = np.maximum(new_mass, mass_g * params.MASS_FLOOR_FRACTION)
+    actual_loss_j = e_total_j - new_e_total_j
+    mass_lost_g = actual_loss_j / (params.ED_TISSUE * 1000.0)
+    new_mass = np.maximum(mass_g - mass_lost_g, mass_g * params.MASS_FLOOR_FRACTION)
     new_ed = np.where(new_mass > 0, new_e_total_j / (new_mass * 1000.0), 0.0)
     dead = new_ed < params.ED_MORTAL
     return new_ed, dead, new_mass

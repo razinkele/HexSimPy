@@ -150,6 +150,88 @@ def test_energy_density_decreases_monotonically():
         mass = new_mass
 
 
+def test_energy_density_declines_under_starvation():
+    """Under lipid-first catabolism (Option A), ED must actively DECLINE
+    toward ED_MORTAL during sustained starvation — not stay flat. The
+    pre-fix proportional-mass formula keeps ED constant until the mass
+    floor engages, hiding starvation behind a step function.
+
+    See docs/superpowers/specs/2026-04-23-bioenergetics-starvation-decision.md
+    """
+    from salmon_ibm.bioenergetics import update_energy, BioParams
+
+    params = BioParams()
+    ed = np.array([6.0])
+    mass = np.array([3500.0])
+    temp = np.array([15.0])
+    activity = np.ones(1)
+    sal_cost = np.ones(1)
+
+    initial_ed = float(ed[0])
+    for _ in range(72):  # 3 days at 15°C with no feeding
+        new_ed, dead, new_mass = update_energy(
+            ed, mass, temp, activity, sal_cost, params
+        )
+        if dead.any():
+            break
+        ed = new_ed
+        mass = new_mass
+
+    # Lipid-first catabolism should produce a measurable, smooth ED decline.
+    assert ed[0] < initial_ed - 0.01, (
+        f"ED should decline under starvation; started at {initial_ed:.4f}, "
+        f"ended at {ed[0]:.4f} after 72 h — likely the proportional-mass "
+        f"formula is still in place (ED stays flat by construction)."
+    )
+
+
+def test_starvation_triggers_mortality_when_energy_depleted():
+    """Starvation mortality should fire when ED reaches ED_MORTAL smoothly,
+    not as an abrupt cliff. Under the pre-fix physics, ED stays flat then
+    plummets to ~0 in a single step when the mass floor engages — the ED
+    at death is not near ED_MORTAL but near zero.
+
+    Under Option A, the trajectory is smooth: ED declines over many hours
+    and crosses ED_MORTAL while the agent's body is still at a sane mass.
+    """
+    from salmon_ibm.bioenergetics import update_energy, BioParams
+
+    params = BioParams()
+    ed = np.array([params.ED_MORTAL + 0.6])  # start close so test stays bounded
+    mass = np.array([3500.0])
+    temp = np.array([15.0])
+    activity = np.ones(1)
+    sal_cost = np.ones(1)
+
+    ed_at_death = None
+    mass_at_death = None
+    for _ in range(5000):  # cap iterations as a safety net
+        new_ed, dead, new_mass = update_energy(
+            ed, mass, temp, activity, sal_cost, params
+        )
+        if dead.any():
+            ed_at_death = float(new_ed[0])
+            mass_at_death = float(new_mass[0])
+            break
+        ed = new_ed
+        mass = new_mass
+
+    assert ed_at_death is not None, (
+        f"Agent failed to starve to mortality within 5000 hours; "
+        f"final ED={ed[0]:.4f}, ED_MORTAL={params.ED_MORTAL}"
+    )
+
+    # Under Option A, ED at death should be near ED_MORTAL — within
+    # ~one hourly respiration step. Under the pre-fix proportional-mass
+    # formula, ED at death is ~0 (abrupt cliff once mass floor engages),
+    # which fails this assertion.
+    assert ed_at_death > params.ED_MORTAL - 1.0, (
+        f"ED at death ({ed_at_death:.4f}) should be near ED_MORTAL "
+        f"({params.ED_MORTAL}); the abrupt-cliff signature suggests the "
+        f"proportional-mass formula is still in place."
+    )
+
+
 class TestBioParamsValidation:
     def test_negative_ra_raises(self):
         with pytest.raises(ValueError, match="RA"):

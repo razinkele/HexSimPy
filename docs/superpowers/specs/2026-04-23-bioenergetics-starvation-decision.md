@@ -1,6 +1,6 @@
 # Bioenergetics Starvation Physics — Modeler Decision Required
 
-**Status:** BLOCKED — awaiting sign-off before Task 1 of `2026-04-23-deep-review-fixes.md` can be implemented.
+**Status:** ✅ RESOLVED 2026-04-29 — Option A implemented. `BioParams.ED_TISSUE` bumped 5.0 → 36.0; `update_energy()` rewritten with lipid-first catabolism (`mass_lost = actual_loss_j / (ED_TISSUE * 1000)`). Two new TDD-style tests (`test_energy_density_declines_under_starvation`, `test_starvation_triggers_mortality_when_energy_depleted`) lock in the corrected physics. Full suite green: 811 passed in isolation. `BalticBioParams.ED_TISSUE` was already 36.0 (the docstring claim of "lipid-first catabolism" now matches reality everywhere). `MASS_FLOOR_FRACTION = 0.5` retained as numerical guard per modeler decision.
 **Owner:** @razinkele
 **Context:** Deep codebase review (2026-04-23) identified a starvation-mortality bug in `salmon_ibm/bioenergetics.py:64-85`.
 
