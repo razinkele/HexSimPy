@@ -1111,6 +1111,18 @@ app_ui = ui.page_sidebar(
     ui.head_content(
         ui.tags.script(THEME_JS),
         ui.tags.link(rel="stylesheet", href="style.css"),
+        # Inline SVG favicon (matches the 🍣 page-title branding) — also
+        # suppresses the previously-noisy /favicon.ico 404.
+        ui.tags.link(
+            rel="icon",
+            type="image/svg+xml",
+            href=(
+                "data:image/svg+xml;utf8,"
+                "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>"
+                "<text y='.9em' font-size='90'>🍣</text>"
+                "</svg>"
+            ),
+        ),
         ui.tags.meta(name="viewport", content="width=device-width, initial-scale=1"),
         # Disable MapLibre world tiling for the orthographic hex grid
         ui.tags.script("""
