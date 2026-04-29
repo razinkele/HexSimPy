@@ -26,6 +26,41 @@ def test_sidebar_create_model_inputs_have_expected_ids():
         assert input_id in rendered, f"missing input id: {input_id}"
 
 
+def test_map_legend_swaps_to_upload_badge_during_preview():
+    """Finding 2 from 2026-04-29-create-model-followups.md: while
+    _uploaded_preview is set, the map legend should render a simple
+    "Upload preview (N cells)" badge — not the production
+    "Hexagonal Grid (185,428 cells)" label keyed on sim.mesh.n_cells.
+    """
+    from pathlib import Path
+
+    app_py = (Path(__file__).resolve().parent.parent / "app.py").read_text(
+        encoding="utf-8"
+    )
+    lines = app_py.splitlines()
+    start = next(
+        (i for i, ln in enumerate(lines)
+         if "def map_legend(" in ln),
+        None,
+    )
+    assert start is not None, "map_legend() reactive not found in app.py"
+    end = next(
+        (i for i in range(start + 1, min(start + 100, len(lines)))
+         if lines[i].lstrip().startswith(("def ", "@", "# ---"))),
+        len(lines),
+    )
+    fn_body = "\n".join(lines[start:end])
+    assert "_uploaded_preview()" in fn_body, (
+        "map_legend() must consult _uploaded_preview to swap legends; the "
+        "production cell-count is misleading while the upload preview is "
+        "active (Finding 2 in the followups doc)."
+    )
+    assert "Upload preview" in fn_body, (
+        'map_legend() should emit an "Upload preview (N cells)" badge while '
+        "an upload is rendered."
+    )
+
+
 def test_upload_preview_layer_id_is_namespaced():
     """Finding 1 from 2026-04-29-create-model-followups.md: the
     upload-preview H3HexagonLayer id must NOT collide with the production
