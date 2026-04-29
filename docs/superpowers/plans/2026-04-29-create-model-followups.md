@@ -152,9 +152,31 @@ exactly one argument; fix the signature.
 
 ---
 
+## 6. Deploy script prints HTTP URL but laguna serves HTTPS
+
+**Severity:** very low — cosmetic; users still reach the site fine due
+to HTTP→HTTPS auto-redirect.
+
+**Where:** `scripts/deploy_laguna.sh` final stdout block prints
+`URL: http://laguna.ku.lt/HexSimPy/` after a successful deploy. The
+production server has been HTTPS-only (with redirect) for some time,
+so the printed URL is misleading — copy-pasting it works, but it
+implies http is the canonical endpoint when it isn't.
+
+**Why:** added before laguna gained TLS; never updated.
+
+**How to apply:** one-line change to the printf/echo statement.
+Confirmed during the 2026-04-29 production smoke test —
+http://laguna.ku.lt/HexSimPy/ 301-redirects to
+https://laguna.ku.lt/HexSimPy/.
+
+**Effort:** 2 min.
+
+---
+
 ## Suggested grouping
 
-For a v1.7.1 patch release: items 1, 2, 4 together (small, low-risk,
+For a v1.7.1 patch release: items 1, 2, 4, 6 together (small, low-risk,
 all toolchain-improvement) — defer 3 (UX judgment call, may not need a
 fix) and 5 (predates this feature, deserves its own session and may not
 even be related to Create Model).
