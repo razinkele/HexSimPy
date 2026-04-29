@@ -10,34 +10,67 @@ realism). Each gets its own spec → plan → ship cycle.
 
 ## Why now
 
-The v1.7.1 memory note flagged this exact gap: *"plan wires salinity into
-`salinity_cost()` only; ion-balance turnover / osmoregulation is still
-Chinook defaults, not defensible for S. salar."* The wiring shipped in
-the v1.7.0 Curonian-realism plan; the *parameters* did not. Today's
+The v1.7.1 memory note flagged this exact gap: *"plan wires salinity
+into `salinity_cost()` only; ion-balance turnover / osmoregulation is
+still Chinook defaults, not defensible for S. salar."* Today's
 lipid-first catabolism fix (commit `4247a11`) makes physiology the most
-recently-touched code surface — natural code-locality for this work.
+recently-touched code surface.
+
+What the memory got slightly wrong: the existing parameter values are
+already Baltic-flavored (`S_opt=0.5, S_tol=6.0`), but the function
+**shape** is Pacific-salmon-style. It returns cost = 1.0 for all
+salinities below `S_opt + S_tol = 6.5` PSU, including freshwater (0
+PSU). For *Salmo salar*, blood is iso-osmotic at ~10 PSU, so freshwater
+*does* impose an osmoregulation cost (hypo-osmotic stress: excrete
+water, retain ions). The threshold-linear shape models marine stress
+correctly and freshwater stress as zero, which is wrong.
+
+This plan replaces the *shape*, not just the numbers.
+
+## Current state (verified 2026-04-29)
+
+- Function: `salmon_ibm/estuary.py:49-58`
+- Signature: `salinity_cost(salinity, S_opt=0.5, S_tol=6.0, k=0.6, max_cost=5.0)`
+- Logic: `excess = max(salinity - (S_opt + S_tol), 0); return min(1.0 + k*excess, max_cost)` — threshold-linear, NaN-safe via `np.where(np.isnan, 0)`.
+- Parameters supplied via YAML config (`est.salinity_cost.{S_opt, S_tol, k}`) at two call sites:
+  - `salmon_ibm/events_builtin.py:83` (the `SurvivalEvent`).
+  - `salmon_ibm/simulation.py:481` (parallel/legacy energy step path).
+- Output is the `salinity_cost` ndarray fed into `update_energy()` in `bioenergetics.py:65`.
+- `EstuaryParams` dataclass (`estuary.py:11-28`) declares `s_opt: 0.5` and `s_tol: 6.0` but the function takes its own defaults — `EstuaryParams` is currently **not** wired through to `salinity_cost()`.
 
 ## Scope
 
-**In:** Replace the body of `salmon_ibm/bioenergetics.py::salinity_cost`
-with a smooth physiology-grounded function parameterised from peer-reviewed
-*S. salar* literature. Add three new fields to `BioParams` and
-`BalticBioParams` to hold the parameters. Add five unit tests.
+**In:**
+- Replace the body of `salmon_ibm/estuary.py::salinity_cost` with a
+  linear-with-anchors function modeling iso-osmotic physiology.
+- Replace the function's parameter set: drop `S_opt, S_tol, k, max_cost`
+  (Pacific-style threshold-linear), introduce
+  `iso, hyper_cost, hypo_cost` (S. salar iso-osmotic with asymmetric
+  costs).
+- Move parameters onto `EstuaryParams` (which currently has unused
+  `s_opt, s_tol`); add validation in `__post_init__`.
+- Update the 2 call sites to pass the new parameters from
+  `EstuaryParams`.
+- Migrate 5 YAML configs to the new schema.
+- Update `tests/test_estuary.py` to test the new shape.
+- Add 8 new tests (5 functional + 3 validation).
 
 **Out:**
 - Calibration to field data (V1: literature-only validation).
 - Ion-balance state on agents (gill ATPase activity tracking, acute
-  transition spikes, recovery dynamics) — that's the A3 ambition tier;
-  rejected for this plan, deferred indefinitely unless a use case
-  surfaces.
+  transition spikes, recovery dynamics) — A3 ambition tier; deferred
+  indefinitely unless a use case surfaces.
 - Salinity data plumbing — already in place via CMEMS forcing →
   `H3Environment` → `landscape["salinity"]`.
 - Comparison to other *S. salar* IBMs (inSTREAM-Baltic, Säterberg 2023)
   — possible future plan.
+- `BioParams` / `BalticBioParams` changes — these dataclasses are about
+  Wisconsin bioenergetics (RA, RB, RQ, ED_TISSUE, etc.); osmoregulation
+  is an estuarine stressor, so it lives on `EstuaryParams`.
 
 ## Choice of approach
 
-Three options were considered:
+Three functional-form options were considered:
 
 1. **Linear-with-anchors** — two slope parameters anchored to specific
    published values (selected).
@@ -52,45 +85,78 @@ defensible change.
 
 ## Functional form
 
+The function takes a single `params: EstuaryParams` argument (matches
+the `update_energy(..., params: BioParams)` precedent) instead of
+scalar keyword args:
+
 ```python
-def salinity_cost(salinity_ppt: np.ndarray, params: BioParams) -> np.ndarray:
-    """Osmoregulation cost multiplier on respiration.
+def salinity_cost(
+    salinity: np.ndarray,
+    params: EstuaryParams,
+) -> np.ndarray:
+    """Osmoregulation cost multiplier on respiration for S. salar.
 
-    Linear with separate slopes for hyper- and hypo-osmotic stress,
-    anchored to S. salar literature values.
+    Linear with separate slopes for hyper-osmotic (above iso) and
+    hypo-osmotic (below iso) stress, anchored to literature values
+    for blood iso-osmotic point and marine/freshwater respiration
+    increments.
 
-    Returns: multiplier ≥ 1.0; 1.0 at the blood iso-osmotic point.
+    Returns: multiplier ≥ 1.0; equals 1.0 at salinity == iso.
     """
-    s = np.clip(salinity_ppt, 0.0, 35.0)
-    iso = params.SALINITY_ISO_OSMOTIC
+    iso = params.salinity_iso_osmotic
+    hyper = params.salinity_hyper_cost
+    hypo = params.salinity_hypo_cost
+    safe = np.where(np.isnan(salinity), iso, salinity)  # NaN → iso (cost 1.0)
+    s = np.clip(safe, 0.0, 35.0)
     above = np.maximum(s - iso, 0.0) / max(35.0 - iso, 1.0)
     below = np.maximum(iso - s, 0.0) / max(iso, 1.0)
-    return (
-        1.0
-        + params.SALINITY_HYPER_COST * above
-        + params.SALINITY_HYPO_COST * below
-    )
+    return 1.0 + hyper * above + hypo * below
 ```
 
 The function is pure (no I/O), vectorised, and stable for the input
-range CMEMS produces.
+range CMEMS produces. NaN handling preserves the existing behavior of
+"NaN → no cost" but routes it through iso (semantically clearer than
+defaulting to 0).
+
+The output is no longer capped (no `max_cost`) because the linear-from-iso
+form has a natural maximum of `1.0 + hyper_cost ≈ 1.30` at full marine
+salinity. The previous `max_cost=5.0` cap existed because the
+threshold-linear form could grow unbounded for arbitrary salinity input.
+
+**Why the signature change:** the existing function takes 4 scalar
+keyword args (`S_opt, S_tol, k, max_cost`); the call sites build them
+from a YAML dict. This means `EstuaryParams` (which already exists with
+`s_opt, s_tol`) is **not wired through** to the function — it's
+decorative and tested but its values never reach production code.
+Switching to `(salinity, params: EstuaryParams)` wires it through
+properly and makes `__post_init__` validation real (vs theatrical), at
+the cost of a small refactor at the two call sites and a YAML schema
+migration.
 
 ## Parameters
 
-Three new fields on `BioParams` and `BalticBioParams`. Both species use
-the same defaults — Chinook and Atlantic salmon overlap on these
-quantities at the literature-anchor level. Per the lipid-first precedent
-(`ED_TISSUE: 5.0 → 36.0`), we update both rather than fork.
+Three new fields on `EstuaryParams`. Two old fields (`s_opt, s_tol`)
+are removed — they referred to a Pacific-salmon physiology that doesn't
+apply to *S. salar*.
+
+Note: `EstuaryParams.s_opt` and `EstuaryParams.s_tol` are **currently
+dead code** — they're declared on the dataclass but `salinity_cost()`
+takes its own function defaults (also `S_opt=0.5, S_tol=6.0`) without
+reading from `EstuaryParams`. So removing them is safer than it sounds:
+no caller depends on them. The YAML config layer (`est.salinity_cost.{S_opt, S_tol, k}`)
+*is* live and feeds the function; that's what the migration handles.
 
 | Field | Default | Citation | Validation |
 |---|---|---|---|
-| `SALINITY_ISO_OSMOTIC` | `10.0` ppt | Wilson 2002 — *S. salar* blood plasma iso-osmolality is in the 9-12 ppt range | `0 < iso < 35` |
-| `SALINITY_HYPER_COST` | `0.30` | Brett & Groves 1979 — ~30% above iso-osmotic respiration at full marine salinity (35 ppt) for euryhaline salmonids | `0 ≤ x ≤ 1` |
-| `SALINITY_HYPO_COST` | `0.05` | Brett & Groves 1979 — ~5% above iso-osmotic respiration at freshwater (0 ppt); the asymmetry reflects hyper-osmotic stress being more energetically expensive than hypo | `0 ≤ x ≤ 1` |
+| `salinity_iso_osmotic` | `10.0` ppt | Wilson 2002 — *S. salar* blood plasma iso-osmolality is in the 9-12 ppt range | `0 < iso < 35` |
+| `salinity_hyper_cost` | `0.30` (verify) | Brett & Groves 1979 — chapter reports ~25-35% above iso-osmotic respiration at full marine salinity for euryhaline salmonids; **plan task: verify exact number from Table 8.x of the chapter and update default if needed** | `0 ≤ x ≤ 1` |
+| `salinity_hypo_cost` | `0.05` (verify) | Brett & Groves 1979 — chapter reports ~5-10% above iso-osmotic respiration at freshwater for euryhaline salmonids; the asymmetry reflects hyper-osmotic stress being more energetically expensive than hypo. **Plan task: verify exact number** | `0 ≤ x ≤ 1` |
 
-The validation rules go in each class's `__post_init__`, raising
-`ValueError` on out-of-range values, matching the existing pattern for
-`RA`, `RQ`, `T_OPT`, `T_MAX`.
+Validation lives in `EstuaryParams.__post_init__`, raising `ValueError`
+on out-of-range values. Currently `EstuaryParams` has no `__post_init__`
+— this plan adds one. Validation covers the three new salinity fields
+**only**; validation for the existing `do_lethal`, `do_high`,
+`seiche_threshold_m_per_s` fields is deferred (see Out-of-scope).
 
 ### Citations
 
@@ -101,92 +167,164 @@ The validation rules go in each class's `__post_init__`, raising
 - **Brett, J. R., & Groves, T. D. D. (1979).** Physiological energetics.
   In *Fish Physiology* (Vol. 8). Academic Press, pp. 279–352. — chapter
   reports salinity effects on respiration for migratory salmonids;
-  ~30% increase at marine vs iso, ~5-10% at freshwater.
+  ~25-35% increase at marine vs iso, ~5-10% at freshwater. Implementation
+  plan must verify exact values from the chapter and adjust defaults
+  accordingly.
 
 ## Architecture
 
-The change is local: one function body, six new fields (3 each on two
-dataclasses), five new tests. No new modules, no new files.
+The change is wider than originally scoped — touches one function body,
+one dataclass, two call sites, five YAML configs, two documentation
+files. No new modules, no new files.
 
-`salinity_cost()` is called once today from `update_energy()` in
-`bioenergetics.py:73-74`. The new body has the same input/output
-contract (NumPy array in, NumPy array out, multiplier ≥ 1) — no caller
-changes.
+**Files modified:**
+
+1. `salmon_ibm/estuary.py`
+   - `salinity_cost()` body + signature replaced.
+   - `EstuaryParams` extended with 3 new fields, `s_opt` and `s_tol`
+     fields removed, `__post_init__` added.
+2. `salmon_ibm/events_builtin.py:83` — call site builds an
+   `EstuaryParams` instance from the YAML config dict (filtering to
+   known fields) and passes it to `salinity_cost(sal, est_params)`.
+   Likely best to construct `EstuaryParams` once at `SurvivalEvent`
+   init rather than per-step (perf-friendly, also surfaces validation
+   errors at scenario-load time, not first step).
+3. `salmon_ibm/simulation.py:481` — same pattern as the
+   `events_builtin.py` call site.
+4. `tests/test_estuary.py` — existing salinity tests rewritten for the
+   new shape; 8 new tests added.
+5. YAML configs (5 files): `config_columbia.yaml`,
+   `config_curonian_minimal.yaml`,
+   `configs/config_curonian_trimesh.yaml`,
+   `configs/config_curonian_baltic.yaml`,
+   `config_curonian_hexsim.yaml` — replace
+   `salinity_cost: {S_opt, S_tol, k}` block with
+   `salinity_cost: {iso, hyper_cost, hypo_cost}`.
+6. Documentation: `docs/api-reference.md` and `docs/model-manual.md` —
+   update the function signature reference and YAML schema examples.
 
 The salinity field per agent already flows from CMEMS forcing through
 the env model. No data wiring changes.
 
+## Migration
+
+The old YAML schema (`S_opt`, `S_tol`, `k`) is removed without
+backward-compat — the parameter semantics are scientifically wrong for
+*S. salar* (zero freshwater cost), so silently mapping old values to
+new ones would preserve a bug. Following the lipid-first precedent
+(commit `4247a11`, which deleted the proportional-mass formula
+without a compat shim).
+
+For any user with custom configs not in this repo:
+- `S_opt` and `S_tol` no longer have meaning. Closest equivalent is
+  `iso` (the salinity at which cost is minimum).
+- `k` (slope above threshold) maps roughly to `hyper_cost` after
+  appropriate rescaling, but the math is not 1:1.
+- Migration documented in the implementation plan's commit message;
+  default values produce the published *S. salar* curve, so most users
+  can simply delete their `salinity_cost` block from YAML.
+
 ## Tests
 
-Five new tests in `tests/test_bioenergetics.py`:
+### Existing tests — review and update
 
-1. `test_salinity_cost_at_iso_returns_unity` — `salinity_cost(np.array([10.0]), BioParams())[0]
-   == pytest.approx(1.0)`. Lock in the iso-osmotic anchor.
+`tests/test_estuary.py` currently tests the threshold-linear shape and
+includes `test_estuary_params_defaults_match_liland_2024` (line ~79)
+which asserts `EstuaryParams()` defaults. The implementation plan will:
 
-2. `test_salinity_cost_marine_matches_brett_groves` — at salinity=35 ppt,
-   cost is approximately `1 + 0.30 * 1.0 == 1.30`. Lock in the marine
-   anchor.
+- Identify which tests assert the `cost = 1.0 below threshold` behavior
+  and either rewrite them (now `cost > 1.0 in freshwater`) or delete
+  them.
+- Preserve any tests that aren't shape-dependent (NaN-handling,
+  vectorisation, monotonicity outside iso).
+- Update `test_estuary_params_defaults_match_liland_2024` to drop
+  assertions about `s_opt, s_tol` (removed) and add assertions about
+  the new `salinity_iso_osmotic, salinity_hyper_cost, salinity_hypo_cost`
+  defaults.
 
-3. `test_salinity_cost_freshwater_above_one` — at salinity=0 ppt, cost
-   is approximately `1 + 0.05 * 1.0 == 1.05` and strictly less than the
-   marine cost. Locks the asymmetry.
+The other 5 test files referencing `salinity_cost` (`test_bioenergetics.py`,
+`test_h3_multires_integration.py`, `test_curonian_realism_integration.py`,
+`test_ensemble.py`, `test_config.py`) need plan-time inspection:
 
-4. `test_salinity_cost_smooth_monotonic_outside_iso` — generates a sweep
-   from 0 to 35 ppt; asserts cost is monotonically non-decreasing as we
-   move from iso to either extreme.
+- Tests that **import and call `salinity_cost()` directly with old
+  kwargs** (`S_opt=...`, `S_tol=...`, `k=...`) will TypeError at call
+  time after the signature change — these need updates regardless of
+  what they assert.
+- Tests that use it **indirectly via `update_energy()` or YAML-loaded
+  scenarios** are likely fine unless they assert specific
+  energy/mortality values post-transit.
 
-5. `test_salinity_cost_vectorised` — passes a `(100,)` salinity array;
-   asserts output has same shape and all values ≥ 1.0.
+Full suite run will surface both classes; the implementation plan must
+budget for fixing direct-call sites and triaging indirect-assertion
+breaks.
 
-Plus three validation tests in the existing `TestBioParamsValidation`
-class:
+### New tests in `tests/test_estuary.py`
 
-6. `test_negative_iso_raises` — `BioParams(SALINITY_ISO_OSMOTIC=-1.0)`
-   raises `ValueError`.
-7. `test_iso_above_max_raises` — `BioParams(SALINITY_ISO_OSMOTIC=40.0)`
-   raises `ValueError`.
-8. `test_negative_hyper_cost_raises` — `BioParams(SALINITY_HYPER_COST=-0.1)`
-   raises `ValueError`.
+All function-level tests construct an `EstuaryParams()` (defaults) and
+pass it as the second argument; the new signature requires it.
 
-Total new tests: 8 (5 functional + 3 validation).
+Five functional:
+
+1. `test_salinity_cost_at_iso_returns_unity` — `salinity_cost(np.array([10.0]), EstuaryParams())[0] == pytest.approx(1.0)`. Lock the iso anchor.
+2. `test_salinity_cost_marine_matches_brett_groves` — at salinity=35 with default params, cost ≈ 1.30 (or whatever the verified Brett & Groves number is).
+3. `test_salinity_cost_freshwater_above_one` — at salinity=0 with default params, cost > 1.0 and strictly less than the marine cost. Locks the asymmetry.
+4. `test_salinity_cost_smooth_monotonic_outside_iso` — sweep 0..35; cost is monotonic non-decreasing as |salinity − iso| grows.
+5. `test_salinity_cost_handles_nan` — input `np.array([np.nan, 10.0, 35.0])` returns `[1.0, 1.0, 1+hyper]` (NaN treated as iso → cost 1.0).
+
+Three validation in a new `TestEstuaryParamsValidation` class:
+
+6. `test_negative_iso_raises` — `EstuaryParams(salinity_iso_osmotic=-1.0)` raises.
+7. `test_iso_above_35_raises` — `EstuaryParams(salinity_iso_osmotic=40.0)` raises.
+8. `test_negative_hyper_cost_raises` — `EstuaryParams(salinity_hyper_cost=-0.1)` raises.
+
+**Total:** 8 new tests + ~3 existing tests rewritten.
 
 ## Risk + regression surface
 
-**Behavior change surface:** any test that exercises agents transiting a
-salinity gradient. The Chinook lookup the new function replaces was
-already in production; switching to the new function will shift the
-energy budget for migrants in the lagoon (~5 ppt, brackish) and Baltic
-(~7 ppt typical, brackish-marine). Likely to be small, since both
-landscapes sit relatively close to iso (10 ppt).
+**Behavior change surface:** any test or run that exercises agents at
+salinities below `S_opt + S_tol = 6.5` PSU. Under the old function,
+cost was 1.0 below threshold (no salinity penalty). Under the new
+function, cost rises smoothly from iso (~10 PSU) toward freshwater,
+reaching ~1.05 at 0 PSU.
 
-**Tests that may need updating:** any pre-existing migration test
-that asserts specific energy/mortality numbers post-transit. Per the
-v1.7.1 lipid-first precedent — the spec there warned of similar
-regression-baseline risk and the actual breakage was zero (the new
-formula also conserved energy by construction). Same expectation here:
-the new function preserves the cost = 1.0 case (when salinity = iso),
-so any test running at iso-salinity won't shift.
+In practice the lagoon is at ~5 PSU and the Baltic at ~7 PSU, both
+below the old threshold. Under the new physics, both will see a small
+cost increase (~2-4% multiplier). This will slightly raise migrant
+respiration energy use — biologically more correct, but a regression
+relative to any test asserting old energy values.
 
-**Mitigation:** run full pytest suite, surface regressions, fix or
-update them. Same playbook as v1.7.1.
+**Tests that may need updating:**
+- Existing `test_estuary.py` salinity tests (explicitly listed above —
+  rewrite or delete).
+- Possibly `test_curonian_realism_integration.py` if it asserts specific
+  energy/mortality values post-transit (verify during implementation).
+
+**Mitigation:** run full pytest suite before pushing, surface
+regressions, fix or update them. Same playbook as v1.7.1 lipid-first.
 
 ## Success criteria
 
-- [ ] `salinity_cost()` body replaced with linear-with-anchors form.
-- [ ] All 8 new tests pass.
+- [ ] `salinity_cost()` body + signature replaced with linear-with-anchors form.
+- [ ] `EstuaryParams` extended with 3 new fields + `__post_init__`
+      validation.
+- [ ] Both call sites (`events_builtin.py`, `simulation.py`) updated.
+- [ ] All 5 YAML configs migrated.
+- [ ] Documentation (`api-reference.md`, `model-manual.md`) updated.
+- [ ] All 8 new tests pass; existing salinity tests in `test_estuary.py`
+      rewritten or deleted as appropriate.
 - [ ] Full pytest suite stays green (current: 815 passing on main;
-      expected post-change: 823 passing).
+      expected post-change: ~821-823 passing depending on how many
+      existing tests are absorbed/replaced vs added).
 - [ ] Manual sanity check: cost curve plotted from 0 to 35 ppt looks
-      smooth and matches the published *S. salar* shape (low at iso,
-      gradual hypo rise, steeper hyper rise).
-- [ ] Plan stamp on the eventual implementation plan: ✅ EXECUTED.
+      smooth, has minimum at iso (10 ppt), and matches the published
+      *S. salar* shape.
+- [ ] Plan stamp on the implementation plan: ✅ EXECUTED.
 
 ## Estimated implementation time
 
-**1-2 days** including TDD cycle, regression sweep, and any test fixups.
-Single function body; same code-locality as the lipid-first work shipped
-2026-04-29; same regression-management playbook (run suite, fix what
-breaks).
+**1-2 days** including TDD cycle, YAML migration, doc updates, and
+regression sweep. Most of the work is mechanical (YAML/doc sync); the
+function rewrite itself is ~10 lines.
 
 ## Out-of-scope (deferred)
 
@@ -201,3 +339,7 @@ breaks).
 - **Acute transition spikes.** Modeled via Brett & Groves' chronic-cost
   framing only. Not modeled because IBM-level signals are dominated by
   movement and encounter, not individual transition events.
+- **`EstuaryParams` validation for non-salinity fields** (`do_lethal`,
+  `do_high`, `seiche_threshold_m_per_s`). Adding these to the new
+  `__post_init__` is scope creep; the plan can add them opportunistically
+  if it's free, but they're not blocking and not a requirement.
