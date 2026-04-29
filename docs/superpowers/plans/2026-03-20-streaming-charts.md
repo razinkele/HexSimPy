@@ -1,5 +1,7 @@
 # Streaming Interactive Charts Implementation Plan
 
+> **STATUS: ✅ EXECUTED** — Streaming `Plotly.extendTraces` shipped — `ui/charts_panel.py`, `www/streaming_charts.js`, `_push_chart_data`, `_push_chart_reset` all in place; iframe Plotly rebuilds eliminated.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace iframe-based Plotly chart rebuilds with streaming Plotly.js charts alongside the map, eliminating spinners during simulation.

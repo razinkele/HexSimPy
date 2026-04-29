@@ -1,5 +1,7 @@
 # Post-Review Bugfixes — Implementation Plan
 
+> **STATUS: ✅ EXECUTED** — All 11 post-review fixes shipped — DataLookup CSV loading, trait filter format, mate selection, vectorized HexSimMove, `deque` in network, dead-prey check etc. Tests in `tests/test_review_fixes.py`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Fix the 11 bugs and parity issues found during the comprehensive code review, in priority order: critical logic bugs first, then parity gaps, then performance.

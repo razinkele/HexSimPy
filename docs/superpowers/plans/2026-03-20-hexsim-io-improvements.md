@@ -1,5 +1,7 @@
 # HexSim I/O Improvements Implementation Plan
 
+> **STATUS: ✅ EXECUTED** — Narrow-grid bug fixes, I/O validation, `salmon_ibm/event_descriptors.py` + `from_descriptor()` registry-driven loading all shipped. Tests in `tests/test_hexsim_io.py`, `test_io_validation.py`, `test_event_parsing.py`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Fix critical narrow-grid bugs, add I/O validation, and prepare the XML parser for EVENT_REGISTRY integration.

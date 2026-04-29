@@ -1,5 +1,7 @@
 # Movement Animation & Live Dashboard — Implementation Plan
 
+> **STATUS: ✅ EXECUTED** — User-visible deliverables (agent transitions, PathLayer trails, live stats bar, trail toggle) all shipped. Implementation diverged from plan: uses deck.gl built-in TripsLayer + `TripBuffer` rather than the plan's custom `_build_agent_binary` / `BEH_COLORS_ARRAY`. The named-function deviation is sound (use the well-tested library) — the *goal* shipped, the *prescribed implementation* did not.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add smooth agent movement animation (deck.gl transitions), trail visualization (PathLayer), and a real-time stats bar to the HexSim Shiny app.

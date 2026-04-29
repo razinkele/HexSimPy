@@ -1,5 +1,7 @@
 # Accumulator Layout Transpose Implementation Plan
 
+> **STATUS: ✅ EXECUTED** — `AccumulatorManager.data` transposed from `(n_agents, n_acc)` to `(n_acc, n_agents)` — 2.77x total speedup. `scripts/bench_accumulators.py` shipped as no-regression sentinel.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Transpose `AccumulatorManager.data` from `(n_agents, n_acc)` to `(n_acc, n_agents)` so column-slice access (`data[idx, :]`) is contiguous in memory, giving an expected **1.5-3× speedup** on accumulator-heavy scenarios.

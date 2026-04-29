@@ -1,5 +1,7 @@
 # Phase A: XML Parser Rewrite — Implementation Plan
 
+> **STATUS: ✅ EXECUTED** — `salmon_ibm/xml_parser.py` rewrite shipped — parses real Columbia HexSim scenario XML into a structured config dict (simulation/grid/workspace/populations/events/global_variables).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Rewrite `salmon_ibm/xml_parser.py` so `load_scenario_xml()` correctly parses real HexSim scenario XML files, specifically `gr_Columbia2017B.xml` (9644 lines, 4 populations, 9 root events, 58 global variables, 18 spatial data series).

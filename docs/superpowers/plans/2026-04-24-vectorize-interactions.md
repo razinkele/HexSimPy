@@ -1,5 +1,7 @@
 # Vectorize InteractionEvent Implementation Plan
 
+> **STATUS: ✅ EXECUTED** — `InteractionEvent.execute` vectorized via NumPy `rolls < encounter_probability` matrix — 5.7x speedup. First-kill-wins semantics preserved.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the nested Python loop in `InteractionEvent.execute` (`salmon_ibm/interactions.py:125-145`) with a vectorized NumPy implementation that preserves the "first-kill wins" semantics while scaling O(|A|·|B|) arithmetic to NumPy-level throughput.

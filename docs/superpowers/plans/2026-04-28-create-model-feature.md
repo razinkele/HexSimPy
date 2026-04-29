@@ -1,5 +1,7 @@
 # Create Model Feature Implementation Plan
 
+> **STATUS: ✅ EXECUTED** — Shipped as **v1.7.0** on 2026-04-29 (commit `1259074`, deployed to laguna.ku.lt). All 19 plan tasks complete, 810 tests passing, manual Playwright smoke 4/4 green, production smoke 3/3 green. Six follow-ups captured in `2026-04-29-create-model-followups.md`; v1.7.1 cleanup PR scheduled for 2026-05-13 via remote routine `trig_01ExvucAzsjT3CFH4rahycRK`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a "Create Model" sidebar accordion that lets users upload `shp.zip` / `gpkg` / `geojson` polygon files and preview them as an H3 tessellation overlaid on the map (viewer-only ephemeral, with an optional bathymetry-shading toggle).

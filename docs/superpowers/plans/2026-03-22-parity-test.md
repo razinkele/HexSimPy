@@ -1,5 +1,7 @@
 # Parity Test Implementation Plan
 
+> **STATUS: ✅ EXECUTED** — `scripts/parity_test.py` + `parity-test` skill shipped — XML patching, accumulator map, HexSim/HexSimPy runners, divergence comparison, CLI. Tests in `tests/test_parity_test.py`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Create `scripts/parity_test.py` and `~/.claude/skills/parity-test/SKILL.md` that run the same HexSim scenario on both HexSim 4.0.20 (C++) and HexSimPy, compare census + data probe outputs, and report PASS/WARN/FAIL.

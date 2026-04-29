@@ -1,5 +1,7 @@
 # Deep Review Fixes — Implementation Plan
 
+> **STATUS: 🟡 PARTIAL** — Perf/security shipped: Liland 2024 DO thresholds for *S. salar*, contiguous-centroids cache, preallocated `OutputLogger` buffers, `push_temperature` `alive_mask` gating, Numba/NumPy parity tests, activity-by-temperature decision doc. **Open thread**: Task 1 (`ED_TISSUE = 36` starvation physics rewrite) is BLOCKED ON MODELER SIGN-OFF — current code still uses `ED_TISSUE = 5.0` and the `test_energy_density_declines_under_starvation` test does not exist. AST sandbox hardening (Tasks 5/5b/6: `_RNG_ARG_MAX`, `_PROTECTED`, AST guards) also outstanding. Resolve by either running the modeler conversation OR explicitly marking Task 1 indefinitely deferred.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Fix all verified correctness, security, robustness, and performance issues identified in the 2026-04-23 five-pass codebase review of the Baltic Salmon IBM.

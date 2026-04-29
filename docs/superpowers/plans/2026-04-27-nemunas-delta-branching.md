@@ -1,5 +1,7 @@
 # Nemunas Delta Branching Implementation Plan
 
+> **STATUS: ✅ EXECUTED** — `salmon_ibm/delta_routing.py` shipped — sticky first-touch `update_exit_branch_id` CustomEvent + `natal_reach_id` / `exit_branch_id` int8 fields on `AgentPool`. `nemunas_discharge.nc` now carries `Q_per_branch` for Atmata / Skirvyte / Pakalnė split.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add agent-side topology awareness (natal reach + first-touch exit branch) and per-branch discharge data shape for the three flowing Nemunas delta branches (Atmata, Skirvytė, Gilija), keeping the runtime minimal and the data shape extensible for future per-branch mortality / homing plans.

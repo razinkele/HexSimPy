@@ -1,5 +1,7 @@
 # H3 Multi-Resolution — Phase 2 Implementation Plan
 
+> **STATUS: ✅ EXECUTED** — `H3MultiResMesh` wired through full sim/viewer/test stack and shipped as **v1.3.0**. CMEMS forcing in builder, deck.gl per-cell resolution, MAX_NBRS overflow guard, gradient() port. Tests in `tests/test_h3_multires.py`, `test_h3_multires_builder.py`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Wire the v1.2.8 `H3MultiResMesh` scaffold through the full simulation, viewer, and test stack — so a user can pick a mixed-resolution Curonian Lagoon (rivers **res 10** ~75 m, lagoon res 9 ~200 m, OpenBaltic res 8 ~530 m) from the sidebar and run a 30-day simulation end-to-end. The default-resolution constants in `scripts/build_h3_multires_landscape.py` still claim river res 11; this plan deliberately runs the smoke build at res 10 so the integration test finishes in <60 s. Bumping rivers to res 11 is one config flag away — see the "Out of scope → Resolution tuning" note at the bottom.

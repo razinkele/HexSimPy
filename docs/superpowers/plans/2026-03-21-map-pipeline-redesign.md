@@ -1,5 +1,7 @@
 # Map Pipeline Redesign Implementation Plan
 
+> **STATUS: ✅ EXECUTED** — `BLANK_STYLE` data URL, `_should_transition` deletion, `_color_and_agent_update` → `_hex_color_update` replacement, and `_agent_only_update` → `_agent_trail_update` rename all shipped.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Fix hex grid disappearing during run, add smooth agent animation with trails, fix BLANK_STYLE URL bug.

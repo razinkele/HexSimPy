@@ -1,5 +1,7 @@
 # Curonian Lagoon Realism Upgrades — Implementation Plan
 
+> **STATUS: ✅ EXECUTED** — P0+P1 in-scope phases shipped: `salmon_ibm/baltic_params.py`, `configs/baltic_salmon_species.yaml`, `scripts/fetch_emodnet_bathymetry.py`, `scripts/fetch_cmems_forcing.py`, real-data `data/curonian_*` NetCDFs. Phase-5 integration test green. **9 P2 items explicitly deferred** per memory `curonian_deferred.md` — each will need its own plan.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Transform the HexSim Curonian Lagoon study area from a stub-driven setup (generic Chinook bioenergetics + placeholder data files + scalar salinity gate) into a defensible Baltic salmon model with real bathymetry, spatially-explicit salinity, real temperature forcing, species-accurate parameters, and post-smolt marine mortality — closing the gap to inSTREAM's `example_baltic.yaml`.
