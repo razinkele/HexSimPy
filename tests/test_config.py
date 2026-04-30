@@ -23,7 +23,11 @@ def test_config_has_grid_section():
 def test_config_has_estuary_section():
     cfg = load_config("config_curonian_minimal.yaml")
     assert "estuary" in cfg
-    assert cfg["estuary"]["salinity_cost"]["S_opt"] == 0.5
+    # Migrated 2026-04-30: old schema (S_opt, S_tol, k) replaced by
+    # iso-osmotic schema (salinity_iso_osmotic, salinity_hyper_cost,
+    # salinity_hypo_cost). See spec
+    # docs/superpowers/specs/2026-04-29-osmoregulation-stress-design.md.
+    assert cfg["estuary"]["salinity_cost"]["salinity_iso_osmotic"] == 10.0
     assert cfg["estuary"]["do_avoidance"]["lethal"] == 2.0
     assert cfg["estuary"]["seiche_pause"]["dSSHdt_thresh_m_per_15min"] == 0.02
 
