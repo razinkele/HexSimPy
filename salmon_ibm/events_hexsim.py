@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 import logging
 import numpy as np
 from salmon_ibm.events import Event, register_event
+from salmon_ibm.origin import ORIGIN_WILD
 
 try:
     from numba import njit, prange
@@ -398,6 +399,7 @@ class PatchIntroductionEvent(Event):
     """Place one agent on every non-zero cell of a named spatial data layer."""
 
     patch_spatial_data: str = ""
+    origin: int = ORIGIN_WILD
 
     def execute(self, population, landscape, t, mask):
         spatial_registry = landscape.get("spatial_data", {})
@@ -415,7 +417,11 @@ class PatchIntroductionEvent(Event):
         nonzero_cells = np.where(layer != 0)[0]
         if len(nonzero_cells) == 0:
             return
-        new_idx = population.add_agents(len(nonzero_cells), nonzero_cells)
+        new_idx = population.add_agents(
+            len(nonzero_cells),
+            nonzero_cells,
+            origin=self.origin,
+        )
         mesh = landscape.get("mesh")
         if mesh is not None:
             population.set_natal_reach_from_cells(new_idx, mesh)

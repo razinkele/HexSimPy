@@ -54,3 +54,32 @@ def test_population_add_agents_with_origin():
     assert (pool.origin[:3] == ORIGIN_WILD).all()
     # New 2 agents are HATCHERY
     assert (pool.origin[new_idx] == ORIGIN_HATCHERY).all()
+
+
+def test_introduction_event_propagates_origin():
+    """IntroductionEvent(origin=ORIGIN_HATCHERY) tags the new agents
+    as hatchery in the population's origin column."""
+    import numpy as np
+    from salmon_ibm.agents import AgentPool
+    from salmon_ibm.population import Population
+    from salmon_ibm.events_builtin import IntroductionEvent
+    from salmon_ibm.origin import ORIGIN_WILD, ORIGIN_HATCHERY
+
+    pool = AgentPool(n=2, start_tri=0, rng_seed=42)
+    # Population is a @dataclass with `name` as first required field.
+    pop = Population(name="test", pool=pool)
+    landscape = {"rng": np.random.default_rng(0)}
+
+    # Event base class requires `name`; trigger defaults to EveryStep.
+    evt = IntroductionEvent(
+        name="intro_test",
+        n_agents=3,
+        positions=[0],
+        origin=ORIGIN_HATCHERY,
+    )
+    evt.execute(pop, landscape, t=0, mask=None)
+
+    # Pre-existing 2 agents stay WILD
+    assert (pool.origin[:2] == ORIGIN_WILD).all()
+    # New 3 agents are HATCHERY
+    assert (pool.origin[2:5] == ORIGIN_HATCHERY).all()
