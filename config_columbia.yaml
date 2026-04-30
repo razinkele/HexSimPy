@@ -8,9 +8,11 @@ hexsim:
 
 estuary:
   salinity_cost:
-    S_opt: 0.5
-    S_tol: 999
-    k: 0.0
+    # Columbia: freshwater scenario; zero slopes disable osmoregulation cost
+    # (cost = 1.0 for all salinities). Migrated from old S_tol: 999, k: 0.0
+    # disable pattern.
+    salinity_hyper_cost: 0.0
+    salinity_hypo_cost: 0.0
   do_avoidance:
     lethal: 0.0
     high: 0.0
