@@ -10,7 +10,7 @@ import numpy as np
 from salmon_ibm.events import Event, register_event
 from salmon_ibm.movement import execute_movement
 from salmon_ibm.bioenergetics import BioParams, update_energy
-from salmon_ibm.estuary import salinity_cost
+from salmon_ibm.estuary import salinity_cost, EstuaryParams
 
 
 @register_event("movement")
@@ -79,13 +79,23 @@ class SurvivalEvent(Event):
                     )
                     self._salinity_warned = True
             sal_at_agents = sal[population.tri_idx]
+            # Build EstuaryParams from the salinity_cost YAML subsection.
+            # Filter to known fields so legacy keys (S_opt, S_tol, k) are
+            # silently dropped — falls back to dataclass defaults rather
+            # than raising TypeError. Per-call construction is cheap
+            # (microseconds) and SurvivalEvent is a dataclass that can't
+            # easily stash this in __init__ (est_cfg is in landscape, not
+            # self). See plan 2026-04-30-osmoregulation-stress for context.
+            _known_salinity_keys = {
+                "salinity_iso_osmotic",
+                "salinity_hyper_cost",
+                "salinity_hypo_cost",
+            }
             s_cfg = est_cfg.get("salinity_cost", {})
-            sal_cost_arr = salinity_cost(
-                sal_at_agents,
-                S_opt=s_cfg.get("S_opt", 0.5),
-                S_tol=s_cfg.get("S_tol", 6.0),
-                k=s_cfg.get("k", 0.6),
+            est_params = EstuaryParams(
+                **{k: v for k, v in s_cfg.items() if k in _known_salinity_keys}
             )
+            sal_cost_arr = salinity_cost(sal_at_agents, est_params)
             new_ed, dead, new_mass = update_energy(
                 population.ed_kJ_g[alive],
                 population.mass_g[alive],
