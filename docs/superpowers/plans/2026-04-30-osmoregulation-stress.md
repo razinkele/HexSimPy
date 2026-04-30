@@ -87,7 +87,7 @@ Adds the three new salinity fields and validation. `salinity_cost()` body stays 
 
 - [ ] **Step 2.1: Write failing validation tests**
 
-Append to `tests/test_estuary.py`:
+Append to `tests/test_estuary.py`. **Three tests** as authorized by the spec:
 
 ```python
 class TestEstuaryParamsValidation:
@@ -95,11 +95,6 @@ class TestEstuaryParamsValidation:
         from salmon_ibm.estuary import EstuaryParams
         with pytest.raises(ValueError, match="salinity_iso_osmotic"):
             EstuaryParams(salinity_iso_osmotic=-1.0)
-
-    def test_iso_at_zero_raises(self):
-        from salmon_ibm.estuary import EstuaryParams
-        with pytest.raises(ValueError, match="salinity_iso_osmotic"):
-            EstuaryParams(salinity_iso_osmotic=0.0)
 
     def test_iso_above_35_raises(self):
         from salmon_ibm.estuary import EstuaryParams
@@ -110,14 +105,11 @@ class TestEstuaryParamsValidation:
         from salmon_ibm.estuary import EstuaryParams
         with pytest.raises(ValueError, match="salinity_hyper_cost"):
             EstuaryParams(salinity_hyper_cost=-0.1)
-
-    def test_negative_hypo_cost_raises(self):
-        from salmon_ibm.estuary import EstuaryParams
-        with pytest.raises(ValueError, match="salinity_hypo_cost"):
-            EstuaryParams(salinity_hypo_cost=-0.1)
 ```
 
-- [ ] **Step 2.2: Run the new tests; expect 5 failures**
+(Boundary cases at iso=0 and iso=35 plus a parallel hypo-cost negative test were considered as defensive coverage but excluded to stay spec-faithful — `__post_init__` enforces `0 < iso < 35` and `0 ≤ hypo_cost ≤ 1` regardless. Future plan can add them if a regression is observed.)
+
+- [ ] **Step 2.2: Run the new tests; expect 3 failures**
 
 ```bash
 micromamba run -n shiny python -m pytest tests/test_estuary.py::TestEstuaryParamsValidation -v
@@ -184,13 +176,13 @@ If your verified Brett & Groves values from Task 1 differ from 0.30 / 0.05, subs
 
 **Note:** `s_opt` and `s_tol` are gone — they're removed in this same step rather than as a separate task. The migration is in Tasks 7-9.
 
-- [ ] **Step 2.4: Run validation tests — expect all 5 to pass**
+- [ ] **Step 2.4: Run validation tests — expect all 3 to pass**
 
 ```bash
 micromamba run -n shiny python -m pytest tests/test_estuary.py::TestEstuaryParamsValidation -v
 ```
 
-Expected: `5 passed`.
+Expected: `3 passed`.
 
 - [ ] **Step 2.5: Run the full estuary test file**
 
@@ -210,9 +202,9 @@ Expected: validation tests pass; `test_estuary_params_defaults_match_liland_2024
 
 Replaces the function body with the linear-with-anchors form. Updates the signature to take `(salinity, params: EstuaryParams)` instead of scalar kwargs.
 
-- [ ] **Step 3.1: Write the 5 functional tests + NaN handling test**
+- [ ] **Step 3.1: Write the 5 functional tests**
 
-Append to `tests/test_estuary.py`:
+Append to `tests/test_estuary.py`. **Five tests** as authorized by the spec:
 
 ```python
 def test_salinity_cost_at_iso_returns_unity():
@@ -272,39 +264,26 @@ def test_salinity_cost_handles_nan():
     assert cost[1] == pytest.approx(1.0)
     assert cost[2] == pytest.approx(1.0 + p.salinity_hyper_cost)
     assert not np.isnan(cost).any()
-
-
-def test_salinity_cost_vectorised():
-    """Function returns same-shape array for any input shape; all values >= 1."""
-    from salmon_ibm.estuary import salinity_cost, EstuaryParams
-    p = EstuaryParams()
-    sal = np.linspace(0, 35, 100)
-    cost = salinity_cost(sal, p)
-    assert cost.shape == sal.shape
-    assert np.all(cost >= 1.0)
-
-
-def test_salinity_cost_clips_out_of_range_input():
-    """Salinities outside [0, 35] are clipped (defensive against bad CMEMS data)."""
-    from salmon_ibm.estuary import salinity_cost, EstuaryParams
-    p = EstuaryParams()
-    out_of_range = np.array([-5.0, 50.0])
-    cost = salinity_cost(out_of_range, p)
-    # -5 clipped to 0 → cost = 1 + hypo
-    # 50 clipped to 35 → cost = 1 + hyper
-    assert cost[0] == pytest.approx(1.0 + p.salinity_hypo_cost)
-    assert cost[1] == pytest.approx(1.0 + p.salinity_hyper_cost)
 ```
 
-That's 7 functional tests (the spec lists 5 + NaN + vectorised + clipping). The clipping test is bonus — defensive coverage of the input-clipping behaviour.
+(A vectorised-shape test and an out-of-range-clipping test were considered as defensive coverage but excluded to stay spec-faithful. The vectorised behaviour is implicitly covered by the monotonic test using `np.linspace(...)` arrays; the clipping behaviour is documented in the function docstring. Future plan can add explicit tests if a regression is observed.)
 
-- [ ] **Step 3.2: Run the new tests; expect 7 failures**
+- [ ] **Step 3.2: Run the new tests; expect 5 failures**
 
 ```bash
-micromamba run -n shiny python -m pytest tests/test_estuary.py::test_salinity_cost_at_iso_returns_unity tests/test_estuary.py::test_salinity_cost_marine_matches_brett_groves tests/test_estuary.py::test_salinity_cost_freshwater_above_one_and_below_marine tests/test_estuary.py::test_salinity_cost_smooth_monotonic_outside_iso tests/test_estuary.py::test_salinity_cost_handles_nan tests/test_estuary.py::test_salinity_cost_vectorised tests/test_estuary.py::test_salinity_cost_clips_out_of_range_input -v
+micromamba run -n shiny python -m pytest tests/test_estuary.py -k "iso_returns_unity or marine_matches or freshwater_above_one_and_below_marine or smooth_monotonic or handles_nan" -v
 ```
 
-Expected: All 7 fail with `TypeError: salinity_cost() takes from 1 to 5 positional arguments but 2 were given` (or similar — old signature has 4 keyword args, new tests pass 1 positional + 1 EstuaryParams).
+Expected: All 5 fail with `TypeError: salinity_cost() got an unexpected keyword argument 'S_opt'` or similar — but actually the new tests don't pass `S_opt`; they pass `EstuaryParams()`. So they'll fail with `salinity_cost() takes from 1 to 5 positional arguments but 2 were given` (the old signature accepts (salinity, S_opt, S_tol, k, max_cost) — 5 max — but `EstuaryParams()` is passed as the second positional, which the old function tries to bind to `S_opt`, expecting a float).
+
+Specifically the failure will look like:
+```
+FAILED tests/test_estuary.py::test_salinity_cost_at_iso_returns_unity
+  TypeError: '>' not supported between instances of 'EstuaryParams' and 'float'
+```
+or similar — depending on what `S_opt + S_tol` does when `S_opt` is an EstuaryParams.
+
+(Or the test might fail an assertion if old function happens to return ≥ 1.0 anyway. Either way, the test must FAIL.)
 
 - [ ] **Step 3.3: Replace the `salinity_cost` function body and signature**
 
@@ -339,13 +318,13 @@ def salinity_cost(
     return 1.0 + hyper * above + hypo * below
 ```
 
-- [ ] **Step 3.4: Run the new tests; expect 7 to pass**
+- [ ] **Step 3.4: Run the new tests; expect 5 to pass**
 
 ```bash
-micromamba run -n shiny python -m pytest tests/test_estuary.py -k "iso_returns_unity or marine_matches or freshwater_above_one or smooth_monotonic or handles_nan or salinity_cost_vectorised or clips_out_of_range" -v
+micromamba run -n shiny python -m pytest tests/test_estuary.py -k "iso_returns_unity or marine_matches or freshwater_above_one_and_below_marine or smooth_monotonic or handles_nan" -v
 ```
 
-Expected: 7 passed.
+Expected: 5 passed.
 
 - [ ] **Step 3.5: Run the full estuary test file — many will fail now**
 
@@ -481,7 +460,13 @@ def test_salinity_cost_nan_treated_as_zero():
 micromamba run -n shiny python -m pytest tests/test_estuary.py -v
 ```
 
-Expected: all tests pass. Count check: starting with the 16 tests in test_estuary.py, we deleted 2 (`_capped`, `_nan_treated_as_zero`), replaced 2 (`_below_tolerance` → `_lagoon_brackish`, `_above_tolerance` → `_baltic_near_iso`), renamed 1 (`_defaults_match_liland_2024` → `_defaults_match_literature`), added 7 (Task 3) + 5 (Task 2) = +12. Net: 16 + 12 - 2 = **26 tests in test_estuary.py**.
+Expected: all tests pass. Count math, starting from the ~16 tests originally in `test_estuary.py`:
+- Deleted: 2 (`_capped`, `_nan_treated_as_zero`)
+- Replaced (count-neutral): 2 (`_below_tolerance` → `_lagoon_brackish`; `_above_tolerance` → `_baltic_near_iso`)
+- Renamed (count-neutral): 1 (`_defaults_match_liland_2024` → `_defaults_match_literature`)
+- Added: 5 functional (Task 3) + 3 validation (Task 2) = 8
+
+Net: 16 + 8 − 2 = **22 tests in test_estuary.py** (matches the spec's "8 new + ~3 existing rewritten" framing exactly).
 
 - [ ] **Step 5.5: First commit**
 
@@ -515,45 +500,45 @@ The remainder of the test suite will FAIL at this point (production call sites u
 
 ---
 
-### Task 6: Update `events_builtin.py:83` call site
+### Task 6: Update `events_builtin.py:83` call site (per-call construction)
 
 **Files:**
-- Modify: `salmon_ibm/events_builtin.py:80-95` (the SurvivalEvent's salinity_cost call site)
+- Modify: `salmon_ibm/events_builtin.py:13` (import)
+- Modify: `salmon_ibm/events_builtin.py:82-88` (SurvivalEvent's salinity_cost call site)
 
-Replaces the old scalar-kwargs call with `EstuaryParams` construction + new function call. Also moves `EstuaryParams` construction to the SurvivalEvent's `__init__` so validation fires at scenario-load time, not first step (per spec: perf-friendly + earlier error surfacing).
+**Architecture note:** `SurvivalEvent` is a `@dataclass` (lines 50-52). Its auto-generated `__init__` only accepts the dataclass fields (`bio_params, thermal, starvation`). It does NOT receive `est_cfg` at init — the value comes from `landscape["est_cfg"]` at execute time (line 62). So unlike `Simulation` (Task 7), we cannot stash `EstuaryParams` in `self` at `__init__`. Two valid alternatives:
+
+- **Per-call construction** (recommended) — build a fresh `EstuaryParams` inside `execute()` each time. Costs ~microseconds (a dict comprehension + 3 if-statements); negligible vs the NumPy work in the same call.
+- **Lazy memoization** — cache via a non-init field; rebuild only when `est_cfg` changes. More code; not needed at this scale.
+
+This task uses per-call construction.
 
 - [ ] **Step 6.1: Read the current call site**
 
-Open `salmon_ibm/events_builtin.py` around lines 60-100 to understand `SurvivalEvent`'s structure. Identify:
-- Where `est_cfg` originates (likely a constructor param or attribute)
-- Whether `__init__` exists or needs adding
-- Whether `_salinity_warned` field exists at line ~75 (yes — it does; this is the warning-only-once flag)
+Open `salmon_ibm/events_builtin.py:60-100`. Confirm:
+- Line 13: `from salmon_ibm.estuary import salinity_cost` — current import (one symbol).
+- Line 50-58: `@register_event("survival") @dataclass class SurvivalEvent(Event):` with fields `bio_params, thermal, starvation`.
+- Line 62: `est_cfg = landscape.get("est_cfg", {})` — est_cfg comes from landscape, not self.
+- Line 81: `sal_at_agents = sal[population.tri_idx]`
+- Lines 82-88: the current `salinity_cost(sal_at_agents, S_opt=..., S_tol=..., k=...)` call.
 
-- [ ] **Step 6.2: Add `est_params` construction in `SurvivalEvent.__init__`**
+- [ ] **Step 6.2: Update the import**
 
-In `SurvivalEvent.__init__` (or wherever `self.est_cfg` first becomes available), add:
+Change line 13 from:
 
 ```python
-# Build EstuaryParams once at init from the salinity_cost YAML subsection.
-# Other EstuaryParams fields (DO, seiche) take dataclass defaults — see
-# spec section "Partial population". Passing only known salinity keys
-# avoids TypeError on extra/legacy YAML keys.
-from salmon_ibm.estuary import EstuaryParams
-_known_salinity_keys = {
-    "salinity_iso_osmotic",
-    "salinity_hyper_cost",
-    "salinity_hypo_cost",
-}
-sal_cfg = self.est_cfg.get("salinity_cost", {})
-filtered = {k: v for k, v in sal_cfg.items() if k in _known_salinity_keys}
-self._est_params = EstuaryParams(**filtered)
+from salmon_ibm.estuary import salinity_cost
 ```
 
-The validation in `__post_init__` will raise `ValueError` here if YAML has bad values, before any simulation step runs.
+to:
 
-- [ ] **Step 6.3: Replace the per-step call site (line 83)**
+```python
+from salmon_ibm.estuary import salinity_cost, EstuaryParams
+```
 
-Find the existing block (around lines 82-88):
+- [ ] **Step 6.3: Replace the per-step call site (lines 82-88)**
+
+Find the existing block:
 
 ```python
             s_cfg = est_cfg.get("salinity_cost", {})
@@ -568,61 +553,89 @@ Find the existing block (around lines 82-88):
 Replace with:
 
 ```python
-            sal_cost_arr = salinity_cost(sal_at_agents, self._est_params)
+            # Build EstuaryParams from the salinity_cost YAML subsection.
+            # Filter to known fields so legacy keys (S_opt, S_tol, k) are
+            # silently dropped — falls back to dataclass defaults rather
+            # than raising TypeError. Per-call construction is cheap
+            # (microseconds) and SurvivalEvent is a dataclass that can't
+            # easily stash this in __init__ (est_cfg is in landscape, not
+            # self). See plan 2026-04-30-osmoregulation-stress for context.
+            _known_salinity_keys = {
+                "salinity_iso_osmotic",
+                "salinity_hyper_cost",
+                "salinity_hypo_cost",
+            }
+            s_cfg = est_cfg.get("salinity_cost", {})
+            est_params = EstuaryParams(
+                **{k: v for k, v in s_cfg.items() if k in _known_salinity_keys}
+            )
+            sal_cost_arr = salinity_cost(sal_at_agents, est_params)
 ```
 
-(The local `s_cfg` lookup is no longer needed — `self._est_params` was built once at init.)
+(EstuaryParams construction validates via `__post_init__` — if the YAML is malformed the first execute call surfaces it, not subsequent ones.)
 
-- [ ] **Step 6.4: Verify event_builtin.py imports**
-
-Confirm `salinity_cost` is already imported at the top of the file. If `EstuaryParams` is now used in `__init__`, add it to the import:
-
-```python
-from salmon_ibm.estuary import salinity_cost, EstuaryParams
-```
-
-- [ ] **Step 6.5: Run the SurvivalEvent-related tests**
+- [ ] **Step 6.4: Run the SurvivalEvent-related tests**
 
 ```bash
 micromamba run -n shiny python -m pytest tests/test_events.py -v -k "Survival or survival"
 ```
 
-Expected: tests pass (most likely — the tests that exercise the salinity path through SurvivalEvent will use whatever YAML they've been parameterized with; if their fixtures use OLD schema keys, the filtered-dict approach drops the bad keys and EstuaryParams falls back to defaults). Some integration tests may shift values — those are Task 13 territory.
+Expected: tests pass. If a test fails because `EstuaryParams(**...)` raises ValueError, the test fixture has bad values — surface it to the engineer for triage.
 
-If any test fails because EstuaryParams construction raises, that's a real bug — fix the test fixture or the filter logic.
+If a fixture uses OLD schema keys (`S_opt`, etc.), they get filtered out and EstuaryParams falls back to defaults. That's expected — the migration of test fixtures using old schema is Tasks 9-11.
 
 ---
 
-### Task 7: Update `simulation.py:481` call site
+### Task 7: Update `simulation.py:481` call site (init-time construction)
 
 **Files:**
-- Modify: `salmon_ibm/simulation.py:475-500` (the `_event_bioenergetics` handler)
+- Modify: `salmon_ibm/simulation.py:55` (import)
+- Modify: `salmon_ibm/simulation.py:295-297` (add `EstuaryParams` construction next to `self.est_cfg = ...`)
+- Modify: `salmon_ibm/simulation.py:480-486` (per-step call site in `_event_bioenergetics`)
 
-Same pattern as Task 6: build `EstuaryParams` once at `Simulation.__init__` (or wherever `self.est_cfg` is established), use it at the per-step call site.
+**Architecture note:** Unlike `SurvivalEvent` (Task 6), `Simulation` has `self.est_cfg = config.get("estuary", {})` set at line 295 of `__init__`. So we CAN build `EstuaryParams` once at sim init, validation fires at scenario-load time, and `_event_bioenergetics` reads from `self._est_params` per step.
 
-- [ ] **Step 7.1: Locate `Simulation.__init__` and the est_cfg attribute**
+- [ ] **Step 7.1: Update the import**
 
-In `salmon_ibm/simulation.py`, find where `self.est_cfg` is first set. It's likely in `__init__` or a related setup method. Note the line number for Step 7.2.
-
-- [ ] **Step 7.2: Add `EstuaryParams` construction near the other init logic**
-
-Add (next to the existing `self.est_cfg = ...` line):
+Line 55 currently imports `salinity_cost`. Change to:
 
 ```python
-# EstuaryParams from salinity_cost YAML subsection — see events_builtin.py
-# for the rationale. Validation fires here at sim-init.
-from salmon_ibm.estuary import EstuaryParams
-_known_salinity_keys = {
-    "salinity_iso_osmotic",
-    "salinity_hyper_cost",
-    "salinity_hypo_cost",
-}
-sal_cfg = self.est_cfg.get("salinity_cost", {})
-filtered = {k: v for k, v in sal_cfg.items() if k in _known_salinity_keys}
-self._est_params = EstuaryParams(**filtered)
+from salmon_ibm.estuary import (
+    salinity_cost,
+    EstuaryParams,
+)
 ```
 
-If the import is already at the top of `simulation.py`, omit the inline `from salmon_ibm.estuary import EstuaryParams` and just instantiate it.
+(Or whatever multi-line/single-line form matches the existing style — the goal is to add `EstuaryParams` to the symbols imported from `salmon_ibm.estuary`.)
+
+- [ ] **Step 7.2: Add `EstuaryParams` construction next to `self.est_cfg`**
+
+Find `simulation.py:295`:
+
+```python
+        self.est_cfg = config.get("estuary", {})
+        self._skip_estuarine_overrides = self._detect_estuarine_noop()
+```
+
+Add the new lines BEFORE `_skip_estuarine_overrides` (so the check runs on the new params if relevant):
+
+```python
+        self.est_cfg = config.get("estuary", {})
+        # EstuaryParams from salinity_cost YAML subsection. Filter to known
+        # fields so legacy keys (S_opt, S_tol, k) silently fall back to
+        # dataclass defaults rather than raising. Validation in
+        # __post_init__ fires here at scenario-load time, not first step.
+        _known_salinity_keys = {
+            "salinity_iso_osmotic",
+            "salinity_hyper_cost",
+            "salinity_hypo_cost",
+        }
+        _sal_cfg = self.est_cfg.get("salinity_cost", {})
+        self._est_params = EstuaryParams(
+            **{k: v for k, v in _sal_cfg.items() if k in _known_salinity_keys}
+        )
+        self._skip_estuarine_overrides = self._detect_estuarine_noop()
+```
 
 - [ ] **Step 7.3: Replace the per-step call site (lines 480-486)**
 
@@ -644,42 +657,35 @@ Replace with:
         sal_cost = salinity_cost(sal_at_agents, self._est_params)
 ```
 
-- [ ] **Step 7.4: Verify `salinity_cost` and `EstuaryParams` imports**
-
-Top of file should have:
-
-```python
-from salmon_ibm.estuary import salinity_cost, EstuaryParams
-```
-
-(Add `EstuaryParams` if missing.)
-
-- [ ] **Step 7.5: Run simulation-related tests**
+- [ ] **Step 7.4: Run simulation-related tests**
 
 ```bash
 micromamba run -n shiny python -m pytest tests/test_simulation.py -v
 ```
 
-Expected: this test file has the broken fixture at line 235 (Task 11). Some tests may fail because of that. Don't fix yet — fixture migration is Task 11.
+Expected: most tests pass. The fixture at line 235 still uses old schema; if its `Simulation()` construction blows up, it's because `EstuaryParams(**filtered)` got a key it doesn't recognise — the filter should prevent this, but verify `_known_salinity_keys` matches the field names in `EstuaryParams` exactly. If a `KeyError` or `ValueError` raises, that's a real plan bug — pause and fix.
 
-If tests fail with `TypeError: __init__() got an unexpected keyword argument 'S_opt'` from `EstuaryParams(**filtered)`, that means the filter isn't dropping unknown keys. Verify `_known_salinity_keys` is the right name and the comprehension is correct.
-
-- [ ] **Step 7.6: Commit Tasks 6 & 7**
+- [ ] **Step 7.5: Commit Tasks 6 & 7**
 
 ```bash
 git add salmon_ibm/events_builtin.py salmon_ibm/simulation.py
 git commit -m "feat(estuary): wire EstuaryParams through salinity_cost call sites
 
-events_builtin.py and simulation.py now construct EstuaryParams once at
-init from the salinity_cost YAML subsection (filtered to known keys, so
-old-schema keys are silently dropped and defaults take over). Each
-per-step call passes self._est_params to salinity_cost(sal, params).
+events_builtin.py: SurvivalEvent (a @dataclass that can't stash state in
+__init__) builds EstuaryParams per-call inside execute() using a
+filtered-dict pattern that silently drops old-schema keys. The
+construction is microsecond-cheap; no need for memoization.
 
-Validation errors now surface at scenario-load time (via __post_init__),
-not first step. Both call sites match each other for parity.
+simulation.py: Simulation has self.est_cfg available at __init__ time
+(line 295), so the EstuaryParams instance is built once and stashed in
+self._est_params. _event_bioenergetics reads it per step.
 
-Fixture YAMLs and test files using the old schema are migrated in
-Tasks 8-11."
+Both patterns use the same filtered-key approach so old-schema YAML
+configs degrade to defaults rather than raising.
+
+Validation errors surface at scenario-load time (Simulation) or at
+first execute (SurvivalEvent). Fixture YAMLs using old schema are
+migrated in Tasks 8-11."
 ```
 
 ---
@@ -697,22 +703,24 @@ Replace the `salinity_cost: {S_opt, S_tol, k}` block with `{salinity_iso_osmotic
 
 - [ ] **Step 8.1: Migrate `config_columbia.yaml`**
 
-Open `config_columbia.yaml` at line 10. The current block:
+Open `config_columbia.yaml` at lines 10-13. The current block:
 
 ```yaml
   salinity_cost:
     S_opt: 0.5
     S_tol: 999
+    k: 0.0
 ```
 
-Columbia is freshwater throughout — the `S_tol: 999` is the "disable salinity cost entirely" pattern. New equivalent: zero slopes give cost=1.0 always.
+Columbia is freshwater throughout — the `S_tol: 999, k: 0.0` is the "disable salinity cost entirely" pattern. New equivalent: zero slopes give cost=1.0 always.
 
-Replace with:
+Replace ALL FOUR lines (the `salinity_cost:` header and its three children) with:
 
 ```yaml
   salinity_cost:
     # Columbia: freshwater scenario; zero slopes disable osmoregulation cost
-    # (cost = 1.0 for all salinities). Migrated from old S_tol: 999 pattern.
+    # (cost = 1.0 for all salinities). Migrated from old S_tol: 999, k: 0.0
+    # disable pattern.
     salinity_hyper_cost: 0.0
     salinity_hypo_cost: 0.0
 ```
@@ -721,15 +729,16 @@ Replace with:
 
 - [ ] **Step 8.2: Migrate `config_curonian_minimal.yaml`**
 
-At line 26:
+At lines 26-29:
 
 ```yaml
   salinity_cost:
     S_opt: 0.5
     S_tol: 6.0
+    k: 0.6
 ```
 
-Replace with:
+Replace ALL FOUR lines with:
 
 ```yaml
   salinity_cost:
@@ -739,25 +748,28 @@ Replace with:
     salinity_iso_osmotic: 10.0
 ```
 
-(Hyper / hypo costs default to the dataclass defaults, which match Brett & Groves. Only `iso` is explicitly listed for clarity.)
+(Hyper / hypo costs default to the dataclass defaults, which match Brett & Groves. Only `iso` is explicitly listed for clarity. The old `k: 0.6` line — the slope above threshold — has no direct equivalent in the new schema; it's simply removed.)
 
 - [ ] **Step 8.3: Migrate `configs/config_curonian_trimesh.yaml`**
 
-At lines 57-59:
+At lines 57-60:
 
 ```yaml
   salinity_cost:
     S_opt: 0.5
     S_tol: 6.0
+    k: 0.6
 ```
 
-Replace with:
+Replace ALL FOUR lines with:
 
 ```yaml
   salinity_cost:
     # See config_curonian_minimal.yaml for parameter rationale.
     salinity_iso_osmotic: 10.0
 ```
+
+(Old `k: 0.6` line removed — no direct equivalent in new schema.)
 
 - [ ] **Step 8.4: Migrate `configs/config_curonian_baltic.yaml`**
 
@@ -785,7 +797,24 @@ If the existing block has a comment header explaining the parameters, update it 
 
 - [ ] **Step 8.5: Migrate `config_curonian_hexsim.yaml`**
 
-At line 12, similar pattern. Open the file, find the `salinity_cost:` block, replace with the same template as Step 8.4.
+At lines 12-15:
+
+```yaml
+  salinity_cost:
+    S_opt: 0.5
+    S_tol: 6.0
+    k: 0.6
+```
+
+Replace ALL FOUR lines with:
+
+```yaml
+  salinity_cost:
+    # See config_curonian_minimal.yaml for parameter rationale.
+    salinity_iso_osmotic: 10.0
+```
+
+(Old `k: 0.6` line removed.)
 
 - [ ] **Step 8.6: Verify all 5 configs parse**
 
@@ -1303,9 +1332,9 @@ This signals to future sessions that the deferred-item-A is closed.
 
 ## Plan summary
 
-- **16 tasks**, ~5-7 commits (groups: Tasks 1-5 → commit 1, Tasks 6-7 → commit 2, Task 8 → commit 3, Tasks 9-11 → commit 4, Tasks 12-13 → commit 5, Task 14 → commit 6 if regressions, Task 16 → commit 7).
+- **16 tasks**, ~7 commits (groups: Tasks 1-5 → commit 1, Tasks 6-7 → commit 2, Task 8 → commit 3, Tasks 9-11 → commit 4, Tasks 12-13 → commit 5, Task 14 → commit 6 if regressions, Task 16 → commit 7).
 - **14 files modified** (3 production, 4 test, 5 YAML, 2 docs).
-- **+~12 net tests** (8 spec'd + 5 validation − 1 deleted as obsolete; some renames are no-op count-wise).
+- **+6 net tests** (5 functional + 3 validation new − 2 deleted (`_capped`, `_nan_treated_as_zero`); replacements and renames are count-neutral). Suite expected: 815 → **821 passing** (within the spec's 821-823 range).
 - **Estimated time:** 1-2 days. Most work is mechanical (YAML/doc/fixture sync); the function rewrite itself is ~10 lines.
-- **Risk profile:** moderate — the Baltic cost decrease (1.30 → 1.015) will shift integration test outcomes; budget for test_curonian_realism_integration.py triage.
+- **Risk profile:** moderate — the Baltic cost decrease (1.30 → 1.015) will shift integration test outcomes; budget for `test_curonian_realism_integration.py` triage.
 - **No backward-compat shim** — clean break following the v1.7.1 lipid-first precedent.
