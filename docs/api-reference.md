@@ -390,7 +390,7 @@ Apply one hourly energy budget step. Respiration (scaled by salinity cost) is su
 | `mass_g` | `np.ndarray` | Current body masses (g) |
 | `temperature_c` | `np.ndarray` | Water temperatures (°C) |
 | `activity_mult` | `np.ndarray` | Activity multipliers |
-| `salinity_cost` | `np.ndarray` | Salinity-based respiration cost multipliers (≥ 1.0) |
+| `salinity_cost` | `np.ndarray` | Salinity-based respiration cost multipliers (≥ 1.0); typically computed by `salmon_ibm.estuary.salinity_cost()` from per-cell salinity and `EstuaryParams` |
 | `params` | `BioParams` | Model parameter set |
 
 Returns `(new_ed_kJ_g, dead_mask, new_mass_g)` — all shape `(n,)`.
@@ -1109,22 +1109,21 @@ Module-level aliases: `DO_OK`, `DO_ESCAPE`, `DO_LETHAL`.
 ```python
 def salinity_cost(
     salinity: np.ndarray,
-    S_opt: float = 0.5,
-    S_tol: float = 6.0,
-    k: float = 0.6,
-    max_cost: float = 5.0,
-) -> np.ndarray:
+    params: EstuaryParams,
+) -> np.ndarray
 ```
 
-Compute a respiration cost multiplier (≥ 1.0) for each agent based on ambient salinity. Salinity within the optimal + tolerance range has cost 1.0; excess salinity increases cost linearly by `k` per PSU above the threshold, capped at `max_cost`.
+Compute a respiration cost multiplier (≥ 1.0) for each agent based on ambient salinity. Implements *Salmo salar* physiology: cost is exactly 1.0 at the blood iso-osmotic point (~10 PSU); rises asymmetrically toward freshwater (hypo-osmotic stress) and full marine (hyper-osmotic stress). NaN inputs are treated as iso (cost 1.0).
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `salinity` | — | Salinity values (PSU), shape `(n,)` |
-| `S_opt` | `0.5` | Optimal salinity (PSU) |
-| `S_tol` | `6.0` | Salinity tolerance range (PSU) above `S_opt` |
-| `k` | `0.6` | Cost slope (per PSU excess) |
-| `max_cost` | `5.0` | Maximum cost multiplier |
+Citations: Wilson 2002 (iso-osmotic point); Brett & Groves 1979 (hyper/hypo cost slopes for euryhaline salmonids).
+
+Parameters come from `EstuaryParams`:
+
+| Field | Default | Meaning |
+|---|---|---|
+| `salinity_iso_osmotic` | `10.0` | Blood iso-osmotic point (PSU) |
+| `salinity_hyper_cost` | `0.30` | Cost slope above iso (multiplier increment at full marine) |
+| `salinity_hypo_cost` | `0.05` | Cost slope below iso (multiplier increment at freshwater) |
 
 Returns `np.ndarray` of cost multipliers, shape `(n,)`.
 

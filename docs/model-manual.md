@@ -369,10 +369,9 @@ Estuarine stress parameters.
 ```yaml
 estuary:
   salinity_cost:
-    S_opt: 0.5                    # optimal salinity (PSU)
-    S_tol: 6.0                    # tolerance range above S_opt (PSU)
-    k: 0.6                        # cost slope per PSU excess
-    max_cost: 5.0                 # maximum cost multiplier ceiling
+    salinity_iso_osmotic: 10.0    # S. salar blood iso-osmotic (Wilson 2002)
+    salinity_hyper_cost: 0.30     # cost slope above iso (Brett & Groves 1979)
+    salinity_hypo_cost: 0.05      # cost slope below iso (Brett & Groves 1979)
   do_avoidance:
     lethal: 2.0                   # DO below this = death (mg/L)
     high: 4.0                     # DO below this = escape behavior (mg/L)
@@ -385,9 +384,9 @@ To disable estuary effects (e.g., for riverine simulations), set extreme values:
 ```yaml
 estuary:
   salinity_cost:
-    S_opt: 0.5
-    S_tol: 999       # effectively unlimited tolerance
-    k: 0.0            # no cost
+    # Disable salinity-cost penalty (zero slopes give cost=1.0 always)
+    salinity_hyper_cost: 0.0
+    salinity_hypo_cost: 0.0
   do_avoidance:
     lethal: 0.0
     high: 0.0
@@ -592,12 +591,15 @@ Three estuarine stress mechanisms modify agent behavior and energetics:
 Increases metabolic cost when salinity exceeds the tolerance range:
 
 ```
-cost = 1.0                                    if S <= S_opt + S_tol
-cost = 1.0 + k * (S - S_opt - S_tol)         if S > S_opt + S_tol
-cost = min(cost, max_cost)                    capped at max_cost
+above = max(salinity - iso, 0) / max(35 - iso, 1)
+below = max(iso - salinity, 0) / max(iso, 1)
+cost = 1 + hyper_cost * above + hypo_cost * below
+
+Cost is 1.0 at salinity == iso. NaN inputs treated as iso. Salinity
+clipped to [0, 35] PSU defensively.
 ```
 
-Default: `S_opt=0.5 PSU`, `S_tol=6.0 PSU`, `k=0.6`, `max_cost=5.0`.
+Default: `salinity_iso_osmotic=10.0 PSU`, `salinity_hyper_cost=0.30`, `salinity_hypo_cost=0.05`.
 
 ### 9.2 Dissolved Oxygen Avoidance
 
@@ -854,9 +856,9 @@ forcings:
 
 estuary:
   salinity_cost:
-    S_opt: 0.5
-    S_tol: 6.0
-    k: 0.6
+    salinity_iso_osmotic: 10.0
+    salinity_hyper_cost: 0.30
+    salinity_hypo_cost: 0.05
   do_avoidance:
     lethal: 2.0
     high: 4.0
@@ -880,9 +882,9 @@ hexsim:
 
 estuary:
   salinity_cost:
-    S_opt: 0.5
-    S_tol: 999          # disable salinity cost
-    k: 0.0
+    # Disable salinity-cost penalty (zero slopes give cost=1.0 always)
+    salinity_hyper_cost: 0.0
+    salinity_hypo_cost: 0.0
   do_avoidance:
     lethal: 0.0
     high: 0.0
@@ -908,9 +910,9 @@ hexsim:
 
 estuary:
   salinity_cost:
-    S_opt: 0.5
-    S_tol: 6.0
-    k: 0.6
+    salinity_iso_osmotic: 10.0
+    salinity_hyper_cost: 0.30
+    salinity_hypo_cost: 0.05
   do_avoidance:
     lethal: 2.0
     high: 4.0
@@ -946,9 +948,9 @@ behavior:
 
 estuary:
   salinity_cost:
-    S_opt: 0.5
-    S_tol: 6.0
-    k: 0.6
+    salinity_iso_osmotic: 10.0
+    salinity_hyper_cost: 0.30
+    salinity_hypo_cost: 0.05
   do_avoidance:
     lethal: 2.0
     high: 4.0
