@@ -34,7 +34,7 @@ This plan replaces the *shape*, not just the numbers.
 - Logic: `excess = max(salinity - (S_opt + S_tol), 0); return min(1.0 + k*excess, max_cost)` — threshold-linear, NaN-safe via `np.where(np.isnan, 0)`.
 - Parameters supplied via YAML config (`est.salinity_cost.{S_opt, S_tol, k}`) at two call sites:
   - `salmon_ibm/events_builtin.py:83` (the `SurvivalEvent`).
-  - `salmon_ibm/simulation.py:481` (parallel/legacy energy step path).
+  - `salmon_ibm/simulation.py:481` (the `_event_bioenergetics` handler — an active event in the simulation event loop, NOT a legacy/parallel path).
 - Output is the `salinity_cost` ndarray fed into `update_energy()` in `bioenergetics.py:65`.
 - `EstuaryParams` dataclass (`estuary.py:11-28`) declares `s_opt: 0.5` and `s_tol: 6.0` but the function takes its own defaults — `EstuaryParams` is currently **not** wired through to `salinity_cost()`.
 
@@ -85,9 +85,9 @@ defensible change.
 
 ## Functional form
 
-The function takes a single `params: EstuaryParams` argument (matches
-the `update_energy(..., params: BioParams)` precedent) instead of
-scalar keyword args:
+The function takes the salinity array plus a single `params:
+EstuaryParams` dataclass (matches the `update_energy(..., params:
+BioParams)` precedent) instead of multiple scalar keyword args:
 
 ```python
 def salinity_cost(
@@ -184,24 +184,45 @@ files. No new modules, no new files.
    - `EstuaryParams` extended with 3 new fields, `s_opt` and `s_tol`
      fields removed, `__post_init__` added.
 2. `salmon_ibm/events_builtin.py:83` — call site builds an
-   `EstuaryParams` instance from the YAML config dict (filtering to
-   known fields) and passes it to `salinity_cost(sal, est_params)`.
+   `EstuaryParams` instance from the YAML `estuary.salinity_cost`
+   subsection and passes it to `salinity_cost(sal, est_params)`.
    Likely best to construct `EstuaryParams` once at `SurvivalEvent`
    init rather than per-step (perf-friendly, also surfaces validation
    errors at scenario-load time, not first step).
-3. `salmon_ibm/simulation.py:481` — same pattern as the
-   `events_builtin.py` call site.
-4. `tests/test_estuary.py` — existing salinity tests rewritten for the
-   new shape; 8 new tests added.
-5. YAML configs (5 files): `config_columbia.yaml`,
+
+   **Partial population:** the salinity_cost YAML key only carries the
+   3 salinity fields. The other `EstuaryParams` fields (`do_lethal,
+   do_high, seiche_threshold_m_per_s`) will take their dataclass
+   defaults — which preserves current behaviour exactly, since the
+   existing code also doesn't flow DO/seiche YAML values through to
+   `EstuaryParams` (it reads `do_avoidance.{lethal,high}` and
+   `seiche_pause.dSSHdt_thresh_m_per_15min` directly into the relevant
+   call sites, bypassing the dataclass). Wiring those YAML keys through
+   `EstuaryParams` is a separate concern and is in this plan's
+   Out-of-scope list.
+3. `salmon_ibm/simulation.py:481` — same pattern; this is the
+   `_event_bioenergetics` event handler (active, not legacy).
+4. `tests/test_estuary.py` — 4 existing salinity tests rewritten or
+   deleted for the new shape; 8 new tests added.
+5. `tests/test_config.py:26`, `tests/test_ensemble.py:19`,
+   `tests/test_simulation.py:235` — three test files with hardcoded
+   old YAML schema; migrate fixtures to new field names.
+6. YAML configs (5 files): `config_columbia.yaml`,
    `config_curonian_minimal.yaml`,
    `configs/config_curonian_trimesh.yaml`,
    `configs/config_curonian_baltic.yaml`,
    `config_curonian_hexsim.yaml` — replace
    `salinity_cost: {S_opt, S_tol, k}` block with
-   `salinity_cost: {iso, hyper_cost, hypo_cost}`.
-6. Documentation: `docs/api-reference.md` and `docs/model-manual.md` —
+   `salinity_cost: {salinity_iso_osmotic, salinity_hyper_cost, salinity_hypo_cost}`.
+   Columbia uses the "disable" pattern (currently `S_tol: 999`); migrate
+   to `salinity_hyper_cost: 0.0, salinity_hypo_cost: 0.0` for the same
+   effect.
+7. Documentation: `docs/api-reference.md` and `docs/model-manual.md` —
    update the function signature reference and YAML schema examples.
+
+Total: 1 module (estuary.py), 2 production call sites
+(events_builtin.py, simulation.py), 4 test files (test_estuary.py +
+3 fixture-only updates), 5 YAML configs, 2 doc files. **14 files.**
 
 The salinity field per agent already flows from CMEMS forcing through
 the env model. No data wiring changes.
@@ -220,9 +241,28 @@ For any user with custom configs not in this repo:
   `iso` (the salinity at which cost is minimum).
 - `k` (slope above threshold) maps roughly to `hyper_cost` after
   appropriate rescaling, but the math is not 1:1.
+- `max_cost` no longer exists — the new function's output is naturally
+  bounded by `1 + hyper_cost` since salinity is clipped to [0, 35].
 - Migration documented in the implementation plan's commit message;
   default values produce the published *S. salar* curve, so most users
   can simply delete their `salinity_cost` block from YAML.
+
+**Special case — disabling salinity cost entirely.** `config_columbia.yaml`
+currently uses `S_tol: 999` to effectively disable salinity cost (the
+threshold becomes unreachable, so cost stays at 1.0). The new
+equivalent: set both `salinity_hyper_cost: 0.0` and `salinity_hypo_cost:
+0.0`, which makes cost = 1.0 for all salinities. The Columbia config
+should be migrated to that pattern (Columbia is freshwater throughout,
+no osmoregulation cost makes sense for that scenario).
+
+**Note on the executed Curonian-realism plan.**
+`docs/superpowers/plans/2026-04-24-curonian-realism-upgrades.md:1183`
+references the old `salinity_cost(salinity, S_opt, S_tol, k, max_cost)`
+signature. **That plan is stamped ✅ EXECUTED and should not be
+amended** — its reference was correct at execution time. The reference
+will become stale post-migration; future readers wanting current
+signatures should consult `salmon_ibm/estuary.py` directly. This is
+the standard convention: executed plans are historical records.
 
 ## Tests
 
@@ -242,21 +282,33 @@ which asserts `EstuaryParams()` defaults. The implementation plan will:
   the new `salinity_iso_osmotic, salinity_hyper_cost, salinity_hypo_cost`
   defaults.
 
-The other 5 test files referencing `salinity_cost` (`test_bioenergetics.py`,
-`test_h3_multires_integration.py`, `test_curonian_realism_integration.py`,
-`test_ensemble.py`, `test_config.py`) need plan-time inspection:
+The other 5+ test files referencing `salinity_cost` need plan-time
+updates. Verified by direct grep against the codebase 2026-04-29:
 
-- Tests that **import and call `salinity_cost()` directly with old
-  kwargs** (`S_opt=...`, `S_tol=...`, `k=...`) will TypeError at call
-  time after the signature change — these need updates regardless of
-  what they assert.
-- Tests that use it **indirectly via `update_energy()` or YAML-loaded
-  scenarios** are likely fine unless they assert specific
-  energy/mortality values post-transit.
+**Files with hardcoded old YAML schema or kwargs (need updating):**
 
-Full suite run will surface both classes; the implementation plan must
-budget for fixing direct-call sites and triaging indirect-assertion
-breaks.
+- `tests/test_config.py:26` — asserts
+  `cfg["estuary"]["salinity_cost"]["S_opt"] == 0.5`. **Break** —
+  S_opt no longer in schema. Rewrite to assert `salinity_iso_osmotic`.
+- `tests/test_ensemble.py:19` — fixture dict
+  `{"S_opt": 0.5, "S_tol": 999, "k": 0.0}` (the "disable salinity
+  cost" pattern). **Break** — old keys ignored. Rewrite as
+  `{"salinity_hyper_cost": 0.0, "salinity_hypo_cost": 0.0}`.
+- `tests/test_simulation.py:235` — same fixture pattern as ensemble.
+  **Break** — same fix.
+
+**Files that may need indirect updates:**
+
+- `tests/test_bioenergetics.py` — uses `salinity_cost` indirectly via
+  `update_energy()`. May or may not break depending on what it asserts.
+- `tests/test_h3_multires_integration.py`,
+  `tests/test_curonian_realism_integration.py` — integration tests;
+  may shift on Baltic-cost change documented above. Verify during
+  implementation.
+
+Full suite run will surface any remaining breaks; the implementation
+plan must budget for fixing all 3 hardcoded-schema sites + triaging
+the integration-assertion breaks.
 
 ### New tests in `tests/test_estuary.py`
 
@@ -282,22 +334,52 @@ Three validation in a new `TestEstuaryParamsValidation` class:
 ## Risk + regression surface
 
 **Behavior change surface:** any test or run that exercises agents at
-salinities below `S_opt + S_tol = 6.5` PSU. Under the old function,
-cost was 1.0 below threshold (no salinity penalty). Under the new
-function, cost rises smoothly from iso (~10 PSU) toward freshwater,
-reaching ~1.05 at 0 PSU.
+salinities in the Curonian Lagoon (~5 PSU) or Baltic Sea (~7 PSU)
+ranges. The two functions diverge most sharply at the boundary
+between the old threshold (`S_opt + S_tol = 6.5 PSU`) and the new
+iso-osmotic point (10 PSU):
 
-In practice the lagoon is at ~5 PSU and the Baltic at ~7 PSU, both
-below the old threshold. Under the new physics, both will see a small
-cost increase (~2-4% multiplier). This will slightly raise migrant
-respiration energy use — biologically more correct, but a regression
-relative to any test asserting old energy values.
+| Salinity | OLD cost | NEW cost | Direction |
+|---|---|---|---|
+| 0 PSU (freshwater) | 1.00 | ~1.05 | small increase |
+| 5 PSU (lagoon) | 1.00 | ~1.025 | tiny increase |
+| 7 PSU (Baltic) | **1.30** | ~1.015 | **large decrease** |
+| 10 PSU (iso) | 3.10 | 1.00 | very large decrease |
+| 35 PSU (full marine) | 5.00 (capped) | ~1.30 | large decrease |
 
-**Tests that may need updating:**
-- Existing `test_estuary.py` salinity tests (explicitly listed above —
-  rewrite or delete).
-- Possibly `test_curonian_realism_integration.py` if it asserts specific
-  energy/mortality values post-transit (verify during implementation).
+The dominant biological effect is **decreased respiration cost for
+Baltic migrants** — the old function was over-penalising Baltic
+salinity (which is actually close to *S. salar*'s iso-osmotic point).
+Net result: under new physics, Baltic migrants conserve more energy,
+likely survive longer, return to spawn at higher condition — the
+correct direction relative to *S. salar* physiology.
+
+The lagoon (~5 PSU) sees a slight cost increase (was zero, now ~2.5%);
+this is biologically correct (hypo-osmotic stress is real, just small).
+
+**Tests that need updating** (verified by reading `tests/test_estuary.py`):
+- `test_salinity_cost_below_tolerance` (line 6) — asserts `cost = 1.0`
+  at salinity=3 with old kwargs. **Break** (new cost ≈ 1.035 at 3 PSU).
+  Rewrite as a new-physics equivalent.
+- `test_salinity_cost_above_tolerance` (line 11) — asserts `cost = 3.1`
+  at salinity=10 with old kwargs. **Break** (new cost = 1.0 — that's
+  the iso-osmotic minimum). Rewrite to test `cost ≈ 1 + hyper_cost` at
+  salinity=35 instead.
+- `test_salinity_cost_capped` (line 41) — asserts `cost ≤ 5.0` at
+  extreme salinity. **Delete** — no cap in new function (input is
+  clipped to [0, 35] so output is bounded by `1 + hyper_cost ≈ 1.30`).
+- `test_estuary_params_defaults_match_liland_2024` (line 79) — asserts
+  `p.s_opt == 0.5, p.s_tol == 6.0`. **Break** (those fields are
+  removed). Rewrite to assert the three new fields' defaults.
+- `test_salinity_cost_nan_treated_as_zero` (line 51) — asserts NaN
+  → cost=1.0. **Survives** under new physics (NaN → iso → cost=1.0).
+  Could be merged with the new `test_salinity_cost_handles_nan`; or
+  kept as-is.
+
+Plus possibly `test_curonian_realism_integration.py` if it asserts
+specific energy/mortality values post-Baltic-transit (verify during
+implementation; large drop in Baltic cost may shift migration outcomes
+non-trivially).
 
 **Mitigation:** run full pytest suite before pushing, surface
 regressions, fix or update them. Same playbook as v1.7.1 lipid-first.
