@@ -16,16 +16,40 @@ class EstuaryParams:
     reduced growth below ~60% O2 saturation (~5.5 mg/L at 15°C). Acute
     mortality approaches ~3 mg/L (Davis 1975 criteria).
 
+    Salinity-cost parameters cite Wilson 2002 (blood iso-osmotic point
+    for S. salar) and Brett & Groves 1979 (hyper/hypo cost slopes for
+    euryhaline salmonids).
+
     Units:
         do_lethal, do_high: mg/L
-        s_opt, s_tol: PSU
-        seiche_threshold: m/s (|dSSH/dt|)
+        salinity_iso_osmotic: PSU (blood iso-osmotic point)
+        salinity_hyper_cost: dimensionless multiplier slope (above iso)
+        salinity_hypo_cost: dimensionless multiplier slope (below iso)
+        seiche_threshold_m_per_s: m/s (|dSSH/dt|)
     """
     do_lethal: float = 3.0
     do_high: float = 5.5
-    s_opt: float = 0.5
-    s_tol: float = 6.0
+    salinity_iso_osmotic: float = 10.0   # Wilson 2002 — S. salar blood iso-osmotic ~9-12 PSU
+    salinity_hyper_cost: float = 0.30    # Brett & Groves 1979 — verified value from Task 1
+    salinity_hypo_cost: float = 0.05     # Brett & Groves 1979 — verified value from Task 1
     seiche_threshold_m_per_s: float = 0.02
+
+    def __post_init__(self):
+        if not (0 < self.salinity_iso_osmotic < 35):
+            raise ValueError(
+                f"salinity_iso_osmotic must be in (0, 35) PSU, "
+                f"got {self.salinity_iso_osmotic}"
+            )
+        if not (0 <= self.salinity_hyper_cost <= 1):
+            raise ValueError(
+                f"salinity_hyper_cost must be in [0, 1], "
+                f"got {self.salinity_hyper_cost}"
+            )
+        if not (0 <= self.salinity_hypo_cost <= 1):
+            raise ValueError(
+                f"salinity_hypo_cost must be in [0, 1], "
+                f"got {self.salinity_hypo_cost}"
+            )
 
 
 def validate_do_field_units(do_field: np.ndarray) -> None:
@@ -48,14 +72,30 @@ def validate_do_field_units(do_field: np.ndarray) -> None:
 
 def salinity_cost(
     salinity: np.ndarray,
-    S_opt: float = 0.5,
-    S_tol: float = 6.0,
-    k: float = 0.6,
-    max_cost: float = 5.0,
+    params: EstuaryParams,
 ) -> np.ndarray:
-    safe_sal = np.where(np.isnan(salinity), 0.0, salinity)
-    excess = np.maximum(safe_sal - (S_opt + S_tol), 0.0)
-    return np.minimum(1.0 + k * excess, max_cost)
+    """Osmoregulation cost multiplier on respiration for *Salmo salar*.
+
+    Linear-with-anchors function with separate slopes for hyper-osmotic
+    (above the blood iso-osmotic point) and hypo-osmotic (below iso)
+    stress.
+
+    Returns: multiplier ≥ 1.0 array with same shape as `salinity`;
+    equals 1.0 exactly at salinity == params.salinity_iso_osmotic.
+
+    NaN inputs are treated as iso (cost 1.0).
+
+    Citations: Wilson 2002 for iso-osmotic point; Brett & Groves 1979
+    for hyper/hypo cost magnitudes.
+    """
+    iso = params.salinity_iso_osmotic
+    hyper = params.salinity_hyper_cost
+    hypo = params.salinity_hypo_cost
+    safe = np.where(np.isnan(salinity), iso, salinity)  # NaN → iso (cost 1.0)
+    s = np.clip(safe, 0.0, 35.0)
+    above = np.maximum(s - iso, 0.0) / max(35.0 - iso, 1.0)
+    below = np.maximum(iso - s, 0.0) / max(iso, 1.0)
+    return 1.0 + hyper * above + hypo * below
 
 
 class DOState(IntEnum):
