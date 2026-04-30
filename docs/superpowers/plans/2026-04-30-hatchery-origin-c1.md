@@ -178,7 +178,8 @@ def test_population_add_agents_with_origin():
     from salmon_ibm.population import Population
     from salmon_ibm.origin import ORIGIN_WILD, ORIGIN_HATCHERY
     pool = AgentPool(n=3, start_tri=0, rng_seed=42)
-    pop = Population(pool=pool)
+    # Population is a @dataclass with `name` as first required field.
+    pop = Population(name="test", pool=pool)
     new_idx = pop.add_agents(
         n=2,
         positions=np.array([0, 0]),
@@ -237,7 +238,36 @@ In `AgentPool.__init__`, immediately after the existing `self.exit_branch_id` in
 
 - [ ] **Step 2.5: Update `Population.add_agents` signature and bulk-prealloc block**
 
-In `salmon_ibm/population.py`, locate the `add_agents` method (around line 192). Add `origin: int = ORIGIN_WILD` to the keyword arguments. Then in the bulk-prealloc block (around line 219-231), add the origin extension line immediately after `new_arrays["exit_branch_id"][old_n:] = -1`:
+In `salmon_ibm/population.py`, locate the `add_agents` method (line 192-200). The current signature has keyword-only args after the `*` separator:
+
+```python
+    def add_agents(
+        self,
+        n: int,
+        positions: np.ndarray,
+        *,
+        mass_g=None,
+        ed_kJ_g: float = 6.5,
+        group_id: int = -1,
+    ) -> np.ndarray:
+```
+
+Add `origin: int = ORIGIN_WILD,` immediately after `group_id: int = -1,` (i.e., as another keyword-only arg, matching the existing pattern):
+
+```python
+    def add_agents(
+        self,
+        n: int,
+        positions: np.ndarray,
+        *,
+        mass_g=None,
+        ed_kJ_g: float = 6.5,
+        group_id: int = -1,
+        origin: int = ORIGIN_WILD,
+    ) -> np.ndarray:
+```
+
+Then in the bulk-prealloc block (around line 219-231), add the origin extension line immediately after `new_arrays["exit_branch_id"][old_n:] = -1`:
 
 ```python
         new_arrays["origin"][old_n:] = origin
@@ -320,10 +350,13 @@ def test_introduction_event_propagates_origin():
     from salmon_ibm.origin import ORIGIN_WILD, ORIGIN_HATCHERY
 
     pool = AgentPool(n=2, start_tri=0, rng_seed=42)
-    pop = Population(pool=pool)
+    # Population is a @dataclass with `name` as first required field.
+    pop = Population(name="test", pool=pool)
     landscape = {"rng": np.random.default_rng(0)}
 
+    # Event base class requires `name`; trigger defaults to EveryStep.
     evt = IntroductionEvent(
+        name="intro_test",
         n_agents=3,
         positions=[0],
         origin=ORIGIN_HATCHERY,
@@ -487,8 +520,12 @@ def test_origin_preserved_on_population_transfer():
     # SwitchPopulationEvent looks up source/target by name from
     # landscape["multi_pop_mgr"] (verified at network.py:177).
     landscape = {"rng": np.random.default_rng(0), "multi_pop_mgr": mpm}
+    # Event base class requires `name`; trigger defaults to EveryStep.
     evt = SwitchPopulationEvent(
-        source_pop="src", target_pop="dst", transfer_probability=1.0,
+        name="transfer_test",
+        source_pop="src",
+        target_pop="dst",
+        transfer_probability=1.0,
     )
     mask = np.ones(3, dtype=bool)
     evt.execute(src, landscape, t=0, mask=mask)
