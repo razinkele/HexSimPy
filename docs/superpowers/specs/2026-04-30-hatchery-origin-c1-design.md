@@ -176,13 +176,15 @@ are additive — no existing field/method is removed or renamed.
    preservation block. The `hasattr` guards mirror the existing
    defensive pattern.
 
-   No new tests needed — `network.py` likely already has tests for
-   transfer; an existing test that transfers an agent with non-WILD
-   origin would catch any regression.
+   A NEW test is needed (test 8 in the Tests section) — existing
+   tests don't create non-WILD agents (origin doesn't exist yet), so
+   they cannot catch a regression in origin preservation. The new
+   test sets up a transfer between two populations with a HATCHERY
+   source agent and asserts target preservation.
 
-9. `salmon_ibm/output.py` (`OutputLogger`) — five touch points (verified
-   2026-04-30 against the existing `natal_reach_id` precedent at lines
-   41, 53, 79, 99, 117, 134):
+9. `salmon_ibm/output.py` (`OutputLogger`) — **seven touch points**
+   (verified 2026-04-30 against the existing `natal_reach_id`
+   precedent):
 
    - `__init__` (preallocated branch, line 42): add
      `self._origin_arr = np.empty((max_steps, max_agents), dtype=np.int8)`.
@@ -190,10 +192,12 @@ are additive — no existing field/method is removed or renamed.
      `self._origin: list[np.ndarray] = []`.
    - `log_step` (preallocated branch, line 80): add
      `self._origin_arr[r, :n] = pool.origin[:n]`.
-   - `log_step` (list branch, line ~91): add
+   - `log_step` (list branch, line 92): add
      `self._origin.append(pool.origin.copy())`.
-   - `to_dataframe()` empty-cols list (line 99): add `"origin"` to the
-     `empty_cols` list.
+   - `to_dataframe()` empty-cols list (line 99): add `"origin"` after
+     `"exit_branch_id"` in the `empty_cols` list (groups with the other
+     agent-metadata columns; matches the column order used in the
+     filled DataFrames below).
    - `to_dataframe()` preallocated dict (line 118): add
      `"origin": self._origin_arr[r, :n]`.
    - `to_dataframe()` list dict (line 135): add
@@ -230,7 +234,7 @@ are additive — no existing field/method is removed or renamed.
 
 ## Tests
 
-**New file: `tests/test_origin.py`** — 7 tests:
+**New file: `tests/test_origin.py`** — 8 tests:
 
 1. `test_origin_enum_values` — `Origin.WILD == 0`, `Origin.HATCHERY == 1`.
 2. `test_origin_names_roundtrip` — `ORIGIN_NAMES.index("wild") == 0`;
@@ -249,6 +253,12 @@ are additive — no existing field/method is removed or renamed.
 7. `test_yaml_origin_string_parses` — scenario YAML with
    `origin: hatchery` loads the event with the int field set; with
    `origin: salmon` raises `ValueError` at load time.
+8. `test_origin_preserved_on_population_transfer` — set up a
+   `MultiPopulationManager` with two populations; mark a source agent
+   as `ORIGIN_HATCHERY`; run a transfer; verify the target's
+   `pool.origin[new_idx] == ORIGIN_HATCHERY`. Locks in the network.py
+   preservation logic from Architecture item 8 (without this test, no
+   existing test would catch a regression — origin is brand new).
 
 ## Risk + regression surface
 
@@ -280,9 +290,9 @@ update them. Same playbook as v1.7.3 osmoregulation.
 - [ ] `OutputLogger` writes an `origin` column in `to_dataframe()`.
 - [ ] YAML `origin: hatchery` string round-trips through
       `scenario_loader`.
-- [ ] All 7 new tests pass.
+- [ ] All 8 new tests pass.
 - [ ] Full pytest suite stays green (current baseline 821 passing on
-      main; expected post-C1: 828).
+      main; expected post-C1: 829).
 - [ ] Plan stamp on the eventual implementation plan: ✅ EXECUTED.
 
 ## Estimated implementation time
