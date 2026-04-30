@@ -126,3 +126,31 @@ def test_origin_preserved_on_population_transfer():
     # all tagged HATCHERY (origin must have been carried over).
     assert dst.pool.n == 3
     assert (dst.pool.origin[:3] == ORIGIN_HATCHERY).all()
+
+
+def test_yaml_origin_string_parses():
+    """YAML 'origin: hatchery' string is converted to int8 by the
+    scenario loader; invalid strings raise ValueError at load time."""
+    import pytest
+    from salmon_ibm.scenario_loader import ScenarioLoader
+    from salmon_ibm.origin import ORIGIN_HATCHERY
+
+    loader = ScenarioLoader()
+    # Happy path: 'hatchery' converts to int8
+    edef = {
+        "type": "introduction",
+        "name": "intro_hatchery",
+        "params": {"n_agents": 5, "origin": "hatchery"},
+    }
+    evt = loader._build_single_event(edef)
+    assert evt is not None
+    assert evt.origin == ORIGIN_HATCHERY
+
+    # Error path: invalid string raises ValueError at load time
+    bad_edef = {
+        "type": "introduction",
+        "name": "intro_bad",
+        "params": {"n_agents": 5, "origin": "salmon"},
+    }
+    with pytest.raises(ValueError, match="origin"):
+        loader._build_single_event(bad_edef)
