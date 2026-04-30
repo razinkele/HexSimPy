@@ -83,3 +83,46 @@ def test_introduction_event_propagates_origin():
     assert (pool.origin[:2] == ORIGIN_WILD).all()
     # New 3 agents are HATCHERY
     assert (pool.origin[2:5] == ORIGIN_HATCHERY).all()
+
+
+def test_origin_preserved_on_population_transfer():
+    """Origin must persist when an agent transfers between populations
+    via MultiPopulationManager. Without this, a hatchery agent moving
+    populations would silently reset to WILD."""
+    import numpy as np
+    from salmon_ibm.agents import AgentPool
+    from salmon_ibm.population import Population
+    from salmon_ibm.interactions import MultiPopulationManager
+    from salmon_ibm.network import SwitchPopulationEvent
+    from salmon_ibm.origin import ORIGIN_HATCHERY
+
+    # Source: 3 hatchery agents
+    src_pool = AgentPool(n=3, start_tri=0, rng_seed=42)
+    src_pool.origin[:] = ORIGIN_HATCHERY
+    src = Population(name="src", pool=src_pool)
+
+    # Target: empty
+    dst_pool = AgentPool(n=0, start_tri=0, rng_seed=43)
+    dst = Population(name="dst", pool=dst_pool)
+
+    mpm = MultiPopulationManager()
+    mpm.register(src)
+    mpm.register(dst)
+
+    # SwitchPopulationEvent looks up source/target by name from
+    # landscape["multi_pop_mgr"] (verified at network.py:177).
+    landscape = {"rng": np.random.default_rng(0), "multi_pop_mgr": mpm}
+    # Event base class requires `name`; trigger defaults to EveryStep.
+    evt = SwitchPopulationEvent(
+        name="transfer_test",
+        source_pop="src",
+        target_pop="dst",
+        transfer_probability=1.0,
+    )
+    mask = np.ones(3, dtype=bool)
+    evt.execute(src, landscape, t=0, mask=mask)
+
+    # All source agents transferred; target should now have 3 agents,
+    # all tagged HATCHERY (origin must have been carried over).
+    assert dst.pool.n == 3
+    assert (dst.pool.origin[:3] == ORIGIN_HATCHERY).all()

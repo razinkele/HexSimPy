@@ -121,6 +121,14 @@ class Population:
         self.pool.exit_branch_id = v
 
     @property
+    def origin(self) -> np.ndarray:
+        return self.pool.origin
+
+    @origin.setter
+    def origin(self, v):
+        self.pool.origin = v
+
+    @property
     def cwr_hours(self) -> np.ndarray:
         return self.pool.cwr_hours
 
