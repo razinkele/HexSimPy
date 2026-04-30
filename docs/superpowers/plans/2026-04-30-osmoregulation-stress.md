@@ -1,5 +1,7 @@
 # Osmoregulation Stress for *Salmo salar* Implementation Plan
 
+> **STATUS: ✅ EXECUTED 2026-04-30** — All 16 tasks complete. EstuaryParams extended with 3 salinity fields + __post_init__ validation; salinity_cost() rewritten with linear-with-anchors S. salar physiology (Wilson 2002 iso-osmotic + Brett & Groves 1979 hyper/hypo slopes); 5 YAML configs migrated; 3 test fixtures migrated; api-reference + model-manual docs updated. Full pytest suite green at 821 passing (was 815, +6 net new tests, 0 regressions despite the predicted Baltic-cost shift). Spec at docs/superpowers/specs/2026-04-29-osmoregulation-stress-design.md (commit d485358). Closes the first of four queued Curonian-realism deferred items (A osmoregulation → next: C hatchery vs wild).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace `salmon_ibm/estuary.py::salinity_cost()` with a linear-with-anchors *S. salar* physiology function modeling iso-osmotic stress (cost minimum at the iso-osmotic point ~10 PSU, asymmetric rise above and below).
