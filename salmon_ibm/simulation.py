@@ -53,6 +53,7 @@ from salmon_ibm.config import (
 from salmon_ibm.environment import Environment
 from salmon_ibm.estuary import (
     salinity_cost,
+    EstuaryParams,
     do_override,
     seiche_pause,
     DO_ESCAPE,
@@ -293,6 +294,19 @@ class Simulation:
         self.bio_params = load_bio_params_from_config(config)
         self._activity_lut = self._build_activity_lut()
         self.est_cfg = config.get("estuary", {})
+        # EstuaryParams from salinity_cost YAML subsection. Filter to known
+        # fields so legacy keys (S_opt, S_tol, k) silently fall back to
+        # dataclass defaults rather than raising. Validation in
+        # __post_init__ fires here at scenario-load time, not first step.
+        _known_salinity_keys = {
+            "salinity_iso_osmotic",
+            "salinity_hyper_cost",
+            "salinity_hypo_cost",
+        }
+        _sal_cfg = self.est_cfg.get("salinity_cost", {})
+        self._est_params = EstuaryParams(
+            **{k: v for k, v in _sal_cfg.items() if k in _known_salinity_keys}
+        )
         self._skip_estuarine_overrides = self._detect_estuarine_noop()
 
         # Scratch buffers for per-step operations (avoid alloc in hot loops).
@@ -477,13 +491,7 @@ class Simulation:
         activity = np.take(self._activity_lut, population.behavior, mode="clip")
         sal = fields.get("salinity", self._zero_salinity)
         sal_at_agents = sal[population.tri_idx]
-        s_cfg = self.est_cfg.get("salinity_cost", {})
-        sal_cost = salinity_cost(
-            sal_at_agents,
-            S_opt=s_cfg.get("S_opt", 0.5),
-            S_tol=s_cfg.get("S_tol", 6.0),
-            k=s_cfg.get("k", 0.6),
-        )
+        sal_cost = salinity_cost(sal_at_agents, self._est_params)
         alive = population.alive & ~population.arrived
         if alive.any():
             new_ed, dead, new_mass = update_energy(
