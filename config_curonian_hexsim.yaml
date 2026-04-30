@@ -1,0 +1,19 @@
+grid:
+  type: hexsim
+
+hexsim:
+  workspace: "Curonian Lagoon"
+  species: salmon
+  extent_layer: "Lagoon [ extent ]"
+  depth_layer: "Lagoon [ depth ]"
+  temperature_csv: Lagoon Temperature.csv
+
+estuary:
+  salinity_cost:
+    # See config_curonian_minimal.yaml for parameter rationale.
+    salinity_iso_osmotic: 10.0
+  do_avoidance:
+    lethal: 2.0
+    high: 4.0
+  seiche_pause:
+    dSSHdt_thresh_m_per_15min: 0.02

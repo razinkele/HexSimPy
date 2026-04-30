@@ -55,9 +55,8 @@ forcings:
 
 estuary:
   salinity_cost:
-    S_opt: 0.5
-    S_tol: 6.0
-    k: 0.6
+    # See config_curonian_minimal.yaml for parameter rationale.
+    salinity_iso_osmotic: 10.0
   do_avoidance:
     lethal: 2.0
     high: 4.0

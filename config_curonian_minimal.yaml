@@ -24,9 +24,10 @@ forcings:
     v10_var: v10
 estuary:
   salinity_cost:
-    S_opt: 0.5
-    S_tol: 6.0
-    k: 0.6
+    # S. salar iso-osmotic ~10 PSU (Wilson 2002); cost slopes from Brett & Groves 1979.
+    # Defaults (10 / 0.30 / 0.05) are already the right values; explicit override
+    # only needed if calibration data argues otherwise.
+    salinity_iso_osmotic: 10.0
   do_avoidance:
     lethal: 2.0
     high: 4.0

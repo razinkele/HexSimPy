@@ -56,9 +56,9 @@ forcings:
 # spatially-explicit field.
 estuary:
   salinity_cost:
-    S_opt: 0.5
-    S_tol: 6.0
-    k: 0.6
+    # S. salar iso-osmotic ~10 PSU (Wilson 2002).
+    # Hyper/hypo cost slopes default from EstuaryParams (Brett & Groves 1979).
+    salinity_iso_osmotic: 10.0
   do_avoidance:
     lethal: 3.0        # Liland et al. 2024 (was 2.0 in v1 plan)
     high: 5.5          # Liland et al. 2024 (was 4.0 in v1 plan)
