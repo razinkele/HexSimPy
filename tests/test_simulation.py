@@ -232,7 +232,8 @@ def test_estuarine_overrides_skipped_when_disabled():
             "temperature_csv": "River Temperature.csv",
         },
         "estuary": {
-            "salinity_cost": {"S_opt": 0.5, "S_tol": 999, "k": 0.0},
+            # Disable salinity-cost penalty (test fixture). Migrated 2026-04-30.
+            "salinity_cost": {"salinity_hyper_cost": 0.0, "salinity_hypo_cost": 0.0},
             "do_avoidance": {"lethal": 0.0, "high": 0.0},
             "seiche_pause": {"dSSHdt_thresh_m_per_15min": 999},
         },
