@@ -139,16 +139,15 @@ Expected: all green. The default `activity_by_behavior` dict in `BalticBioParams
 
 - [ ] **Step 1.7: Add `HatcheryDispatch` frozen dataclass and `BalticSpeciesConfig` NamedTuple**
 
-In `salmon_ibm/baltic_params.py`, modify the top imports to include:
+In `salmon_ibm/baltic_params.py`, add to the top imports (the file currently does NOT import numpy or NamedTuple):
 
 ```python
 from typing import NamedTuple
 import numpy as np
+from salmon_ibm.bioenergetics import BioParams  # for BalticSpeciesConfig.wild type widening (used in Task 3)
 ```
 
-(`numpy` should already be imported transitively via the rest of the codebase, but add it directly for typing.)
-
-Then, immediately AFTER the `BalticBioParams` class definition (after the closing of the class, around line 110), add:
+Then, immediately AFTER the `BalticBioParams` class definition (the class body ends around line 110, with `@property def T_MAX(...)` last), add:
 
 ```python
 @dataclass(frozen=True)
@@ -170,13 +169,13 @@ class BalticSpeciesConfig(NamedTuple):
 
     Always returned by load_baltic_species_config(); legacy non-Baltic
     path returns BalticSpeciesConfig(wild=plain_BioParams, hatchery=None)
-    so callers don't need isinstance branching.
+    so callers don't need isinstance branching. The `wild` field is
+    typed as `BioParams | BalticBioParams` because the legacy path
+    wraps a plain `BioParams`.
     """
-    wild: "BalticBioParams"  # forward-ref to avoid moving the class
+    wild: BioParams | BalticBioParams
     hatchery: BalticBioParams | None
 ```
-
-(`from salmon_ibm.bioenergetics import BioParams` may also need to be imported if `wild` is later widened to accept plain `BioParams`. For this task we keep the type as `BalticBioParams`; widening happens in Task 3.)
 
 - [ ] **Step 1.8: Run baltic_params tests to confirm types load cleanly**
 
@@ -615,11 +614,11 @@ Expected: 1 passed.
 Append to `tests/test_hatchery_params.py`:
 
 ```python
-def test_simulation_init_non_baltic_has_no_hatchery_dispatch(tmp_path):
-    """Non-Baltic config (no species_config: key) returns
-    BalticSpeciesConfig(wild=plain_BioParams, hatchery=None) from the
-    unified loader. Simulation.hatchery_dispatch is None; no isinstance
-    branching needed. Locks in the C2 unified-return semantics."""
+def test_simulation_init_non_baltic_has_no_hatchery_dispatch():
+    """Non-Baltic config (no species_config: key) routes through the
+    legacy path. Verified at the loader level (not full Simulation
+    construction, which requires mesh/env/etc.) since the loader's
+    unified-return contract is the unit under test here."""
     from salmon_ibm.config import load_bio_params_from_config
     from salmon_ibm.baltic_params import BalticSpeciesConfig
     from salmon_ibm.bioenergetics import BioParams
@@ -642,7 +641,7 @@ Expected: FAILED — `load_bio_params_from_config` currently returns `BioParams`
 
 - [ ] **Step 3.7: Update `salmon_ibm/config.py`**
 
-In `salmon_ibm/config.py`, locate `load_bio_params_from_config` (around line 47-66). Modify to always return `BalticSpeciesConfig`:
+In `salmon_ibm/config.py`, locate `load_bio_params_from_config` (around line 47-66; `bio_params_from_config` helper is at line 37). Modify to always return `BalticSpeciesConfig`:
 
 ```python
 from salmon_ibm.baltic_params import BalticSpeciesConfig, load_baltic_species_config
@@ -664,9 +663,24 @@ def load_bio_params_from_config(cfg: dict) -> BalticSpeciesConfig:
     return BalticSpeciesConfig(wild=plain, hatchery=None)
 ```
 
-(Adjust if `bio_params_from_config` is the existing helper that builds a plain `BioParams` from the config dict. Check the file before editing.)
+- [ ] **Step 3.8: Apply minimal simulation.py:294 fix to keep the build green between commits**
 
-- [ ] **Step 3.8: Run test 12; expect pass**
+The return-type change at `config.py` would break `simulation.py:294` until Task 4 lands. Apply a MINIMAL update now to keep the suite green between commits 3 and 4. In `salmon_ibm/simulation.py`, locate line 294:
+
+```python
+        self.bio_params = load_bio_params_from_config(config)
+```
+
+Replace with:
+
+```python
+        loaded = load_bio_params_from_config(config)
+        self.bio_params = loaded.wild  # Task 4 will add full hatchery_dispatch handling
+```
+
+This keeps `self.bio_params.activity_by_behavior` accessible at line 295 (`self._build_activity_lut`). Task 4 will replace these two lines with the full unified-return + cache + hatchery_dispatch construction.
+
+- [ ] **Step 3.9: Run test 12; expect pass**
 
 ```bash
 micromamba run -n shiny python -m pytest tests/test_hatchery_params.py::test_simulation_init_non_baltic_has_no_hatchery_dispatch -v
@@ -674,18 +688,18 @@ micromamba run -n shiny python -m pytest tests/test_hatchery_params.py::test_sim
 
 Expected: 1 passed.
 
-- [ ] **Step 3.9: Run config + baltic_params regressions**
+- [ ] **Step 3.10: Run config + simulation regression**
 
 ```bash
-micromamba run -n shiny python -m pytest tests/test_config.py tests/test_baltic_params.py -v
+micromamba run -n shiny python -m pytest tests/test_config.py tests/test_simulation.py tests/test_baltic_params.py -v
 ```
 
-Expected: green. Likely failure: any test/caller still expecting bare `BioParams` from `load_bio_params_from_config`. Fix them analogously to Step 2.6 (`cfg = load_bio_params_from_config(...); params = cfg.wild`).
+Expected: green. The minimal simulation.py:294 fix (Step 3.8) keeps `test_simulation.py` passing. Likely failure: any caller of `load_bio_params_from_config` outside of `simulation.py:294` still expecting bare `BioParams`. Fix them analogously to Step 2.6 (`cfg = load_bio_params_from_config(...); params = cfg.wild`).
 
-- [ ] **Step 3.10: Commit Task 3**
+- [ ] **Step 3.11: Commit Task 3**
 
 ```bash
-git add salmon_ibm/config.py salmon_ibm/bioenergetics.py tests/test_hatchery_params.py tests/test_config.py
+git add salmon_ibm/config.py salmon_ibm/bioenergetics.py salmon_ibm/simulation.py tests/test_hatchery_params.py tests/test_config.py
 git commit -m "feat(hatchery-c2): unified loader return + dispatch helper (Task 3)
 
 load_bio_params_from_config() now always returns BalticSpeciesConfig.
@@ -720,10 +734,23 @@ This task ships the simulation-side wiring. Simulation holds an optional `hatche
 Append to `tests/test_hatchery_params.py`:
 
 ```python
-def _baltic_yaml_with_hatchery(tmp_path) -> dict:
-    """Build a tmp_path-based config dict pointing at a Baltic species
-    YAML with hatchery overrides."""
-    species_yaml = tmp_path / "species.yaml"
+def _baltic_sim_with_hatchery(tmp_path):
+    """Construct a real Simulation from config_curonian_baltic.yaml,
+    but with the species_config redirected to a tmp_path species YAML
+    that includes hatchery_overrides:.
+
+    Existing Simulation tests use:
+        cfg = load_config("config_curonian_minimal.yaml")
+        sim = Simulation(cfg, n_agents=10, data_dir="data", rng_seed=42)
+
+    We follow the same pattern but with the Baltic config and a
+    patched species_config path so we don't have to ship the
+    hatchery_overrides into a tracked config file just for tests.
+    """
+    from salmon_ibm.config import load_config
+    from salmon_ibm.simulation import Simulation
+
+    species_yaml = tmp_path / "species_with_hatchery.yaml"
     species_yaml.write_text("""
 species:
   BalticAtlanticSalmon:
@@ -739,7 +766,10 @@ species:
         1: 1.5
         3: 1.875
 """)
-    return {"species_config": str(species_yaml)}
+    cfg = load_config("config_curonian_baltic.yaml")
+    cfg["species_config"] = str(species_yaml)
+    sim = Simulation(cfg, n_agents=10, data_dir="data", rng_seed=42)
+    return sim
 
 
 def test_rebuild_luts_resilient_to_slider_replacement(tmp_path):
@@ -749,12 +779,7 @@ def test_rebuild_luts_resilient_to_slider_replacement(tmp_path):
     re-derive from the cached BalticSpeciesConfig. Locks in the
     cache-and-re-derive semantics."""
     from salmon_ibm.bioenergetics import BioParams
-    from salmon_ibm.simulation import Simulation
-    cfg = _baltic_yaml_with_hatchery(tmp_path)
-    # NOTE: This test requires Simulation to be constructible from a minimal cfg.
-    # If the project's Simulation needs more setup (mesh, env, etc.), use the
-    # smallest existing Baltic test fixture and apply the slider replacement.
-    sim = Simulation(cfg)  # adjust per existing Simulation signature
+    sim = _baltic_sim_with_hatchery(tmp_path)
     # Mimic app.py:1493 sidebar: replace bio_params with plain BioParams
     sim.bio_params = BioParams(RA=0.005, RB=-0.2, RQ=0.07, ED_MORTAL=4.0,
                                T_OPT=15.0, T_MAX=24.0)
@@ -772,18 +797,15 @@ def test_step_injects_hatchery_dispatch_landscape_key(tmp_path, monkeypatch):
     dict. Without this test, a missing dict-key insertion in step()
     would silently degrade dispatch to wild-only without breaking any
     other test."""
-    import numpy as np
-    from salmon_ibm.simulation import Simulation
     from salmon_ibm.baltic_params import HatcheryDispatch
-    cfg = _baltic_yaml_with_hatchery(tmp_path)
-    sim = Simulation(cfg)
+    sim = _baltic_sim_with_hatchery(tmp_path)
     captured: dict = {}
 
     def spy(population, landscape, t):
-        captured["landscape"] = landscape
+        captured["landscape"] = dict(landscape)  # snapshot, not reference
 
     monkeypatch.setattr(sim._sequencer, "step", spy)
-    sim.step()  # advances simulation by one timestep; sequencer.step is monkey-patched
+    sim.step()
 
     assert "hatchery_dispatch" in captured["landscape"]
     assert captured["landscape"]["hatchery_dispatch"] is not None
@@ -793,10 +815,14 @@ def test_step_injects_hatchery_dispatch_landscape_key(tmp_path, monkeypatch):
 def test_rebuild_luts_noop_on_non_baltic_sim():
     """Non-Baltic sim (no species_config in config) calls rebuild_luts()
     without exception; sim.hatchery_dispatch remains None. Without this,
-    a future change could throw KeyError on missing _species_config."""
+    a future change could throw KeyError on missing _species_config.
+    Uses config_curonian_minimal.yaml which has no species_config: key."""
+    from salmon_ibm.config import load_config
     from salmon_ibm.simulation import Simulation
-    cfg = {}  # No species_config — legacy path
-    sim = Simulation(cfg)
+    cfg = load_config("config_curonian_minimal.yaml")
+    assert "species_config" not in cfg, "fixture invariant: minimal config is non-Baltic"
+    sim = Simulation(cfg, n_agents=10, data_dir="data", rng_seed=42)
+    assert sim.hatchery_dispatch is None
     sim.rebuild_luts()  # must not raise
     assert sim.hatchery_dispatch is None
 ```
@@ -811,49 +837,93 @@ Expected: 3 failed (one or more attribute / method missing on `Simulation`).
 
 - [ ] **Step 4.3: Update `Landscape` TypedDict in `salmon_ibm/simulation.py`**
 
-In `salmon_ibm/simulation.py`, locate the `Landscape` TypedDict (around line 9). Add new key:
+In `salmon_ibm/simulation.py`, locate the `Landscape` TypedDict at line 9-27. The existing definition has 16 fields. Add ONE new field at the bottom of the class body (do NOT delete or reorder existing fields):
 
 ```python
 class Landscape(TypedDict, total=False):
-    # ... existing keys ...
+    """Typed dict passed to every event. All keys are optional (total=False)."""
+
+    mesh: object  # TriMesh | HexMesh
+    fields: dict[str, np.ndarray]
+    rng: np.random.Generator
     activity_lut: np.ndarray
-    # ... existing keys ...
+    est_cfg: dict
+    barrier_arrays: tuple | None
+    genome: object | None  # GenomeManager | None
+    multi_pop_mgr: object | None  # MultiPopulationManager | None
+    network: object | None  # StreamNetwork | None
+    step_alive_mask: np.ndarray
+    spatial_data: dict[str, np.ndarray]
+    global_variables: dict[str, float]
+    census_records: list
+    summary_reports: list
+    log_dir: str
+    n_micro_steps_per_cell: np.ndarray  # NEW: per-cell hop budget
     hatchery_dispatch: "HatcheryDispatch | None"  # NEW (C2)
 ```
 
-Add to top imports:
+Add to top imports of `simulation.py`:
 
 ```python
 from salmon_ibm.baltic_params import BalticSpeciesConfig, HatcheryDispatch
 ```
 
-- [ ] **Step 4.4: Update `Simulation.__init__` to use unified loader + cache**
+- [ ] **Step 4.4: Factor out `_build_activity_lut_for(activity_dict)` helper**
 
-In `salmon_ibm/simulation.py`, locate `Simulation.__init__` (around line 292-295). Replace the existing line `self.bio_params = load_bio_params_from_config(config)` with:
+In `salmon_ibm/simulation.py`, the existing `_build_activity_lut` method at lines 575-581 reads from `self.bio_params.activity_by_behavior`. We need a version that accepts an arbitrary dict (so we can call it on both wild AND hatchery dicts). Replace the existing method with two methods — a generic one that takes a dict, and a thin wrapper that preserves the existing call sites:
 
 ```python
-        loaded = load_bio_params_from_config(config)
+    def _build_activity_lut_for(self, activity_dict: dict[int, float]) -> np.ndarray:
+        """Build vectorized activity multiplier LUT from a dict.
+
+        Public to internal callers (rebuild_luts, __init__) which need
+        to build LUTs from arbitrary activity_by_behavior dicts (wild
+        or hatchery). The wrapper _build_activity_lut() preserves the
+        existing 'read from self.bio_params' contract.
+        """
+        max_beh = max(activity_dict.keys())
+        lut = np.ones(max_beh + 1)
+        for k, v in activity_dict.items():
+            lut[k] = v
+        return lut
+
+    def _build_activity_lut(self):
+        """Wrapper for backward-compat: build LUT from self.bio_params."""
+        return self._build_activity_lut_for(self.bio_params.activity_by_behavior)
+```
+
+`simulation.py` does not currently have a module-level `logger`. Add it to the top imports:
+
+```python
+import logging
+logger = logging.getLogger(__name__)
+```
+
+- [ ] **Step 4.5: Update `Simulation.__init__` to use unified loader + cache**
+
+In `salmon_ibm/simulation.py`, locate `Simulation.__init__` (around line 292-295). The existing two lines are:
+
+```python
+        self.bio_params = load_bio_params_from_config(config)
+        self._activity_lut = self._build_activity_lut()
+```
+
+Replace with:
+
+```python
+        loaded = load_bio_params_from_config(config)  # always BalticSpeciesConfig
         self._species_config = loaded  # cached for rebuild_luts() — no per-slider disk I/O
         self.bio_params = loaded.wild
         if loaded.hatchery is not None:
-            from salmon_ibm.bioenergetics import _build_lut as build_lut  # if helper exists
-            hatch_lut = self._build_activity_lut_for(loaded.hatchery.activity_by_behavior)
+            hatch_lut = self._build_activity_lut_for(
+                loaded.hatchery.activity_by_behavior
+            )
             self.hatchery_dispatch = HatcheryDispatch(
                 params=loaded.hatchery,
                 activity_lut=hatch_lut,
             )
-        else:
-            self.hatchery_dispatch = None
-```
-
-(Where `_build_activity_lut_for(activity_dict)` is a small helper that mirrors the existing `_build_activity_lut` logic but takes a dict argument. If `_build_activity_lut` already exists at line 575, factor out a private `_build_activity_lut_for(self, activity_dict)` that the existing method delegates to.)
-
-If `hatchery_dispatch` is set, log the overridden keys:
-
-```python
-        if self.hatchery_dispatch is not None:
             wild_dict = self.bio_params.activity_by_behavior
-            hatch_dict = self.hatchery_dispatch.params.activity_by_behavior
+            hatch_dict = loaded.hatchery.activity_by_behavior
             overridden = sorted({
                 k for k in hatch_dict if wild_dict.get(k) != hatch_dict[k]
             })
@@ -861,13 +931,13 @@ If `hatchery_dispatch` is set, log the overridden keys:
                 "C2 hatchery dispatch active: activity_by_behavior keys overridden: %s",
                 overridden,
             )
-```
+        else:
+            self.hatchery_dispatch = None
+        self._activity_lut = self._build_activity_lut()
 
-(Use the project's logger; the existing simulation.py likely has one. If not, `import logging; logger = logging.getLogger(__name__)`.)
+- [ ] **Step 4.6: Add `Simulation.rebuild_luts()` method**
 
-- [ ] **Step 4.5: Add `Simulation.rebuild_luts()` method**
-
-In `salmon_ibm/simulation.py`, AFTER `_build_activity_lut` (around line 575-581), add:
+In `salmon_ibm/simulation.py`, AFTER `_build_activity_lut` (it now lives where Step 4.4 placed it, immediately after `_build_activity_lut_for`), add:
 
 ```python
     def rebuild_luts(self):
@@ -878,12 +948,12 @@ In `salmon_ibm/simulation.py`, AFTER `_build_activity_lut` (around line 575-581)
         self.bio_params via app.py:1493 do NOT affect activity LUTs;
         activity is locked to the species-config baseline.
 
-        No-ops on non-Baltic configs (no _species_config cached or
+        No-ops on non-Baltic configs (no _species_config cached, or
         species_config.hatchery is None).
         """
-        if not getattr(self, "_species_config", None):
+        species_cfg = getattr(self, "_species_config", None)
+        if species_cfg is None:
             return
-        species_cfg = self._species_config
         self._activity_lut = self._build_activity_lut_for(
             species_cfg.wild.activity_by_behavior
         )
@@ -899,9 +969,9 @@ In `salmon_ibm/simulation.py`, AFTER `_build_activity_lut` (around line 575-581)
             self.hatchery_dispatch = None
 ```
 
-- [ ] **Step 4.6: Update `Simulation.step()` to inject `hatchery_dispatch`**
+- [ ] **Step 4.7: Update `Simulation.step()` to inject `hatchery_dispatch` into landscape**
 
-In `salmon_ibm/simulation.py`, locate the `step()` method (around line 557+) and the landscape dict construction (around line 560-571). Add a new key:
+In `salmon_ibm/simulation.py`, locate the `step()` method (around line 557) and its landscape dict construction (lines 560-571). The existing dict has 10 keys. Add the `hatchery_dispatch` key — keep ALL existing keys:
 
 ```python
         landscape: Landscape = {
@@ -909,41 +979,53 @@ In `salmon_ibm/simulation.py`, locate the `step()` method (around line 557+) and
             "fields": self.env.fields,
             "rng": self._rng,
             "activity_lut": self._activity_lut,
+            "est_cfg": self.est_cfg,
+            "barrier_arrays": self._barrier_arrays,
+            "genome": self._genome,
+            "multi_pop_mgr": self._multi_pop_mgr,
+            "network": self._network,
+            "n_micro_steps_per_cell": self._n_micro_steps_per_cell,
             "hatchery_dispatch": self.hatchery_dispatch,  # NEW (C2)
-            # ... existing keys ...
         }
 ```
 
-- [ ] **Step 4.7: Update `_event_bioenergetics` to dispatch by origin**
+- [ ] **Step 4.8: Update `_event_bioenergetics` to dispatch by origin**
 
-In `salmon_ibm/simulation.py`, locate `_event_bioenergetics` (around line 488-510). Find the line that does `np.take(self._activity_lut, ...)` (around line 491) and replace:
+In `salmon_ibm/simulation.py`, locate `_event_bioenergetics` at line 488-510. The current line 491 reads `activity = np.take(self._activity_lut, population.behavior, mode="clip")`. **The argument name is `population` — use `population.behavior` and `population.pool.origin`, NOT `self.pool` (which would bypass the event's population parameter and break multi-population scenarios).**
+
+Add to the top imports of `simulation.py`:
+
+```python
+from salmon_ibm.bioenergetics import origin_aware_activity_mult
+```
+
+Replace line 491:
 
 ```python
         # Was: activity = np.take(self._activity_lut, population.behavior, mode="clip")
-        from salmon_ibm.bioenergetics import origin_aware_activity_mult
         hatch_lut = (
             self.hatchery_dispatch.activity_lut
             if self.hatchery_dispatch is not None else None
         )
         activity = origin_aware_activity_mult(
-            self.pool.behavior,
-            self.pool.origin,
+            population.behavior,
+            population.pool.origin,
             self._activity_lut,
             hatch_lut,
         )
 ```
 
-(Adjust to match existing dispatch shape; the helper is graceful so existing code paths still work when hatchery_dispatch is None.)
+The graceful fallback (`hatch_lut is None` branch in the helper) means existing scenarios without hatchery overrides continue to use the wild LUT unchanged. `mode="clip"` of the prior `np.take` was defensive against out-of-range behavior values; since `Behavior` enum is bounded to {0..4} and the LUTs are sized accordingly, the clip is unnecessary in the new helper.
 
-- [ ] **Step 4.8: Run the 3 new tests; expect all pass**
+- [ ] **Step 4.9: Run the 3 new tests; expect all pass**
 
 ```bash
 micromamba run -n shiny python -m pytest tests/test_hatchery_params.py -v
 ```
 
-Expected: 9 passed (1 + 5 + 1 + 2 + ... cumulative).
+Expected: 11 passed (1 from Task 1 + 5 from Task 2 + 2 from Task 3 + 3 from Task 4 = 11).
 
-- [ ] **Step 4.9: Run simulation regression check**
+- [ ] **Step 4.10: Run simulation regression check**
 
 ```bash
 micromamba run -n shiny python -m pytest tests/test_simulation.py tests/test_integration.py -v
@@ -1037,7 +1119,7 @@ Expected: 2 failed (no guard yet).
 
 - [ ] **Step 5.3: Add runtime guard + dispatch update to `SurvivalEvent`**
 
-In `salmon_ibm/events_builtin.py`, locate `SurvivalEvent.execute()` (around lines 56-124).
+In `salmon_ibm/events_builtin.py`, locate `SurvivalEvent` class (starts at line 52, `bio_params: BioParams = field(...)` at line 56, `execute()` body starts at line 60).
 
 Add module-top import (top of file):
 
@@ -1045,7 +1127,7 @@ Add module-top import (top of file):
 from salmon_ibm.bioenergetics import origin_aware_activity_mult
 ```
 
-Add a comment at line 56 above `bio_params: BioParams = field(...)`:
+Add a comment INSIDE the `SurvivalEvent` class body, immediately before the `bio_params: BioParams = field(...)` field declaration on line 56 (so the comment becomes the new line 56 and pushes the field down by one line):
 
 ```python
     # NOTE: bio_params.activity_by_behavior on this event is dead weight
@@ -1177,6 +1259,14 @@ wild: {0: 1.0, 1: 1.2, 2: 0.8, 3: 1.5, 4: 1.0}
 hatch: {0: 1.0, 1: 1.5, 2: 0.8, 3: 1.875, 4: 1.0}
 ```
 
+**Important — opt-in vs opt-out semantics:** Three deployed scenario configs reference `configs/baltic_salmon_species.yaml`: `config_curonian_baltic.yaml`, `config_curonian_h3_multires.yaml`, `config_nemunas_h3.yaml`. Adding `hatchery_overrides:` to the shared species YAML means ALL THREE scenarios will now load `cfg.hatchery is not None` on next run.
+
+This is mechanically opt-out (every Baltic scenario inherits hatchery activation), not opt-in. **However:** scenarios with no HATCHERY-tagged agents are functionally unaffected — `origin_aware_activity_mult` returns `lut_wild[behavior]` for WILD agents regardless of whether `hatchery_dispatch` is None. So the only observable change in wild-only scenarios is `sim.hatchery_dispatch is not None`. Verify no existing test or diagnostic script asserts `sim.hatchery_dispatch is None` on a Baltic config:
+
+```bash
+grep -rn "hatchery_dispatch is None" tests/ scripts/ salmon_ibm/ || echo "no asserters found — safe to proceed"
+```
+
 - [ ] **Step 5.8: Run the 2 new guard tests; expect pass**
 
 ```bash
@@ -1266,6 +1356,8 @@ Replace `2026-MM-DD` with the actual completion date and `NNN` with the verified
 
 - [ ] **Step 6.4: Final commit**
 
+**Do NOT create this commit unless Step 6.1 reports zero failures.** A red commit poisons the branch history and complicates revert.
+
 ```bash
 git add docs/superpowers/plans/2026-05-01-hatchery-c2-bioparams.md
 git commit -m "docs(plan): stamp hatchery-c2-bioparams plan as EXECUTED (Task 6)
@@ -1278,15 +1370,99 @@ sea-age sampling)."
 
 (Update `NNN` to match the actual count.)
 
-- [ ] **Step 6.5: Push the branch and open PR**
+- [ ] **Step 6.5: Rebase onto main if branched from `hatchery-origin-c1`**
+
+If the implementation branched from `hatchery-origin-c1` (because PR #3 was still open at start), rebase onto main now that PR #3 has merged:
+
+```bash
+git fetch origin main
+git rebase origin/main
+```
+
+Resolve any conflicts (none expected — C1's changes don't overlap with C2's). Then verify:
+
+```bash
+git log --oneline origin/main..HEAD
+```
+
+Expected: only the 6 C2 commits (Tasks 1-6), no C1 commits in the list.
+
+- [ ] **Step 6.6: Push the branch and open PR**
 
 ```bash
 git push -u origin hatchery-c2-bioparams
 ```
 
-Then open a PR via `gh pr create` (matching the v1.7.3 osmoregulation + hatchery-origin-c1 PR pattern). Title: `Hatchery vs wild C2: activity_by_behavior parameter divergence`. Body should reference the spec, list the 8 modified files, summarize the test count delta (+13 → 842), include the calibration sensitivity sweep table {0%, +12.5%, +25%, +37.5%}, and note that C3 is deferred.
+Then open a PR via `gh pr create`. Use this template (mirrors the C1 PR #3 pattern):
 
-- [ ] **Step 6.6: Update memory after merge + deploy**
+```bash
+gh pr create --title "Hatchery vs wild C2: activity_by_behavior parameter divergence" --body "$(cat <<'EOF'
+## Summary
+
+Tier C2 of hatchery-vs-wild distinction — parameter divergence on
+\`activity_by_behavior\`. Hatchery agents pay +25% on RANDOM (key 1)
+and UPSTREAM (key 3) Wisconsin activity multipliers; DOWNSTREAM (key 4),
+HOLD (0), TO_CWR (2) unchanged.
+
+- New \`HatcheryDispatch\` frozen dataclass bundles params + LUT atomically
+- New \`origin_aware_activity_mult\` helper in bioenergetics.py
+  (graceful fallback when \`lut_hatch=None\`)
+- \`Simulation\` holds \`hatchery_dispatch: HatcheryDispatch | None\`;
+  cached \`_species_config\` eliminates per-slider disk I/O
+- \`load_bio_params_from_config\` unified to always return
+  \`BalticSpeciesConfig\` (legacy path wraps plain BioParams)
+- Strict YAML loader on \`hatchery_overrides:\` (rejects unknown keys,
+  invalid Behavior sub-keys, non-numeric coercion failures)
+- Runtime guards in \`IntroductionEvent.execute\` and
+  \`PatchIntroductionEvent.execute\` raise on HATCHERY-without-overrides
+
+## Files changed (8 total)
+
+| File | Touches |
+|---|---|
+| \`salmon_ibm/baltic_params.py\` | +HatcheryDispatch + BalticSpeciesConfig + __post_init__ validation + _apply_hatchery_overrides + extended loader |
+| \`salmon_ibm/bioenergetics.py\` | +origin_aware_activity_mult helper |
+| \`salmon_ibm/config.py\` | unified return type |
+| \`salmon_ibm/simulation.py\` | imports + Landscape + __init__ + rebuild_luts + step + _event_bioenergetics + _build_activity_lut_for |
+| \`salmon_ibm/events_builtin.py\` | SurvivalEvent dispatch + IntroductionEvent guard + dead-weight comment |
+| \`salmon_ibm/events_hexsim.py\` | PatchIntroductionEvent guard |
+| \`app.py\` | sidebar uses rebuild_luts |
+| \`configs/baltic_salmon_species.yaml\` | hatchery_overrides block + provenance comments |
+| \`tests/test_hatchery_params.py\` | NEW — 13 tests |
+
+## Test plan
+
+- [x] 13 new tests in tests/test_hatchery_params.py (loader, helper, dispatch, guards, rebuild, step injection, validations)
+- [x] Full pytest suite: **NNN passed** (was 829; +13 new; 0 regressions)
+- [x] Calibration sensitivity sweep planned: {0%, +12.5%, +25%, +37.5%} (cap at +40% per Enders 2004 12-29% bracket)
+
+## Spec & plan
+
+- Spec: docs/superpowers/specs/2026-05-01-hatchery-c2-bioparams-design.md
+- Plan: docs/superpowers/plans/2026-05-01-hatchery-c2-bioparams.md (stamped EXECUTED YYYY-MM-DD)
+
+## Deferred
+
+- **C3:** Behaviour divergence (spawn-success, homing precision, sea-age sampling)
+- **Time-decaying multiplier:** No published curve for S. salar; static approximation retained
+- **SwitchPopulationEvent cross-population hatchery target warning:** No deployed multi-pop hatchery scenario today
+- **Pre-existing app.py:1493 plain-BioParams replacement bug:** routed around via rebuild_luts cache; separate cleanup PR
+
+## Backward compatibility
+
+Fully backward-compatible. \`hatchery_overrides:\` is opt-in per species YAML; legacy non-Baltic configs continue through the unified return as
+\`BalticSpeciesConfig(wild=plain_BioParams, hatchery=None)\`. Graceful
+fallback in dispatch helper means scenarios without hatchery agents
+get exactly the same activity multipliers as before C2.
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+EOF
+)"
+```
+
+Update `NNN` and `YYYY-MM-DD` in the body before running.
+
+- [ ] **Step 6.7: Update memory after merge + deploy**
 
 Once the PR is merged + tagged + deployed, update memory files:
 - `~/.claude/projects/.../memory/curonian_h3_grid_state.md`: bump deployed version label, replace the "in-flight" hatchery-origin-c1 bullet with a new "vNEW — Hatchery vs wild C2" entry.
