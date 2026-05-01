@@ -93,9 +93,13 @@ species:
 
 
 def test_load_bio_params_routes_to_baltic_when_species_config_set(tmp_path):
-    """A YAML config with species_config: <path> must route to BalticBioParams."""
+    """A YAML config with species_config: <path> must route to BalticBioParams.
+
+    Updated for Task 3: load_bio_params_from_config() now always returns
+    BalticSpeciesConfig; the wild sub-object carries the BalticBioParams.
+    """
     from salmon_ibm.config import load_bio_params_from_config
-    from salmon_ibm.baltic_params import BalticBioParams
+    from salmon_ibm.baltic_params import BalticBioParams, BalticSpeciesConfig
 
     species_yaml = tmp_path / "species.yaml"
     species_yaml.write_text("""
@@ -106,24 +110,31 @@ species:
     T_ACUTE_LETHAL: 24.0
 """)
     cfg = {"species_config": str(species_yaml)}
-    params = load_bio_params_from_config(cfg)
-    assert isinstance(params, BalticBioParams)
-    assert params.T_OPT == 16.0
-    assert params.T_ACUTE_LETHAL == 24.0
+    loaded = load_bio_params_from_config(cfg)
+    assert isinstance(loaded, BalticSpeciesConfig)
+    assert isinstance(loaded.wild, BalticBioParams)
+    assert loaded.wild.T_OPT == 16.0
+    assert loaded.wild.T_ACUTE_LETHAL == 24.0
 
 
 def test_load_bio_params_falls_back_to_bio_params_when_no_species_config():
-    """If species_config key absent, return classic BioParams (backward compat)."""
+    """If species_config key absent, legacy path wraps BioParams in BalticSpeciesConfig.
+
+    Updated for Task 3: load_bio_params_from_config() always returns
+    BalticSpeciesConfig. Legacy non-Baltic path: wild=BioParams, hatchery=None.
+    """
     from salmon_ibm.config import load_bio_params_from_config
     from salmon_ibm.bioenergetics import BioParams
-    from salmon_ibm.baltic_params import BalticBioParams
+    from salmon_ibm.baltic_params import BalticBioParams, BalticSpeciesConfig
 
     cfg = {"bioenergetics": {"RA": 0.003}}
-    params = load_bio_params_from_config(cfg)
-    assert isinstance(params, BioParams)
-    assert not isinstance(params, BalticBioParams), (
-        "Fall-back path must return BioParams, not BalticBioParams"
+    loaded = load_bio_params_from_config(cfg)
+    assert isinstance(loaded, BalticSpeciesConfig)
+    assert isinstance(loaded.wild, BioParams)
+    assert not isinstance(loaded.wild, BalticBioParams), (
+        "Fall-back path must return plain BioParams as wild, not BalticBioParams"
     )
+    assert loaded.hatchery is None
 
 
 def test_kill_gate_prefers_acute_lethal_for_baltic_params():

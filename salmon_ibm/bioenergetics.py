@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import numpy as np
 
+from salmon_ibm.origin import ORIGIN_HATCHERY
+
 
 OXY_CAL_J_PER_GO2 = 13_560.0
 
@@ -88,3 +90,27 @@ def update_energy(
     new_ed = np.where(new_mass > 0, new_e_total_j / (new_mass * 1000.0), 0.0)
     dead = new_ed < params.ED_MORTAL
     return new_ed, dead, new_mass
+
+
+def origin_aware_activity_mult(
+    behavior: np.ndarray,
+    origin: np.ndarray,
+    lut_wild: np.ndarray,
+    lut_hatch: np.ndarray | None,
+) -> np.ndarray:
+    """Per-agent activity multiplier with origin-aware dispatch.
+
+    Returns lut_wild[behavior] when lut_hatch is None — graceful for
+    pre-C2 paths, test fixtures, and scenarios without hatchery
+    overrides. Otherwise dispatches per-agent via origin column:
+    HATCHERY agents read from lut_hatch, WILD from lut_wild.
+
+    See docs/superpowers/specs/2026-05-01-hatchery-c2-bioparams-design.md.
+    """
+    if lut_hatch is None:
+        return lut_wild[behavior]
+    return np.where(
+        origin == ORIGIN_HATCHERY,
+        lut_hatch[behavior],
+        lut_wild[behavior],
+    )

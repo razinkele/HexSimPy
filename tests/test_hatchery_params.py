@@ -134,3 +134,48 @@ species:
     path = _write_yaml(tmp_path, yaml_body)
     with pytest.raises(ValueError, match="keys must be integers"):
         load_baltic_species_config(path)
+
+
+def test_origin_aware_activity_mult_dispatch():
+    """Helper dispatches per-agent: WILD origin reads from lut_wild,
+    HATCHERY from lut_hatch. Graceful path (lut_hatch is None) returns
+    lut_wild for all agents (covers pre-C2 callers and test fixtures).
+    Element-by-element equality check, not just shape (a stub returning
+    wrong values must not pass)."""
+    import numpy as np
+    from salmon_ibm.bioenergetics import origin_aware_activity_mult
+    from salmon_ibm.origin import ORIGIN_WILD, ORIGIN_HATCHERY
+
+    behavior = np.array([0, 1, 3, 1, 3], dtype=int)
+    origin = np.array(
+        [ORIGIN_WILD, ORIGIN_HATCHERY, ORIGIN_HATCHERY, ORIGIN_WILD, ORIGIN_WILD],
+        dtype=np.int8,
+    )
+    lut_wild = np.array([1.0, 1.2, 0.8, 1.5, 1.0])
+    lut_hatch = np.array([1.0, 1.5, 0.8, 1.875, 1.0])
+
+    # Mixed dispatch
+    out = origin_aware_activity_mult(behavior, origin, lut_wild, lut_hatch)
+    expected = np.array([1.0, 1.5, 1.875, 1.2, 1.5])
+    np.testing.assert_array_equal(out, expected)
+
+    # Graceful: lut_hatch=None returns lut_wild[behavior] for all agents
+    out_graceful = origin_aware_activity_mult(behavior, origin, lut_wild, None)
+    np.testing.assert_array_equal(out_graceful, lut_wild[behavior])
+
+
+def test_simulation_init_non_baltic_has_no_hatchery_dispatch():
+    """Non-Baltic config (no species_config: key) routes through the
+    legacy path. Verified at the loader level (not full Simulation
+    construction, which requires mesh/env/etc.) since the loader's
+    unified-return contract is the unit under test here."""
+    from salmon_ibm.config import load_bio_params_from_config
+    from salmon_ibm.baltic_params import BalticSpeciesConfig
+    from salmon_ibm.bioenergetics import BioParams
+
+    cfg_dict = {}  # No species_config: key — legacy path
+    loaded = load_bio_params_from_config(cfg_dict)
+    assert isinstance(loaded, BalticSpeciesConfig)
+    assert loaded.hatchery is None
+    # Legacy path returns plain BioParams as wild, NOT BalticBioParams
+    assert isinstance(loaded.wild, BioParams)

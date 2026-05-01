@@ -44,26 +44,22 @@ def bio_params_from_config(cfg: dict) -> BioParams:
     return BioParams(**overrides)
 
 
-def load_bio_params_from_config(cfg: dict):
-    """Route to BalticBioParams if ``species_config`` key present, else BioParams.
+def load_bio_params_from_config(cfg: dict) -> "BalticSpeciesConfig":
+    """Route to BalticSpeciesConfig from species_config if present,
+    else wrap a plain BioParams in BalticSpeciesConfig(wild=BioParams, hatchery=None).
 
-    The ``species_config`` key points to a YAML file like
-    ``configs/baltic_salmon_species.yaml`` — see the Curonian realism plan
-    (docs/superpowers/plans/2026-04-24-curonian-realism-upgrades.md).
-
-    Returns:
-        BalticBioParams if ``species_config`` is set, else BioParams.
-        Both expose the same Wisconsin fields (RA, RB, RQ, ED_MORTAL,
-        ED_TISSUE, MASS_FLOOR_FRACTION) so downstream ``update_energy``
-        works with either.
+    Always returns BalticSpeciesConfig — the unified return type
+    eliminates isinstance branching at the caller (simulation.py:294)
+    and the AttributeError failure mode.
     """
-    species_path = cfg.get("species_config")
-    if species_path:
-        # Resolve relative paths against the YAML working dir
-        from salmon_ibm.baltic_params import load_baltic_species_config
+    from salmon_ibm.baltic_params import BalticSpeciesConfig, load_baltic_species_config
 
-        return load_baltic_species_config(species_path).wild
-    return bio_params_from_config(cfg)
+    species_config = cfg.get("species_config")
+    if species_config is not None:
+        return load_baltic_species_config(species_config)
+    # Legacy non-Baltic path: wrap plain BioParams
+    plain = bio_params_from_config(cfg)
+    return BalticSpeciesConfig(wild=plain, hatchery=None)
 
 
 def behavior_params_from_config(cfg: dict) -> BehaviorParams:

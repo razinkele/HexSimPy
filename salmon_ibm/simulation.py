@@ -289,9 +289,9 @@ class Simulation:
         self._multi_pop_mgr.register(self.population)
 
         self.beh_params = behavior_params_from_config(config)
-        # Routes to BalticBioParams if config has `species_config:` key,
-        # otherwise returns classic BioParams.
-        self.bio_params = load_bio_params_from_config(config)
+        # Routes to BalticSpeciesConfig always (unified return type since Task 3).
+        loaded = load_bio_params_from_config(config)
+        self.bio_params = loaded.wild  # Task 4 will add full hatchery_dispatch handling
         self._activity_lut = self._build_activity_lut()
         self.est_cfg = config.get("estuary", {})
         # EstuaryParams from salinity_cost YAML subsection. Filter to known
