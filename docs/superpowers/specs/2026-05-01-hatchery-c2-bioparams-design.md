@@ -37,21 +37,41 @@ Hatchery values are raised on swim-active behaviors only.
 **Primary anchor:** Enders, Boisclair & Roy (2004),
 *Canadian Journal of Fisheries and Aquatic Sciences* 61(12):2302-2313,
 doi:10.1139/f04-211 — direct measurements of total swimming costs across
-wild, farmed (1st generation), and domesticated (multi-generation)
-*Salmo salar*. **Domesticated fish paid 12–29% higher swimming costs**
-than wild or farmed conspecifics, attributable to deeper body morphology
-and reduced fin area. The +25% increment used in C2 sits inside this
-empirical bracket.
+wild, farmed (F1 from wild broodstock), and domesticated (seventh-generation
+Norwegian aquaculture strain) *Salmo salar*. **Wild and F1 fish showed
+no statistically significant difference (6.7% average). Seventh-generation
+domesticated fish paid 12–29% higher swimming costs**, attributable to
+deeper body morphology and reduced fin area. The +25% increment used in
+C2 sits inside the seventh-generation bracket; it is not directly
+supported by the F1 result.
+
+**Generation-level applicability to the Lithuanian programme:** The
+Žeimena/Simnas programme has been running since 1997 (~29 years; ~4–7
+salmon generations). This places Lithuanian hatchery fish *between* the
+F1 arm of Enders and the seventh-generation arm. The +25% increment is
+applied as a plausible extrapolation for that generation level; it is
+not directly measured for Baltic stocks. An implementation using
+strictly F1 broodstock would over-state the contrast at +25%. A
+seventh-generation strain would likely under-state it.
 
 **Supporting:** Zhang et al. (2016), *Aquaculture* 463:79-88,
 doi:10.1016/j.aquaculture.2016.05.015 — domesticated *Salmo salar* show
 significantly reduced aerobic scope (MO2max, AAS, FAS) under aerobic
 exercise training. Pedersen, Koed & Malte (2008), *Ecology of Freshwater
 Fish* 17(3):425-431, doi:10.1111/j.1600-0633.2008.00293.x — F1 hatchery
-Atlantic salmon smolts show ~30% slower burst swimming and faster
-fatigue. Hammenstig et al. (2014), *Journal of Fish Biology*
-85(4):1177-1191, doi:10.1111/jfb.12511 — wild smolts metabolically more
-efficient than hatchery in burst-swim recovery.
+Atlantic salmon smolts show ~30% slower **burst swimming speed** (a
+kinematic capacity metric, not aerobic cost) and faster fatigue.
+Hammenstig et al. (2014), *Journal of Fish Biology* 85(4):1177-1191,
+doi:10.1111/jfb.12511 — wild smolts metabolically more efficient than
+hatchery in burst-swim recovery.
+
+**Population-specific null result:** Hatanpää, Huuskonen & Kekäläinen
+(2020), doi:10.1139/cjfas-2019-0079 — landlocked *Salmo salar m.
+sebago* in Lake Saimaa: hatchery vs semi-wild swimming endurance was
+not significantly different, attributed to extreme genetic bottleneck
+in that population. The null result does not generalize: anadromous
+Lithuanian Nemunas/Žeimena stocks operate without a comparable
+genetic constraint.
 
 **Framing:** the `activity_by_behavior` divergence is an
 empirically-bounded activity scaling factor representing the net effect
@@ -102,9 +122,10 @@ et al. 2018 use the same Wisconsin pattern for migrating *S. salar*).
 - `load_baltic_species_config()` returns a `NamedTuple
   BalticSpeciesConfig(wild: BalticBioParams, hatchery: BalticBioParams |
   None)` (replacing the bare `BalticBioParams` return).
-- 6 new tests in `tests/test_hatchery_params.py` covering the override
+- 7 new tests in `tests/test_hatchery_params.py` covering the override
   loader, dispatch helper, init guard, sparse-override merge, sidebar
-  rebuild, and the LUT shape/values for both wild and hatchery.
+  rebuild, the LUT shape/values for both wild and hatchery, and the
+  step()-landscape injection invariant.
 
 **Out:**
 
@@ -271,29 +292,73 @@ renamed.
    - New `_apply_hatchery_overrides(wild_params: BalticBioParams,
      overrides: dict) -> BalticBioParams`:
      ```python
+     from salmon_ibm.agents import Behavior  # for sub-key validation
      ALLOWED_OVERRIDE_KEYS = {"activity_by_behavior"}  # C2 scope
+     VALID_BEHAVIORS = {int(b) for b in Behavior}  # {0, 1, 2, 3, 4}
+
      unknown = set(overrides) - ALLOWED_OVERRIDE_KEYS
      if unknown:
          raise ValueError(
              f"hatchery_overrides supports only {sorted(ALLOWED_OVERRIDE_KEYS)} in C2; "
              f"unsupported keys: {sorted(unknown)}"
          )
-     merged_dict = {**wild_params.activity_by_behavior, **overrides.get("activity_by_behavior", {})}
+     activity_overrides = overrides.get("activity_by_behavior", {})
+     # Coerce YAML string keys to int (PyYAML may emit e.g. "1" rather than 1).
+     # Raise an actionable ValueError if a sub-key isn't numeric (e.g. user
+     # accidentally typed a behavior name like "hold" instead of 0).
+     try:
+         activity_overrides = {int(k): float(v) for k, v in activity_overrides.items()}
+     except (ValueError, TypeError) as exc:
+         raise ValueError(
+             f"hatchery_overrides.activity_by_behavior keys must be integers "
+             f"(Behavior enum values 0-4); got non-integer key in {activity_overrides!r}"
+         ) from exc
+     # Validate sub-keys are valid Behavior enum values:
+     invalid_keys = set(activity_overrides) - VALID_BEHAVIORS
+     if invalid_keys:
+         raise ValueError(
+             f"hatchery_overrides.activity_by_behavior keys must be valid "
+             f"Behavior enum values {sorted(VALID_BEHAVIORS)}; got invalid: "
+             f"{sorted(invalid_keys)}"
+         )
+     merged_dict = {**wild_params.activity_by_behavior, **activity_overrides}
      return dataclasses.replace(wild_params, activity_by_behavior=merged_dict)
      ```
      `dataclasses.replace` re-runs `__post_init__` validation on the
-     merged instance.
+     merged instance. The Behavior-enum check at load time means an
+     `{999: 5.0}` typo raises `ValueError` immediately rather than
+     silently producing an oversized LUT.
 
 3. `salmon_ibm/config.py` — `load_bio_params_from_config()` extended to
    return `BalticSpeciesConfig` (NamedTuple) when species_config is
-   present; legacy path returns a single `BioParams` unchanged. Update
-   the lone caller at `simulation.py:294`.
+   present; legacy path returns a single `BioParams` unchanged.
+
+   The lone caller at `simulation.py:294` MUST branch on the return
+   type explicitly:
+   ```python
+   loaded = load_bio_params_from_config(config)
+   if isinstance(loaded, BalticSpeciesConfig):
+       self.bio_params = loaded.wild
+       self.bio_params_hatchery = loaded.hatchery  # may be None
+   else:
+       # Legacy non-Baltic path: plain BioParams, no hatchery support
+       self.bio_params = loaded
+       self.bio_params_hatchery = None
+   ```
+   Failing to branch produces `AttributeError: 'BioParams' object has
+   no attribute 'wild'` on every non-Baltic scenario.
 
 4. `salmon_ibm/simulation.py`:
 
+   - **Imports** (top of file): add
+     `from salmon_ibm.baltic_params import BalticSpeciesConfig` —
+     required for the `isinstance(loaded, BalticSpeciesConfig)` branch
+     in `__init__`.
+
    - `Simulation.__init__` (around line 292-295):
      - Receive `BalticSpeciesConfig` from loader; assign
-       `self.bio_params = config.wild`, `self.bio_params_hatchery = config.hatchery`.
+       `self.bio_params = loaded.wild`, `self.bio_params_hatchery = loaded.hatchery`
+       (with `isinstance` branching as shown in item 3 above).
      - Call `self.rebuild_luts()` instead of `_build_activity_lut()`.
      - If `self.bio_params_hatchery is not None`, log:
        `logger.info("C2 hatchery dispatch active: activity_by_behavior keys overridden: %s",
@@ -304,16 +369,24 @@ renamed.
    - New method `Simulation.rebuild_luts()`:
      ```python
      def rebuild_luts(self):
-         """Rebuild both wild and hatchery activity LUTs.
+         """Rebuild both wild and hatchery activity LUTs from species-config.
 
-         Re-derives the wild base from load_bio_params_from_config(self.config)
-         rather than from self.bio_params, because the Shiny sidebar may
-         have replaced self.bio_params with a plain BioParams that does
-         not carry Baltic-specific activity_by_behavior values. Sliders
-         that adjust RA/RB/etc are applied on top of the species-config
-         base, preserving activity_by_behavior.
+         Re-derives both LUTs from the on-disk species-config, bypassing
+         self.bio_params entirely. This avoids anchoring the hatchery LUT
+         to the plain BioParams the sidebar may have substituted (sliders
+         that adjust RA/RB/etc. affect metabolism through self.bio_params
+         but NOT through the activity LUT — activity is locked to the
+         species-config baseline).
+
+         Baltic-only — silently no-ops on non-Baltic configs.
          """
-         species_cfg = load_baltic_species_config(self.config["species_config"])
+         species_config_path = self.config.get("species_config")
+         if species_config_path is None:
+             # Non-Baltic path: no species config, no Baltic LUTs to rebuild.
+             # The existing self._activity_lut (from BioParams defaults) and
+             # self._activity_lut_hatchery=None remain valid.
+             return
+         species_cfg = load_baltic_species_config(species_config_path)
          self._activity_lut = self._build_lut(species_cfg.wild.activity_by_behavior)
          self._activity_lut_hatchery = (
              self._build_lut(species_cfg.hatchery.activity_by_behavior)
@@ -352,10 +425,12 @@ renamed.
      # here are silently ignored. See C2 spec.
      ```
 
-   - Replace the line 69 dispatch:
+   - Replace the line 69 dispatch (note: the
+     `from salmon_ibm.bioenergetics import origin_aware_activity_mult`
+     import goes at the **top of the file**, not inline inside the
+     method):
      ```python
      # Was: activity = activity_lut[population.behavior]
-     from salmon_ibm.bioenergetics import origin_aware_activity_mult
      activity = origin_aware_activity_mult(
          population.behavior,
          population.pool.origin,
@@ -364,7 +439,7 @@ renamed.
      )
      ```
 
-   **5b. `IntroductionEvent.execute()` (around line 247)** — runtime
+   **5b. `IntroductionEvent.execute()` (around line 249)** — runtime
    guard before `add_agents`:
 
    ```python
@@ -392,7 +467,7 @@ renamed.
 
 **New test file:**
 
-`tests/test_hatchery_params.py` — 6 tests:
+`tests/test_hatchery_params.py` — 7 tests:
 
 1. `test_hatchery_overrides_activity_by_behavior_loads` — YAML with
    `hatchery_overrides.activity_by_behavior: {1: 1.5, 3: 1.875}` loads
@@ -410,11 +485,22 @@ renamed.
    `IntroductionEvent(origin=ORIGIN_HATCHERY).execute()` on a sim with
    `bio_params_hatchery is None` raises at the introduction step (not
    silently degrades).
-6. `test_rebuild_luts_resilient_to_slider_replacement` — set
-   `sim.bio_params = BioParams(RA=0.005)` (mimic sidebar), call
-   `sim.rebuild_luts()`. Assert `sim._activity_lut` reflects
-   Baltic species-config values (NOT plain BioParams Chinook defaults),
-   and `sim._activity_lut_hatchery` reflects merged YAML overrides.
+6. `test_rebuild_luts_resilient_to_slider_replacement` — load a Baltic
+   YAML fixture with hatchery overrides into a full `Simulation`. Set
+   `sim.bio_params = BioParams(RA=0.005)` (mimic sidebar). Call
+   `sim.rebuild_luts()`. Assert `sim._activity_lut` reflects Baltic
+   species-config values (NOT plain BioParams Chinook defaults), and
+   `sim._activity_lut_hatchery` reflects merged YAML overrides.
+
+7. `test_step_injects_hatchery_landscape_keys` — load a Baltic YAML
+   fixture with `hatchery_overrides:` into a full `Simulation`. Use
+   `monkeypatch.setattr(sim._sequencer, "step", spy_fn)` where
+   `spy_fn` captures `args[1]` (the landscape dict). After `sim.step()`
+   runs once, assert `"activity_lut_hatchery" in landscape` AND
+   `"bio_params_hatchery" in landscape` (both populated, not None).
+   Locks in the `Simulation.step()` injection invariant — without this
+   test, a missing dict-key insertion in `step()` would silently degrade
+   the dispatch to wild-only without breaking any other test.
 
 ## Tests
 
@@ -424,13 +510,13 @@ Existing tests that may need updating:
   `lut_hatch is None`, so all pre-C2 tests (which never construct a
   scenario with hatchery overrides) continue to use the wild path
   unchanged.
-- The 6 new tests above lock in the C2-specific paths.
+- The 7 new tests above lock in the C2-specific paths.
 
 Existing tests that exercise the new init path (`Simulation`
 end-to-end, no modifications expected because they don't supply
 hatchery overrides):
 
-- `tests/test_simulation.py:10,17,25,32`
+- `tests/test_simulation.py:8,15,23,30` (function `def` lines)
 - `tests/test_integration.py:9,30`
 - `tests/test_curonian_realism_integration.py:50`
 - `tests/test_curonian_trimesh_integration.py:30`
@@ -479,9 +565,9 @@ sweep mandatory for publications using these outputs).
       raise when origin=HATCHERY but no hatchery params are configured.
 - [ ] Startup log message fires when `bio_params_hatchery is not None`.
 - [ ] `app.py` calls `rebuild_luts()` instead of `_build_activity_lut()`.
-- [ ] All 6 new tests pass.
+- [ ] All 7 new tests pass.
 - [ ] Full pytest suite stays green (current baseline 829 passing on
-      `hatchery-origin-c1` branch; expected post-C2: 835).
+      `hatchery-origin-c1` branch; expected post-C2: 836).
 - [ ] Plan stamp on the eventual implementation plan: ✅ EXECUTED.
 
 ## Estimated implementation time
@@ -546,8 +632,10 @@ species:
     # Empirically-bounded activity scaling factor representing reduced
     # aerobic scope (Zhang et al. 2016, doi:10.1016/j.aquaculture.2016.05.015)
     # and higher swimming cost per unit displacement (Enders, Boisclair
-    # & Roy 2004, doi:10.1139/f04-211: 12-29% range in domesticated
-    # Salmo salar).
+    # & Roy 2004, doi:10.1139/f04-211: 12-29% range in seventh-generation
+    # domesticated Salmo salar; F1 costs not statistically different
+    # from wild in same study). Lithuanian programme (~4-7 generations
+    # since 1997) falls in intermediate range.
     #
     # CALIBRATION STATUS: +25% increment is empirically bracketed but
     # not directly measured for Lithuanian Žeimena/Simnas hatchery
