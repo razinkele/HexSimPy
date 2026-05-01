@@ -68,7 +68,16 @@ def test_introduction_event_propagates_origin():
     pool = AgentPool(n=2, start_tri=0, rng_seed=42)
     # Population is a @dataclass with `name` as first required field.
     pop = Population(name="test", pool=pool)
-    landscape = {"rng": np.random.default_rng(0)}
+    # C2 added a runtime guard that raises if origin=HATCHERY but no
+    # hatchery_dispatch is in the landscape. Provide a sentinel
+    # HatcheryDispatch so the guard passes and we can verify origin
+    # propagation (the actual test purpose).
+    from salmon_ibm.baltic_params import BalticBioParams, HatcheryDispatch
+    sentinel_hd = HatcheryDispatch(
+        params=BalticBioParams(),
+        activity_lut=np.ones(5),
+    )
+    landscape = {"rng": np.random.default_rng(0), "hatchery_dispatch": sentinel_hd}
 
     # Event base class requires `name`; trigger defaults to EveryStep.
     evt = IntroductionEvent(
