@@ -87,11 +87,14 @@ import pytest
 
 def test_activity_by_behavior_rejects_nonpositive_value():
     """BalticBioParams.__post_init__ rejects activity_by_behavior with
-    non-positive values (e.g., 0.0 or -0.5). Locks in the C2 validation
-    that the override merge depends on."""
+    non-positive values. Tests both negative AND zero (boundary case)
+    so a future 'optimisation' that changes guard from `v <= 0` to
+    `v < 0` would regress visibly."""
     from salmon_ibm.baltic_params import BalticBioParams
     with pytest.raises(ValueError, match="positive floats"):
         BalticBioParams(activity_by_behavior={0: 1.0, 1: -0.5, 2: 0.8, 3: 1.5, 4: 1.0})
+    with pytest.raises(ValueError, match="positive floats"):
+        BalticBioParams(activity_by_behavior={0: 1.0, 1: 0.0, 2: 0.8, 3: 1.5, 4: 1.0})
 ```
 
 - [ ] **Step 1.3: Run the test; expect failure**
@@ -892,12 +895,22 @@ In `salmon_ibm/simulation.py`, the existing `_build_activity_lut` method at line
         return self._build_activity_lut_for(self.bio_params.activity_by_behavior)
 ```
 
-`simulation.py` does not currently have a module-level `logger`. Add it to the top imports:
+- [ ] **Step 4.4b: Add module-level `logger` to `simulation.py`**
+
+`simulation.py` does not currently have a module-level `logger`. Step 4.5's startup log message requires one. Add to the top imports of `simulation.py`:
 
 ```python
 import logging
 logger = logging.getLogger(__name__)
 ```
+
+Verify the import was added before proceeding to Step 4.5:
+
+```bash
+grep -n "^logger\|^import logging" salmon_ibm/simulation.py
+```
+
+Expected: two lines — `import logging` and `logger = logging.getLogger(__name__)`.
 
 - [ ] **Step 4.5: Update `Simulation.__init__` to use unified loader + cache**
 
@@ -992,7 +1005,7 @@ In `salmon_ibm/simulation.py`, locate the `step()` method (around line 557) and 
 
 - [ ] **Step 4.8: Update `_event_bioenergetics` to dispatch by origin**
 
-In `salmon_ibm/simulation.py`, locate `_event_bioenergetics` at line 488-510. The current line 491 reads `activity = np.take(self._activity_lut, population.behavior, mode="clip")`. **The argument name is `population` — use `population.behavior` and `population.pool.origin`, NOT `self.pool` (which would bypass the event's population parameter and break multi-population scenarios).**
+In `salmon_ibm/simulation.py`, locate `_event_bioenergetics` at line 488-510. The current line 491 reads `activity = np.take(self._activity_lut, population.behavior, mode="clip")`. **The argument name is `population` — use `population.behavior` and `population.origin`, NOT `self.pool` (which would bypass the event's population parameter and break multi-population scenarios).**
 
 Add to the top imports of `simulation.py`:
 
@@ -1010,7 +1023,7 @@ Replace line 491:
         )
         activity = origin_aware_activity_mult(
             population.behavior,
-            population.pool.origin,
+            population.origin,
             self._activity_lut,
             hatch_lut,
         )
@@ -1034,7 +1047,7 @@ micromamba run -n shiny python -m pytest tests/test_simulation.py tests/test_int
 
 Expected: green. The graceful fallback in `origin_aware_activity_mult` means existing tests that don't construct hatchery scenarios are unaffected.
 
-- [ ] **Step 4.10: Commit Task 4**
+- [ ] **Step 4.11: Commit Task 4**
 
 ```bash
 git add salmon_ibm/simulation.py tests/test_hatchery_params.py
@@ -1096,18 +1109,27 @@ def test_introduction_event_runtime_guard_no_hatchery_params():
 
 def test_patch_introduction_event_runtime_guard_no_hatchery_params():
     """PatchIntroductionEvent.execute() mirror of the IntroductionEvent
-    guard. Without this test, the hexsim-mode introduction guard could
-    be silently omitted; existing test_events_hexsim.py doesn't
-    construct hatchery scenarios."""
+    guard. CRITICAL: must supply a non-empty spatial_data layer in the
+    landscape, otherwise PatchIntroductionEvent.execute returns early
+    at events_hexsim.py:414 when the layer lookup fails — and the test
+    would PASS even without the runtime guard, defeating its purpose.
+    Without this test, the hexsim-mode introduction guard could be
+    silently omitted."""
+    import numpy as np
     from salmon_ibm.events_hexsim import PatchIntroductionEvent
     from salmon_ibm.origin import ORIGIN_HATCHERY
     evt = PatchIntroductionEvent(
         name="bad_patch",
-        patch_spatial_data="some_layer",
+        patch_spatial_data="dummy_layer",
         origin=ORIGIN_HATCHERY,
     )
+    # Provide a real spatial_data layer so execute() reaches the guard
+    # rather than early-returning on missing layer.
+    landscape = {
+        "spatial_data": {"dummy_layer": np.array([0.0, 1.0, 1.0, 0.0])},
+    }
     with pytest.raises(ValueError, match=r"HATCHERY.*hatchery_dispatch"):
-        evt.execute(population=None, landscape={}, t=0, mask=None)
+        evt.execute(population=None, landscape=landscape, t=0, mask=None)
 ```
 
 - [ ] **Step 5.2: Run the new tests; expect 2 failures**
@@ -1146,7 +1168,7 @@ Replace the line 69 dispatch:
         hatch_lut = hd.activity_lut if hd is not None else None
         activity = origin_aware_activity_mult(
             population.behavior,
-            population.pool.origin,
+            population.origin,
             landscape["activity_lut"],
             hatch_lut,
         )
