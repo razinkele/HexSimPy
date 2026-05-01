@@ -2,6 +2,8 @@
 
 Spec: docs/superpowers/specs/2026-05-01-hatchery-c2-bioparams-design.md
 """
+from pathlib import Path
+
 import pytest
 
 
@@ -179,3 +181,107 @@ def test_simulation_init_non_baltic_has_no_hatchery_dispatch():
     assert loaded.hatchery is None
     # Legacy path returns plain BioParams as wild, NOT BalticBioParams
     assert isinstance(loaded.wild, BioParams)
+
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_BALTIC_CONFIG = _REPO_ROOT / "configs" / "config_curonian_baltic.yaml"
+_MINIMAL_CONFIG = _REPO_ROOT / "config_curonian_minimal.yaml"
+_DATA_DIR = str(_REPO_ROOT / "data")
+
+
+def _baltic_sim_with_hatchery(tmp_path):
+    """Construct a real Simulation from config_curonian_baltic.yaml,
+    but with the species_config redirected to a tmp_path species YAML
+    that includes hatchery_overrides:.
+
+    Existing Simulation tests use:
+        cfg = load_config("config_curonian_minimal.yaml")
+        sim = Simulation(cfg, n_agents=10, data_dir="data", rng_seed=42)
+
+    We follow the same pattern but with the Baltic config and a
+    patched species_config path so we don't have to ship the
+    hatchery_overrides into a tracked config file just for tests.
+    """
+    from salmon_ibm.config import load_config
+    from salmon_ibm.simulation import Simulation
+
+    if not _BALTIC_CONFIG.exists():
+        pytest.skip("config_curonian_baltic.yaml not found")
+
+    species_yaml = tmp_path / "species_with_hatchery.yaml"
+    species_yaml.write_text("""
+species:
+  BalticAtlanticSalmon:
+    cmax_A: 0.303
+    activity_by_behavior:
+      0: 1.0
+      1: 1.2
+      2: 0.8
+      3: 1.5
+      4: 1.0
+    hatchery_overrides:
+      activity_by_behavior:
+        1: 1.5
+        3: 1.875
+""")
+    cfg = load_config(str(_BALTIC_CONFIG))
+    cfg["species_config"] = str(species_yaml)
+    sim = Simulation(cfg, n_agents=10, data_dir=_DATA_DIR, rng_seed=42)
+    return sim
+
+
+def test_rebuild_luts_resilient_to_slider_replacement(tmp_path):
+    """app.py:1493 sidebar replaces sim.bio_params with a plain
+    BioParams from slider values. rebuild_luts() must NOT anchor the
+    hatchery LUT to the plain-BioParams Chinook defaults — instead
+    re-derive from the cached BalticSpeciesConfig. Locks in the
+    cache-and-re-derive semantics."""
+    from salmon_ibm.bioenergetics import BioParams
+    sim = _baltic_sim_with_hatchery(tmp_path)
+    # Mimic app.py:1493 sidebar: replace bio_params with plain BioParams
+    sim.bio_params = BioParams(RA=0.005, RB=-0.2, RQ=0.07, ED_MORTAL=4.0,
+                               T_OPT=15.0, T_MAX=24.0)
+    sim.rebuild_luts()
+    # Wild LUT reflects Baltic species-config (NOT plain BioParams Chinook)
+    assert sim._activity_lut[3] == pytest.approx(1.5)  # UPSTREAM Baltic
+    # Hatchery LUT reflects merged YAML overrides
+    assert sim.hatchery_dispatch is not None
+    assert sim.hatchery_dispatch.activity_lut[1] == pytest.approx(1.5)  # RANDOM hatchery
+    assert sim.hatchery_dispatch.activity_lut[3] == pytest.approx(1.875)  # UPSTREAM hatchery
+
+
+def test_step_injects_hatchery_dispatch_landscape_key(tmp_path, monkeypatch):
+    """Simulation.step() injects hatchery_dispatch into the landscape
+    dict. Without this test, a missing dict-key insertion in step()
+    would silently degrade dispatch to wild-only without breaking any
+    other test."""
+    from salmon_ibm.baltic_params import HatcheryDispatch
+    sim = _baltic_sim_with_hatchery(tmp_path)
+    captured: dict = {}
+
+    def spy(population, landscape, t):
+        captured["landscape"] = dict(landscape)  # snapshot, not reference
+
+    monkeypatch.setattr(sim._sequencer, "step", spy)
+    sim.step()
+
+    assert "hatchery_dispatch" in captured["landscape"]
+    assert captured["landscape"]["hatchery_dispatch"] is not None
+    assert isinstance(captured["landscape"]["hatchery_dispatch"], HatcheryDispatch)
+
+
+def test_rebuild_luts_noop_on_non_baltic_sim():
+    """Non-Baltic sim (no species_config in config) calls rebuild_luts()
+    without exception; sim.hatchery_dispatch remains None. Without this,
+    a future change could throw KeyError on missing _species_config.
+    Uses config_curonian_minimal.yaml which has no species_config: key."""
+    from salmon_ibm.config import load_config
+    from salmon_ibm.simulation import Simulation
+    if not _MINIMAL_CONFIG.exists():
+        pytest.skip("config_curonian_minimal.yaml not found")
+    cfg = load_config(str(_MINIMAL_CONFIG))
+    assert "species_config" not in cfg, "fixture invariant: minimal config is non-Baltic"
+    sim = Simulation(cfg, n_agents=10, data_dir=_DATA_DIR, rng_seed=42)
+    assert sim.hatchery_dispatch is None
+    sim.rebuild_luts()  # must not raise
+    assert sim.hatchery_dispatch is None

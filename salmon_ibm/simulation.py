@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import numpy as np
 from typing import TypedDict
+
+logger = logging.getLogger(__name__)
 
 
 class Landscape(TypedDict, total=False):
@@ -25,6 +28,7 @@ class Landscape(TypedDict, total=False):
     summary_reports: list
     log_dir: str
     n_micro_steps_per_cell: np.ndarray  # NEW: per-cell hop budget
+    hatchery_dispatch: "HatcheryDispatch | None"  # NEW (C2)
 
 
 # Module-level constants for resolution-aware movement (Task 0.5).
@@ -40,9 +44,10 @@ MAX_N_MICRO_STEPS = 256  # ceiling for budget — at res 11 (~28 m) this
 
 from salmon_ibm import delta_routing
 from salmon_ibm.agents import AgentPool, Behavior
+from salmon_ibm.baltic_params import BalticSpeciesConfig, HatcheryDispatch
 from salmon_ibm.behavior import pick_behaviors, apply_overrides
 from salmon_ibm.population import Population
-from salmon_ibm.bioenergetics import update_energy
+from salmon_ibm.bioenergetics import origin_aware_activity_mult, update_energy
 from salmon_ibm.config import (
     bio_params_from_config,
     load_bio_params_from_config,
@@ -290,8 +295,28 @@ class Simulation:
 
         self.beh_params = behavior_params_from_config(config)
         # Routes to BalticSpeciesConfig always (unified return type since Task 3).
-        loaded = load_bio_params_from_config(config)
-        self.bio_params = loaded.wild  # Task 4 will add full hatchery_dispatch handling
+        loaded = load_bio_params_from_config(config)  # always BalticSpeciesConfig
+        self._species_config = loaded  # cached for rebuild_luts() — no per-slider disk I/O
+        self.bio_params = loaded.wild
+        if loaded.hatchery is not None:
+            hatch_lut = self._build_activity_lut_for(
+                loaded.hatchery.activity_by_behavior
+            )
+            self.hatchery_dispatch = HatcheryDispatch(
+                params=loaded.hatchery,
+                activity_lut=hatch_lut,
+            )
+            wild_dict = self.bio_params.activity_by_behavior
+            hatch_dict = loaded.hatchery.activity_by_behavior
+            overridden = sorted({
+                k for k in hatch_dict if wild_dict.get(k) != hatch_dict[k]
+            })
+            logger.info(
+                "C2 hatchery dispatch active: activity_by_behavior keys overridden: %s",
+                overridden,
+            )
+        else:
+            self.hatchery_dispatch = None
         self._activity_lut = self._build_activity_lut()
         self.est_cfg = config.get("estuary", {})
         # EstuaryParams from salinity_cost YAML subsection. Filter to known
@@ -488,7 +513,17 @@ class Simulation:
     def _event_bioenergetics(self, population, landscape, t, mask):
         fields = landscape["fields"]
         temps_at_agents = fields["temperature"][population.tri_idx]
-        activity = np.take(self._activity_lut, population.behavior, mode="clip")
+        # Was: activity = np.take(self._activity_lut, population.behavior, mode="clip")
+        hatch_lut = (
+            self.hatchery_dispatch.activity_lut
+            if self.hatchery_dispatch is not None else None
+        )
+        activity = origin_aware_activity_mult(
+            population.behavior,
+            population.origin,
+            self._activity_lut,
+            hatch_lut,
+        )
         sal = fields.get("salinity", self._zero_salinity)
         sal_at_agents = sal[population.tri_idx]
         sal_cost = salinity_cost(sal_at_agents, self._est_params)
@@ -568,17 +603,56 @@ class Simulation:
             "multi_pop_mgr": self._multi_pop_mgr,
             "network": self._network,
             "n_micro_steps_per_cell": self._n_micro_steps_per_cell,
+            "hatchery_dispatch": self.hatchery_dispatch,  # NEW (C2)
         }
         self._sequencer.step(self.population, landscape, t)
         self.current_t += 1
 
-    def _build_activity_lut(self):
-        """Build vectorized activity multiplier lookup table."""
-        max_beh = max(self.bio_params.activity_by_behavior.keys())
+    def _build_activity_lut_for(self, activity_dict: dict[int, float]) -> np.ndarray:
+        """Build vectorized activity multiplier LUT from a dict.
+
+        Public to internal callers (rebuild_luts, __init__) which need
+        to build LUTs from arbitrary activity_by_behavior dicts (wild
+        or hatchery). The wrapper _build_activity_lut() preserves the
+        existing 'read from self.bio_params' contract.
+        """
+        max_beh = max(activity_dict.keys())
         lut = np.ones(max_beh + 1)
-        for k, v in self.bio_params.activity_by_behavior.items():
+        for k, v in activity_dict.items():
             lut[k] = v
         return lut
+
+    def _build_activity_lut(self):
+        """Wrapper for backward-compat: build LUT from self.bio_params."""
+        return self._build_activity_lut_for(self.bio_params.activity_by_behavior)
+
+    def rebuild_luts(self):
+        """Rebuild wild + hatchery activity LUTs from cached species-config.
+
+        Reads from self._species_config (cached at __init__) — does NOT
+        re-read disk on every sidebar event. Slider adjustments to
+        self.bio_params via app.py:1493 do NOT affect activity LUTs;
+        activity is locked to the species-config baseline.
+
+        No-ops on non-Baltic configs (no _species_config cached, or
+        species_config.hatchery is None).
+        """
+        species_cfg = getattr(self, "_species_config", None)
+        if species_cfg is None:
+            return
+        self._activity_lut = self._build_activity_lut_for(
+            species_cfg.wild.activity_by_behavior
+        )
+        if species_cfg.hatchery is not None:
+            hatch_lut = self._build_activity_lut_for(
+                species_cfg.hatchery.activity_by_behavior
+            )
+            self.hatchery_dispatch = HatcheryDispatch(
+                params=species_cfg.hatchery,
+                activity_lut=hatch_lut,
+            )
+        else:
+            self.hatchery_dispatch = None
 
     def _update_cwr_counters(self):
         """Update CWR tracking counters based on current behavior state."""
