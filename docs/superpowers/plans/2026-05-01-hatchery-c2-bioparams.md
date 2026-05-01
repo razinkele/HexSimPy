@@ -901,14 +901,15 @@ logger = logging.getLogger(__name__)
 
 - [ ] **Step 4.5: Update `Simulation.__init__` to use unified loader + cache**
 
-In `salmon_ibm/simulation.py`, locate `Simulation.__init__` (around line 292-295). The existing two lines are:
+In `salmon_ibm/simulation.py`, locate `Simulation.__init__` (around line 292-295). After Step 3.8 has run, the existing block reads:
 
 ```python
-        self.bio_params = load_bio_params_from_config(config)
+        loaded = load_bio_params_from_config(config)
+        self.bio_params = loaded.wild  # Task 4 will add full hatchery_dispatch handling
         self._activity_lut = self._build_activity_lut()
 ```
 
-Replace with:
+Replace those THREE lines with:
 
 ```python
         loaded = load_bio_params_from_config(config)  # always BalticSpeciesConfig
@@ -1193,12 +1194,12 @@ In `app.py`, locate the sidebar slider re-init block (around lines 1493-1501). F
 
 - [ ] **Step 5.7: Update `configs/baltic_salmon_species.yaml` with `hatchery_overrides:` block + provenance comments**
 
-Locate the deployed `configs/baltic_salmon_species.yaml` (or the active species config used by deployed scenarios). Add the `hatchery_overrides:` block with the full provenance comment block. Use the exact text from the spec's "YAML schema documentation" section:
+Locate the deployed `configs/baltic_salmon_species.yaml` (or the active species config used by deployed scenarios). **Keep ALL existing fields under `species.BalticAtlanticSalmon` unchanged** (cmax_A, T_OPT, fecundity_per_g, spawn_window_*, etc.). The only changes are: (a) add a comment block above `activity_by_behavior` documenting provenance + calibration, and (b) append the new `hatchery_overrides:` sub-block at the end of the species block. Use the exact text from the spec's "YAML schema documentation" section:
 
 ```yaml
 species:
   BalticAtlanticSalmon:
-    # ... existing fields ...
+    # ... ALL existing fields stay (cmax_A, T_OPT, LW_a, LW_b, etc.) ...
     activity_by_behavior:
       0: 1.0   # HOLD
       1: 1.2   # RANDOM
@@ -1372,7 +1373,16 @@ sea-age sampling)."
 
 - [ ] **Step 6.5: Rebase onto main if branched from `hatchery-origin-c1`**
 
-If the implementation branched from `hatchery-origin-c1` (because PR #3 was still open at start), rebase onto main now that PR #3 has merged:
+First check whether the branch needs rebasing. If the C2 branch was created from `main` (after PR #3 merged), no rebase needed; skip this step. Determine which case applies:
+
+```bash
+# If this command finds C1 commits in the current branch, you branched from hatchery-origin-c1:
+git -C "$(pwd)" log --oneline origin/main..HEAD | head -20
+# If the output includes commits like "feat(origin): track wild vs hatchery agents (Tier C1, ..."
+# then you need to rebase. Otherwise (only C2 commits visible), skip to Step 6.6.
+```
+
+If rebase is needed:
 
 ```bash
 git fetch origin main
