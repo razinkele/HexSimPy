@@ -33,8 +33,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NamedTuple
 
+import numpy as np
 import yaml
+
+from salmon_ibm.bioenergetics import BioParams  # for BalticSpeciesConfig.wild type widening (used in Task 3)
 
 
 @dataclass
@@ -99,6 +103,18 @@ class BalticBioParams:
             raise ValueError("ED_TISSUE and ED_MORTAL must be > 0")
         if not (0 <= self.spawn_window_start_day <= 365):
             raise ValueError("spawn_window_start_day must be 0-365")
+        if not self.activity_by_behavior:
+            raise ValueError("activity_by_behavior must be non-empty")
+        for k, v in self.activity_by_behavior.items():
+            if not isinstance(k, int) or k < 0:
+                raise ValueError(
+                    f"activity_by_behavior keys must be non-negative ints, got {k!r}"
+                )
+            if not isinstance(v, (int, float)) or v <= 0:
+                raise ValueError(
+                    f"activity_by_behavior values must be positive floats, "
+                    f"got {k}: {v!r}"
+                )
 
     @property
     def T_MAX(self) -> float:
@@ -108,6 +124,33 @@ class BalticBioParams:
         the hard acute-mortality threshold must read T_ACUTE_LETHAL explicitly.
         """
         return self.T_AVOID
+
+
+@dataclass(frozen=True)
+class HatcheryDispatch:
+    """Bundle hatchery params + their derived activity LUT atomically.
+
+    Holding params and LUT separately as paired nullables on Simulation
+    invites desync (one rebuilt, one stale). This bundle makes the
+    invariant `params is None ↔ lut is None` structurally impossible
+    to violate, and gives callers a single nullable to guard on
+    (`if landscape.get('hatchery_dispatch') is None: ...`).
+    """
+    params: BalticBioParams
+    activity_lut: np.ndarray
+
+
+class BalticSpeciesConfig(NamedTuple):
+    """Loaded species config — wild + optional hatchery override.
+
+    Always returned by load_baltic_species_config(); legacy non-Baltic
+    path returns BalticSpeciesConfig(wild=plain_BioParams, hatchery=None)
+    so callers don't need isinstance branching. The `wild` field is
+    typed as `BioParams | BalticBioParams` because the legacy path
+    wraps a plain `BioParams`.
+    """
+    wild: BioParams | BalticBioParams
+    hatchery: BalticBioParams | None
 
 
 def load_baltic_species_config(path: str | Path) -> BalticBioParams:
