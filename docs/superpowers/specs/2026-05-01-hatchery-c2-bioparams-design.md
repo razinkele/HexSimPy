@@ -499,18 +499,18 @@ renamed.
    separate keys:
 
    ```python
-   if self.origin == ORIGIN_HATCHERY and landscape.get("bio_params_hatchery") is None:
+   if self.origin == ORIGIN_HATCHERY and landscape.get("hatchery_dispatch") is None:
        raise ValueError(
            f"IntroductionEvent '{self.name}' tags new agents as HATCHERY, "
-           f"but the simulation has no bio_params_hatchery configured. "
+           f"but the simulation has no hatchery_dispatch configured. "
            f"Add a 'hatchery_overrides:' block under "
            f"species.BalticAtlanticSalmon in the species YAML."
        )
    ```
 
-   `landscape["bio_params_hatchery"]` must therefore be added to the
-   landscape dict in `Simulation.step()` (alongside `activity_lut_hatchery`).
-   The `Landscape` TypedDict gains a corresponding key.
+   `landscape["hatchery_dispatch"]` is set in `Simulation.step()` (item 4
+   above) — a single key carrying both params and LUT bundled in the
+   `HatcheryDispatch` dataclass.
 
 6. `salmon_ibm/events_hexsim.py:PatchIntroductionEvent.execute()` —
    same runtime guard mirror as IntroductionEvent (5b above).
@@ -573,7 +573,7 @@ all rejection paths, and integration invariants. All tests use
    `IntroductionEvent(origin=ORIGIN_HATCHERY, ...).execute(pop, {}, 0,
    mask)` with empty landscape (so `landscape.get("hatchery_dispatch")
    is None`). Asserts `ValueError` matching `r"HATCHERY.*no
-   bio_params_hatchery"` (or whatever message the spec specifies).
+   hatchery_dispatch"`.
 11. `test_patch_introduction_event_runtime_guard_no_hatchery_params`
     — mirror of test 5 for `PatchIntroductionEvent` in
     `events_hexsim.py`. Without this, the hexsim-mode introduction
@@ -640,7 +640,7 @@ hatchery overrides):
 ## Risk + regression surface
 
 **Behaviour change surface for pre-C2 scenarios: zero.** When
-`hatchery_overrides:` is absent from the YAML, `bio_params_hatchery`
+`hatchery_overrides:` is absent from the YAML, `hatchery_dispatch`
 remains None, the dispatch helper falls back to wild-only via
 `lut_hatch is None`, and every agent — wild by default — receives
 exactly the same activity multipliers as before C2.
@@ -679,9 +679,11 @@ sweep mandatory for publications using these outputs).
 - ❌ Heterogeneous return type from loader producing `AttributeError`
   on non-Baltic configs → caught by unified-return architecture (loader
   ALWAYS returns `BalticSpeciesConfig`). Locked by test 12.
-- ❌ `bio_params_hatchery is None` paired with `_activity_lut_hatchery
-  != None` (silent desync) → caught structurally by `HatcheryDispatch`
-  dataclass bundling.
+- ❌ Pre-pass-7 paired-nullable design (`bio_params_hatchery` and
+  `_activity_lut_hatchery` separately nullable) was prone to silent
+  desync (one rebuilt, one stale) → eliminated by `HatcheryDispatch`
+  dataclass bundling: the params and LUT are constructed together and
+  carried as one nullable.
 - ❌ `rebuild_luts()` raising on non-Baltic sim → caught by early
   return when `_species_config` not cached. Locked by test 13.
 - ❌ Mutating wild dict via override path → caught by
