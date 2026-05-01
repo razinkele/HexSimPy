@@ -402,6 +402,14 @@ class PatchIntroductionEvent(Event):
     origin: int = ORIGIN_WILD
 
     def execute(self, population, landscape, t, mask):
+        from salmon_ibm.origin import ORIGIN_HATCHERY
+        if self.origin == ORIGIN_HATCHERY and landscape.get("hatchery_dispatch") is None:
+            raise ValueError(
+                f"PatchIntroductionEvent '{self.name}' tags new agents as HATCHERY, "
+                f"but the simulation has no hatchery_dispatch configured. "
+                f"Add a 'hatchery_overrides:' block under "
+                f"species.BalticAtlanticSalmon in the species YAML."
+            )
         spatial_registry = landscape.get("spatial_data", {})
         layer = spatial_registry.get(self.patch_spatial_data)
         if layer is None:

@@ -285,3 +285,48 @@ def test_rebuild_luts_noop_on_non_baltic_sim():
     assert sim.hatchery_dispatch is None
     sim.rebuild_luts()  # must not raise
     assert sim.hatchery_dispatch is None
+
+
+def test_introduction_event_runtime_guard_no_hatchery_params():
+    """IntroductionEvent.execute() raises when origin=HATCHERY but
+    landscape.get('hatchery_dispatch') is None. Catches the case where
+    a runtime IntroductionEvent at step N tries to add hatchery agents
+    but no overrides are configured. Init-time guard alone wouldn't
+    catch this because Simulation starts with all-WILD agents."""
+    import numpy as np
+    from salmon_ibm.events_builtin import IntroductionEvent
+    from salmon_ibm.origin import ORIGIN_HATCHERY
+    # Minimal setup: empty landscape (so hatchery_dispatch is None)
+    evt = IntroductionEvent(
+        name="bad_intro",
+        n_agents=2,
+        positions=[0],
+        origin=ORIGIN_HATCHERY,
+    )
+    with pytest.raises(ValueError, match=r"HATCHERY.*hatchery_dispatch"):
+        evt.execute(population=None, landscape={}, t=0, mask=None)
+
+
+def test_patch_introduction_event_runtime_guard_no_hatchery_params():
+    """PatchIntroductionEvent.execute() mirror of the IntroductionEvent
+    guard. CRITICAL: must supply a non-empty spatial_data layer in the
+    landscape, otherwise PatchIntroductionEvent.execute returns early
+    at events_hexsim.py:414 when the layer lookup fails — and the test
+    would PASS even without the runtime guard, defeating its purpose.
+    Without this test, the hexsim-mode introduction guard could be
+    silently omitted."""
+    import numpy as np
+    from salmon_ibm.events_hexsim import PatchIntroductionEvent
+    from salmon_ibm.origin import ORIGIN_HATCHERY
+    evt = PatchIntroductionEvent(
+        name="bad_patch",
+        patch_spatial_data="dummy_layer",
+        origin=ORIGIN_HATCHERY,
+    )
+    # Provide a real spatial_data layer so execute() reaches the guard
+    # rather than early-returning on missing layer.
+    landscape = {
+        "spatial_data": {"dummy_layer": np.array([0.0, 1.0, 1.0, 0.0])},
+    }
+    with pytest.raises(ValueError, match=r"HATCHERY.*hatchery_dispatch"):
+        evt.execute(population=None, landscape=landscape, t=0, mask=None)
