@@ -1,5 +1,7 @@
 # Hatchery vs Wild C2 — `activity_by_behavior` Divergence Implementation Plan
 
+> **STATUS: ✅ EXECUTED 2026-05-01** — All 6 tasks complete. salmon_ibm/baltic_params.py gains HatcheryDispatch + BalticSpeciesConfig types and __post_init__ activity validation; salmon_ibm/bioenergetics.py adds origin_aware_activity_mult helper; salmon_ibm/config.py loader unified to BalticSpeciesConfig; salmon_ibm/simulation.py wires init/cache/rebuild_luts/step/_event_bioenergetics; salmon_ibm/events_builtin.py + events_hexsim.py add SurvivalEvent dispatch + Introduction guards; app.py sidebar uses rebuild_luts; configs/baltic_salmon_species.yaml gains hatchery_overrides block + provenance comments. Full pytest suite green at 842 passing (829 baseline + 13 new C2 tests). One C1 test (test_introduction_event_propagates_origin) updated to provide a sentinel hatchery_dispatch so the new runtime guard passes. Spec at docs/superpowers/specs/2026-05-01-hatchery-c2-bioparams-design.md. Closes the second of three planned tiers (C1 → C2 → C3); next: C3 behaviour divergence.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Hatchery agents (origin=1) pay +25% on RANDOM (key 1) and UPSTREAM (key 3) Wisconsin activity multipliers; wild (origin=0) unchanged. Single divergent field; dispatch hides behind existing per-agent activity_mult array. Closes the 2nd of 3 hatchery-vs-wild tiers.
