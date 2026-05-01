@@ -87,20 +87,33 @@ et al. 2018 use the same Wisconsin pattern for migrating *S. salar*).
 
 **In:**
 
-- New optional attribute `Simulation.bio_params_hatchery: BalticBioParams | None`,
+- New `HatcheryDispatch` frozen dataclass in `baltic_params.py` bundling
+  the paired nullables (params + LUT) so the invariant `params is None
+  ↔ lut is None` becomes structurally impossible to violate:
+  ```python
+  @dataclass(frozen=True)
+  class HatcheryDispatch:
+      params: BalticBioParams
+      activity_lut: np.ndarray
+  ```
+- New optional attribute `Simulation.hatchery_dispatch: HatcheryDispatch | None`,
   built at simulation init by overlaying YAML `hatchery_overrides:` onto
-  the existing wild `BalticBioParams` instance via
-  `dataclasses.replace`.
+  the existing wild `BalticBioParams` instance via `dataclasses.replace`,
+  then bundled with its derived activity LUT.
 - New vectorized helper `origin_aware_activity_mult(behavior, origin,
   lut_wild, lut_hatch) -> ndarray` in `bioenergetics.py`. Returns
   `lut_wild[behavior]` when `lut_hatch is None` (graceful for legacy
   / pre-C2 callers).
-- New simulation method `rebuild_luts()` that rebuilds BOTH `_activity_lut`
-  and `_activity_lut_hatchery` from a freshly-derived wild base.
-- `Landscape` TypedDict gains `activity_lut_hatchery: np.ndarray | None`
-  (with `total=False` so existing consumers are unaffected).
-- `Simulation.step()` injects `activity_lut_hatchery` into the per-step
-  landscape dict alongside the wild LUT.
+- New simulation method `rebuild_luts()` that rebuilds wild
+  `_activity_lut` AND the `hatchery_dispatch` (params + LUT bundled
+  together) from a cached `BalticSpeciesConfig` (the config is loaded
+  once at `__init__` and stored on `self._species_config`, so
+  `rebuild_luts()` does not re-read disk on every slider event).
+- `Landscape` TypedDict gains `hatchery_dispatch: HatcheryDispatch | None`
+  (with `total=False` so existing consumers are unaffected). One key,
+  not two — the bundle is atomic.
+- `Simulation.step()` injects `hatchery_dispatch` into the per-step
+  landscape dict.
 - `_event_bioenergetics` and `events_builtin.py:SurvivalEvent.execute`
   both call the dispatch helper.
 - YAML schema gains a `hatchery_overrides:` sub-block under
@@ -113,19 +126,25 @@ et al. 2018 use the same Wisconsin pattern for migrating *S. salar*).
   `activity_by_behavior` is non-empty and contains only positive floats
   (already implicitly required by Wisconsin respiration).
 - Runtime guard inside `IntroductionEvent.execute()`: if `self.origin
-  == ORIGIN_HATCHERY` and `landscape.get("bio_params_hatchery") is None`,
+  == ORIGIN_HATCHERY` and `landscape.get("hatchery_dispatch") is None`,
   raise. Catches the case where a runtime introduction tries to add
   hatchery agents but no overrides are configured.
-- Startup log message at `Simulation.__init__` when `bio_params_hatchery
-  is not None`: `"C2 hatchery dispatch active: activity_by_behavior keys
-  {1, 3} overridden"`.
+- Startup log message at `Simulation.__init__` when
+  `hatchery_dispatch is not None`: `"C2 hatchery dispatch active:
+  activity_by_behavior keys {1, 3} overridden"`. Uses
+  `{k for k in hatchery_dict if wild_dict.get(k) != hatchery_dict[k]}`
+  (robust to extra hatchery keys, although the loader prevents that case).
 - `load_baltic_species_config()` returns a `NamedTuple
-  BalticSpeciesConfig(wild: BalticBioParams, hatchery: BalticBioParams |
-  None)` (replacing the bare `BalticBioParams` return).
-- 7 new tests in `tests/test_hatchery_params.py` covering the override
-  loader, dispatch helper, init guard, sparse-override merge, sidebar
-  rebuild, the LUT shape/values for both wild and hatchery, and the
-  step()-landscape injection invariant.
+  BalticSpeciesConfig(wild: BioParams | BalticBioParams, hatchery:
+  BalticBioParams | None)`. **Always** returns this NamedTuple — even
+  the legacy non-Baltic path returns `BalticSpeciesConfig(wild=plain_BioParams,
+  hatchery=None)`. This eliminates the heterogeneous-return isinstance
+  branch at the caller and makes `AttributeError` failure modes
+  impossible.
+- `load_bio_params_from_config()` follows the same pattern: always
+  returns `BalticSpeciesConfig`.
+- 13 new tests in `tests/test_hatchery_params.py` covering all happy
+  paths, all rejection paths, and the integration invariants.
 
 **Out:**
 
@@ -273,6 +292,22 @@ renamed.
 
 2. `salmon_ibm/baltic_params.py`:
 
+   - New frozen dataclass at module top-level:
+     ```python
+     @dataclass(frozen=True)
+     class HatcheryDispatch:
+         """Bundle hatchery params + their derived activity LUT atomically.
+
+         Holding params and LUT separately as paired nullables on
+         Simulation invites desync (one rebuilt, one stale). This bundle
+         makes the invariant `params is None ↔ lut is None` structurally
+         impossible to violate, and gives callers a single nullable to
+         guard on (`if landscape.get('hatchery_dispatch') is None: ...`).
+         """
+         params: BalticBioParams
+         activity_lut: np.ndarray
+     ```
+
    - `BalticBioParams.__post_init__` adds:
      ```python
      if not self.activity_by_behavior:
@@ -329,89 +364,102 @@ renamed.
      `{999: 5.0}` typo raises `ValueError` immediately rather than
      silently producing an oversized LUT.
 
-3. `salmon_ibm/config.py` — `load_bio_params_from_config()` extended to
-   return `BalticSpeciesConfig` (NamedTuple) when species_config is
-   present; legacy path returns a single `BioParams` unchanged.
+3. `salmon_ibm/config.py` — `load_bio_params_from_config()` returns
+   `BalticSpeciesConfig` for **all** paths. The legacy non-Baltic path
+   wraps a plain `BioParams` into `BalticSpeciesConfig(wild=BioParams(...),
+   hatchery=None)`. The Baltic-with-overrides path returns
+   `BalticSpeciesConfig(wild=baltic_params, hatchery=baltic_params_with_overrides)`.
 
-   The lone caller at `simulation.py:294` MUST branch on the return
-   type explicitly:
+   The caller at `simulation.py:294` becomes a single attribute access
+   without isinstance branching:
    ```python
    loaded = load_bio_params_from_config(config)
-   if isinstance(loaded, BalticSpeciesConfig):
-       self.bio_params = loaded.wild
-       self.bio_params_hatchery = loaded.hatchery  # may be None
+   self.bio_params = loaded.wild
+   self._species_config = loaded  # cached for rebuild_luts()
+   if loaded.hatchery is not None:
+       hatch_lut = build_activity_lut(loaded.hatchery.activity_by_behavior)
+       self.hatchery_dispatch = HatcheryDispatch(
+           params=loaded.hatchery,
+           activity_lut=hatch_lut,
+       )
    else:
-       # Legacy non-Baltic path: plain BioParams, no hatchery support
-       self.bio_params = loaded
-       self.bio_params_hatchery = None
+       self.hatchery_dispatch = None
    ```
-   Failing to branch produces `AttributeError: 'BioParams' object has
-   no attribute 'wild'` on every non-Baltic scenario.
+   No `AttributeError` failure mode possible — every path produces a
+   well-typed `BalticSpeciesConfig`.
 
 4. `salmon_ibm/simulation.py`:
 
    - **Imports** (top of file): add
-     `from salmon_ibm.baltic_params import BalticSpeciesConfig` —
-     required for the `isinstance(loaded, BalticSpeciesConfig)` branch
-     in `__init__`.
+     `from salmon_ibm.baltic_params import BalticSpeciesConfig, HatcheryDispatch`.
 
    - `Simulation.__init__` (around line 292-295):
-     - Receive `BalticSpeciesConfig` from loader; assign
-       `self.bio_params = loaded.wild`, `self.bio_params_hatchery = loaded.hatchery`
-       (with `isinstance` branching as shown in item 3 above).
+     - Receive `BalticSpeciesConfig` from loader; assign as shown in
+       item 3 above. Cache `self._species_config = loaded` for
+       `rebuild_luts()` to use without re-reading disk on every
+       sidebar event.
      - Call `self.rebuild_luts()` instead of `_build_activity_lut()`.
-     - If `self.bio_params_hatchery is not None`, log:
-       `logger.info("C2 hatchery dispatch active: activity_by_behavior keys overridden: %s",
-                    sorted(set(self.bio_params_hatchery.activity_by_behavior) -
-                           {k for k, v in self.bio_params.activity_by_behavior.items()
-                            if self.bio_params_hatchery.activity_by_behavior[k] == v}))`.
+     - If `self.hatchery_dispatch is not None`, log:
+       ```python
+       wild_dict = self.bio_params.activity_by_behavior
+       hatch_dict = self.hatchery_dispatch.params.activity_by_behavior
+       overridden = sorted({k for k in hatch_dict if wild_dict.get(k) != hatch_dict[k]})
+       logger.info("C2 hatchery dispatch active: activity_by_behavior keys overridden: %s", overridden)
+       ```
 
    - New method `Simulation.rebuild_luts()`:
      ```python
      def rebuild_luts(self):
-         """Rebuild both wild and hatchery activity LUTs from species-config.
+         """Rebuild wild and hatchery activity LUTs from cached species-config.
 
-         Re-derives both LUTs from the on-disk species-config, bypassing
-         self.bio_params entirely. This avoids anchoring the hatchery LUT
-         to the plain BioParams the sidebar may have substituted (sliders
-         that adjust RA/RB/etc. affect metabolism through self.bio_params
-         but NOT through the activity LUT — activity is locked to the
-         species-config baseline).
+         Reads from self._species_config (cached at __init__) — does NOT
+         re-read disk on every sidebar event. Slider adjustments that
+         affect RA/RB/etc on self.bio_params do NOT affect the activity
+         LUTs, which stay locked to the YAML-loaded baseline. This is
+         intentional: sliders are for exploring metabolic-scale params,
+         not for replacing the species-config activity profile.
 
-         Baltic-only — silently no-ops on non-Baltic configs.
+         No-ops on non-Baltic configs (no _species_config cached).
          """
-         species_config_path = self.config.get("species_config")
-         if species_config_path is None:
-             # Non-Baltic path: no species config, no Baltic LUTs to rebuild.
-             # The existing self._activity_lut (from BioParams defaults) and
-             # self._activity_lut_hatchery=None remain valid.
+         if not hasattr(self, "_species_config") or self._species_config is None:
              return
-         species_cfg = load_baltic_species_config(species_config_path)
+         species_cfg = self._species_config  # cached BalticSpeciesConfig
          self._activity_lut = self._build_lut(species_cfg.wild.activity_by_behavior)
-         self._activity_lut_hatchery = (
-             self._build_lut(species_cfg.hatchery.activity_by_behavior)
-             if species_cfg.hatchery is not None else None
-         )
+         if species_cfg.hatchery is not None:
+             hatch_lut = self._build_lut(species_cfg.hatchery.activity_by_behavior)
+             self.hatchery_dispatch = HatcheryDispatch(
+                 params=species_cfg.hatchery,
+                 activity_lut=hatch_lut,
+             )
+         else:
+             self.hatchery_dispatch = None
      ```
 
    - `Simulation.step()` (around line 560-571) — landscape dict gains:
      ```python
-     "activity_lut_hatchery": self._activity_lut_hatchery,
+     "hatchery_dispatch": self.hatchery_dispatch,
      ```
-     (`getattr(self, "_activity_lut_hatchery", None)` if any code path
-     bypasses `rebuild_luts()` for safety.)
+     (Single key, single nullable. The `HatcheryDispatch` bundle is
+     read by both consumers below.)
 
-   - `_event_bioenergetics` (around line 488-510) — replace direct
-     `np.take(self._activity_lut, ...)` with
-     `origin_aware_activity_mult(pool.behavior[mask], pool.origin[mask],
-                                  self._activity_lut, self._activity_lut_hatchery)`.
+   - `_event_bioenergetics` (around line 488-510) — reads from
+     `self.*` directly (NOT from landscape, since this method is on
+     Simulation):
+     ```python
+     hatch_lut = (self.hatchery_dispatch.activity_lut
+                  if self.hatchery_dispatch is not None else None)
+     activity = origin_aware_activity_mult(
+         pool.behavior[mask], pool.origin[mask],
+         self._activity_lut, hatch_lut,
+     )
+     ```
 
    - `Landscape` TypedDict (existing definition at `simulation.py:9`,
-     `class Landscape(TypedDict, total=False)`) gains
-     `activity_lut_hatchery: np.ndarray | None` and
-     `bio_params_hatchery: BalticBioParams | None`. The `total=False`
-     attribute means existing consumers that don't reference these new
-     keys are unaffected.
+     `class Landscape(TypedDict, total=False)`) gains a single new key:
+     `hatchery_dispatch: HatcheryDispatch | None`. The `total=False`
+     attribute means existing consumers that don't reference this key
+     are unaffected. **One key**, not two — the bundle keeps the
+     params + LUT atomic.
 
 5. `salmon_ibm/events_builtin.py` — three edits in this single file:
 
@@ -425,22 +473,30 @@ renamed.
      # here are silently ignored. See C2 spec.
      ```
 
-   - Replace the line 69 dispatch (note: the
-     `from salmon_ibm.bioenergetics import origin_aware_activity_mult`
-     import goes at the **top of the file**, not inline inside the
-     method):
+   - Replace the line 69 dispatch. **Note dispatch sources differ
+     between the two consumers:** `_event_bioenergetics` (item 4 above)
+     reads `self.hatchery_dispatch` directly because it's on Simulation;
+     `SurvivalEvent.execute` reads `landscape["hatchery_dispatch"]`
+     because it's an event without direct Simulation access. Both call
+     the same helper. The `from salmon_ibm.bioenergetics import
+     origin_aware_activity_mult` import goes at the **top of the file**,
+     not inline inside the method:
      ```python
      # Was: activity = activity_lut[population.behavior]
+     hd = landscape.get("hatchery_dispatch")
+     hatch_lut = hd.activity_lut if hd is not None else None
      activity = origin_aware_activity_mult(
          population.behavior,
          population.pool.origin,
          landscape["activity_lut"],
-         landscape.get("activity_lut_hatchery"),
+         hatch_lut,
      )
      ```
 
    **5b. `IntroductionEvent.execute()` (around line 249)** — runtime
-   guard before `add_agents`:
+   guard before `add_agents`. Note: the guard checks `landscape.get(
+   "hatchery_dispatch") is None` (single key) instead of two
+   separate keys:
 
    ```python
    if self.origin == ORIGIN_HATCHERY and landscape.get("bio_params_hatchery") is None:
@@ -467,40 +523,98 @@ renamed.
 
 **New test file:**
 
-`tests/test_hatchery_params.py` — 7 tests:
+`tests/test_hatchery_params.py` — 13 tests covering all happy paths,
+all rejection paths, and integration invariants. All tests use
+`tmp_path` YAML fixtures unless they require a full `Simulation`
+(tests 11, 12, 13).
+
+**Loader / merge tests (1-3 + new 8-10):**
 
 1. `test_hatchery_overrides_activity_by_behavior_loads` — YAML with
    `hatchery_overrides.activity_by_behavior: {1: 1.5, 3: 1.875}` loads
    into `BalticSpeciesConfig(wild=..., hatchery=...)` with merged dict
-   `{0: 1.0, 1: 1.5, 2: 0.8, 3: 1.875, 4: 1.0}`.
+   `{0: 1.0, 1: 1.5, 2: 0.8, 3: 1.875, 4: 1.0}`. **Plus identity
+   assertion: `assert result.hatchery is not result.wild`** (catches a
+   mutation-in-place implementation that contaminates wild).
 2. `test_hatchery_overrides_unsupported_key_raises` — `hatchery_overrides:
    {T_OPT: 14.0}` raises `ValueError` matching `r"hatchery_overrides supports only"`.
 3. `test_hatchery_overrides_typo_raises` — `hatchery_overrides:
    {activity_for_behavior: ...}` (typo: "for" vs "by") raises
    `ValueError`.
-4. `test_origin_aware_activity_mult_dispatch` — wild origin gets
-   `lut_wild[behavior]`, HATCHERY origin gets `lut_hatch[behavior]`.
-   Graceful path (`lut_hatch is None`) returns wild for all.
-5. `test_introduction_event_runtime_guard_no_hatchery_params` —
-   `IntroductionEvent(origin=ORIGIN_HATCHERY).execute()` on a sim with
-   `bio_params_hatchery is None` raises at the introduction step (not
-   silently degrades).
-6. `test_rebuild_luts_resilient_to_slider_replacement` — load a Baltic
-   YAML fixture with hatchery overrides into a full `Simulation`. Set
-   `sim.bio_params = BioParams(RA=0.005)` (mimic sidebar). Call
-   `sim.rebuild_luts()`. Assert `sim._activity_lut` reflects Baltic
-   species-config values (NOT plain BioParams Chinook defaults), and
-   `sim._activity_lut_hatchery` reflects merged YAML overrides.
+8. `test_hatchery_overrides_invalid_behavior_key_raises` — sub-key
+   `999` (not a valid Behavior enum value): `hatchery_overrides:
+   {activity_by_behavior: {999: 5.0}}` raises `ValueError` matching
+   `r"valid Behavior enum values"`. Without this test, an implementer
+   who omits `VALID_BEHAVIORS` validation would silently produce an
+   oversized 1000-element LUT.
+9. `test_hatchery_overrides_nonnumeric_behavior_key_raises` —
+   non-numeric sub-key like `{"hold": 1.5}` (after YAML parse, key is
+   the string `"hold"`) raises `ValueError` matching
+   `r"keys must be integers"`. Without this test, an implementer who
+   omits the `try/except` around `int(k)` would emit a bare
+   `ValueError: invalid literal for int()` traceback.
+10. `test_activity_by_behavior_rejects_nonpositive_value` — direct
+    construction `BalticBioParams(activity_by_behavior={0: 1.0, 1:
+    -0.5, ...})` raises `ValueError`. Locks in the new
+    `__post_init__` validation that the spec mandates.
 
-7. `test_step_injects_hatchery_landscape_keys` — load a Baltic YAML
-   fixture with `hatchery_overrides:` into a full `Simulation`. Use
-   `monkeypatch.setattr(sim._sequencer, "step", spy_fn)` where
-   `spy_fn` captures `args[1]` (the landscape dict). After `sim.step()`
-   runs once, assert `"activity_lut_hatchery" in landscape` AND
-   `"bio_params_hatchery" in landscape` (both populated, not None).
-   Locks in the `Simulation.step()` injection invariant — without this
-   test, a missing dict-key insertion in `step()` would silently degrade
-   the dispatch to wild-only without breaking any other test.
+**Helper test (4):**
+
+4. `test_origin_aware_activity_mult_dispatch` — wild origin gets
+   `lut_wild[behavior]`, HATCHERY origin gets `lut_hatch[behavior]`,
+   mixed origin produces correct per-agent dispatch. Graceful path:
+   when `lut_hatch is None`, `np.array_equal(result, lut_wild[behavior])`
+   element-by-element (NOT just shape — a stub that returns wrong
+   values would pass a shape-only check).
+
+**Runtime guard tests (5 + new 11):**
+
+5. `test_introduction_event_runtime_guard_no_hatchery_params` — call
+   `IntroductionEvent(origin=ORIGIN_HATCHERY, ...).execute(pop, {}, 0,
+   mask)` with empty landscape (so `landscape.get("hatchery_dispatch")
+   is None`). Asserts `ValueError` matching `r"HATCHERY.*no
+   bio_params_hatchery"` (or whatever message the spec specifies).
+11. `test_patch_introduction_event_runtime_guard_no_hatchery_params`
+    — mirror of test 5 for `PatchIntroductionEvent` in
+    `events_hexsim.py`. Without this, the hexsim-mode introduction
+    guard could be silently omitted; existing
+    `test_events_hexsim.py` doesn't construct hatchery scenarios.
+
+**Init / rebuild / step integration tests (6, 7 + new 12, 13):**
+
+6. `test_rebuild_luts_resilient_to_slider_replacement` — load a
+   Baltic YAML `tmp_path` fixture with hatchery overrides into a full
+   `Simulation`. Replace `sim.bio_params` with a mimic of `app.py:1493`'s
+   slider construction: `BioParams(RA=0.005, RB=-0.2, RQ=0.07,
+   ED_MORTAL=4.0, T_OPT=15.0, T_MAX=24.0)`. Call `sim.rebuild_luts()`.
+   Numeric assertions: `sim._activity_lut[1] == pytest.approx(1.2)`
+   (Baltic wild RANDOM, NOT Chinook plain-BioParams default of 1.2 —
+   coincidentally same; assert UPSTREAM `sim._activity_lut[3] ==
+   pytest.approx(1.5)` — this is Baltic-specific). Plus
+   `sim.hatchery_dispatch.activity_lut[1] == pytest.approx(1.5)`
+   (merged override) AND `sim.hatchery_dispatch.activity_lut[3] ==
+   pytest.approx(1.875)`.
+7. `test_step_injects_hatchery_dispatch_landscape_key` — load a
+   Baltic YAML `tmp_path` fixture with `hatchery_overrides:` into a
+   full `Simulation`. Use `monkeypatch.setattr(sim._sequencer, "step",
+   spy_fn)` where `spy_fn` captures `args[1]` (the landscape dict).
+   After `sim.step()` runs once, assert `"hatchery_dispatch" in
+   landscape AND landscape["hatchery_dispatch"] is not None AND
+   isinstance(landscape["hatchery_dispatch"], HatcheryDispatch)`.
+   Without this strict-typed assertion, an implementer could ship a
+   `step()` that injects `None` for the key and the test would still
+   pass with a membership-only check.
+12. `test_simulation_init_non_baltic_has_no_hatchery_dispatch` —
+    construct a Simulation from a non-Baltic config (no
+    `species_config:` key). Assert `sim.hatchery_dispatch is None`
+    AND `isinstance(sim.bio_params, BioParams)` (NOT
+    `BalticBioParams`). Locks in the legacy-path return-type
+    semantics that fall out of the unified-return refactor.
+13. `test_rebuild_luts_noop_on_non_baltic_sim` — call
+    `sim.rebuild_luts()` on the non-Baltic simulation from test 12.
+    Asserts no exception raised, and `sim.hatchery_dispatch` remains
+    `None`. Without this test, a future implementation could throw
+    `KeyError` on the missing `_species_config` cache.
 
 ## Tests
 
@@ -510,7 +624,7 @@ Existing tests that may need updating:
   `lut_hatch is None`, so all pre-C2 tests (which never construct a
   scenario with hatchery overrides) continue to use the wild path
   unchanged.
-- The 7 new tests above lock in the C2-specific paths.
+- The 13 new tests above lock in the C2-specific paths.
 
 Existing tests that exercise the new init path (`Simulation`
 end-to-end, no modifications expected because they don't supply
@@ -539,35 +653,69 @@ sweep mandatory for publications using these outputs).
 **Silent-failure modes (closed by design):**
 
 - ❌ Hatchery agent at runtime, no overrides → caught by runtime
-  guard inside `IntroductionEvent.execute()` (and `PatchIntroductionEvent`).
-- ❌ YAML typo in override key name → caught by strict loader.
+  guard inside `IntroductionEvent.execute()` and
+  `PatchIntroductionEvent.execute()`. Locked by tests 5 and 11.
+- ❌ YAML typo in top-level override key (e.g., `activity_for_behavior`)
+  → caught by strict loader (`ALLOWED_OVERRIDE_KEYS` check). Locked
+  by test 3.
+- ❌ Invalid Behavior enum sub-key (e.g. `999`) → caught by
+  `VALID_BEHAVIORS` check after coercion. Locked by test 8.
+- ❌ Non-numeric sub-key (e.g., `"hold"`) → caught by `try/except`
+  around `int(k)` coercion with actionable message. Locked by test 9.
+- ❌ Non-positive activity value → caught by new `__post_init__`
+  validation. Locked by test 10.
 - ❌ Sparse override dict truncating LUT → caught by shallow-merge
   into wild base.
 - ❌ Sidebar slider stale-LUT bug → caught by `rebuild_luts()`
-  re-deriving from species-config.
+  reading from cached `BalticSpeciesConfig`.
 - ❌ Slider replacement anchoring hatchery LUT to Chinook defaults →
   caught by the species-config re-derivation in `rebuild_luts()`.
-- ❌ `step()` not injecting hatchery LUT into landscape → mandated
-  in spec; covered by test 6.
+  Locked by test 6.
+- ❌ Per-slider disk I/O regression → caught by caching
+  `BalticSpeciesConfig` on `self._species_config` at init.
+- ❌ `step()` not injecting `hatchery_dispatch` into landscape →
+  caught by spy-fn test 7 with strict `isinstance(HatcheryDispatch)`
+  assertion.
+- ❌ Heterogeneous return type from loader producing `AttributeError`
+  on non-Baltic configs → caught by unified-return architecture (loader
+  ALWAYS returns `BalticSpeciesConfig`). Locked by test 12.
+- ❌ `bio_params_hatchery is None` paired with `_activity_lut_hatchery
+  != None` (silent desync) → caught structurally by `HatcheryDispatch`
+  dataclass bundling.
+- ❌ `rebuild_luts()` raising on non-Baltic sim → caught by early
+  return when `_species_config` not cached. Locked by test 13.
+- ❌ Mutating wild dict via override path → caught by
+  `dataclasses.replace` returning new instance. Locked by identity
+  assertion in test 1.
 
 ## Success criteria
 
-- [ ] `BalticSpeciesConfig` NamedTuple defined in `baltic_params.py`.
-- [ ] `BalticBioParams.__post_init__` validates `activity_by_behavior`.
-- [ ] `_apply_hatchery_overrides` raises on unsupported keys.
-- [ ] Loader returns `(wild, hatchery_or_None)` in `BalticSpeciesConfig`.
-- [ ] `Simulation.rebuild_luts()` re-derives wild base from species-config.
-- [ ] `Simulation.step()` injects both LUTs and `bio_params_hatchery`
-      into landscape dict.
-- [ ] `_event_bioenergetics` and `SurvivalEvent.execute` use the
-      dispatch helper.
+- [ ] `BalticSpeciesConfig` NamedTuple AND `HatcheryDispatch` frozen
+      dataclass defined in `baltic_params.py`.
+- [ ] `BalticBioParams.__post_init__` validates `activity_by_behavior`
+      (non-empty, non-negative int keys, positive float values).
+- [ ] `_apply_hatchery_overrides` raises on unsupported keys, invalid
+      Behavior sub-keys, and non-numeric sub-key types.
+- [ ] `load_bio_params_from_config` ALWAYS returns `BalticSpeciesConfig`
+      (legacy path returns `BalticSpeciesConfig(wild=BioParams, hatchery=None)`).
+- [ ] `Simulation._species_config` cached at init; `rebuild_luts()`
+      reads from cache (no per-slider disk I/O).
+- [ ] `Simulation.hatchery_dispatch: HatcheryDispatch | None` attribute
+      bundles params + LUT atomically.
+- [ ] `Simulation.step()` injects `hatchery_dispatch` into landscape
+      dict (single key).
+- [ ] `_event_bioenergetics` reads `self.hatchery_dispatch` directly;
+      `SurvivalEvent.execute` reads `landscape["hatchery_dispatch"]`.
+      Both call `origin_aware_activity_mult` helper.
 - [ ] `IntroductionEvent.execute()` and `PatchIntroductionEvent.execute()`
-      raise when origin=HATCHERY but no hatchery params are configured.
-- [ ] Startup log message fires when `bio_params_hatchery is not None`.
-- [ ] `app.py` calls `rebuild_luts()` instead of `_build_activity_lut()`.
-- [ ] All 7 new tests pass.
+      raise when origin=HATCHERY but `landscape.get("hatchery_dispatch")
+      is None`.
+- [ ] Startup log message fires when `hatchery_dispatch is not None`.
+- [ ] `app.py:1493-1501` Shiny sidebar calls `rebuild_luts()` instead
+      of `_build_activity_lut()`.
+- [ ] All 13 new tests pass.
 - [ ] Full pytest suite stays green (current baseline 829 passing on
-      `hatchery-origin-c1` branch; expected post-C2: 836).
+      `hatchery-origin-c1` branch; expected post-C2: 842 = baseline + 13).
 - [ ] Plan stamp on the eventual implementation plan: ✅ EXECUTED.
 
 ## Estimated implementation time
