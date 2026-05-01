@@ -55,7 +55,8 @@ species:
     spawn_window_start_day: 288
     spawn_window_end_day: 334
 """)
-    params = load_baltic_species_config(cfg_path)
+    cfg = load_baltic_species_config(cfg_path)
+    params = cfg.wild
     assert isinstance(params, BalticBioParams)
     assert params.T_OPT == 16.0
     assert params.T_AVOID == 20.0
@@ -86,7 +87,8 @@ species:
     unknown_key_from_inSTREAM: 42
     another_unknown: "foo"
 """)
-    params = load_baltic_species_config(cfg_path)
+    cfg = load_baltic_species_config(cfg_path)
+    params = cfg.wild
     assert params.cmax_A == 0.303
 
 

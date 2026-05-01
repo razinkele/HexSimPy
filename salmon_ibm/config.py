@@ -62,7 +62,7 @@ def load_bio_params_from_config(cfg: dict):
         # Resolve relative paths against the YAML working dir
         from salmon_ibm.baltic_params import load_baltic_species_config
 
-        return load_baltic_species_config(species_path)
+        return load_baltic_species_config(species_path).wild
     return bio_params_from_config(cfg)
 
 
