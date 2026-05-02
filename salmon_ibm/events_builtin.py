@@ -327,6 +327,14 @@ class ReproductionEvent(Event):
             self.offspring_mass_mean * 0.5,
             self.offspring_mass_mean * 1.5,
         )
+        # NOTE: origin is intentionally NOT propagated here per C1
+        # spec scope-OUT (docs/superpowers/specs/2026-04-30-hatchery-
+        # origin-c1-design.md). Offspring of hatchery parents default
+        # to ORIGIN_WILD via Population.add_agents's default kwarg.
+        # The biological case for inheritance (genetic + epigenetic
+        # carryover from hatchery parents) is real but unsettled for
+        # Atlantic salmon; deferring to a future tier (post-C3.x)
+        # rather than baking in an arbitrary inheritance probability.
         new_idx = population.add_agents(
             total_offspring,
             offspring_positions,
