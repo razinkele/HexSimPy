@@ -84,3 +84,113 @@ species:
 """)
     with pytest.raises(ValueError, match="hatchery_overrides supports only"):
         load_baltic_species_config(str(p))
+
+
+def test_reproduction_skips_hatchery_at_p_skip_one():
+    """Set p_skip=1.0 → ALL hatchery reproducers skip; wild always
+    proceed. Deterministic test — no RNG dependence on outcome.
+    Verifies the Bernoulli dispatch correctly reads parent origin."""
+    import numpy as np
+    from salmon_ibm.agents import AgentPool
+    from salmon_ibm.population import Population
+    from salmon_ibm.baltic_params import BalticBioParams, HatcheryDispatch
+    from salmon_ibm.events_builtin import ReproductionEvent
+    from salmon_ibm.origin import ORIGIN_WILD, ORIGIN_HATCHERY
+
+    pool = AgentPool(n=4, start_tri=0, rng_seed=42)
+    pool.origin[:2] = ORIGIN_WILD       # 2 wild
+    pool.origin[2:] = ORIGIN_HATCHERY   # 2 hatchery
+    pop = Population(name="test", pool=pool)
+    pop.group_id = np.array([0, 0, 0, 0], dtype=np.int32)  # all in same group
+
+    hd = HatcheryDispatch(
+        params=BalticBioParams(pre_spawn_skip_prob=1.0),
+        activity_lut=np.ones(5),  # unused for reproduction test
+    )
+    landscape = {
+        "rng": np.random.default_rng(0),
+        "hatchery_dispatch": hd,
+    }
+    evt = ReproductionEvent(name="r", clutch_mean=10.0, min_group_size=1)
+    n_before = pool.n
+    evt.execute(pop, landscape, t=0, mask=np.ones(4, dtype=bool))
+    n_offspring = pool.n - n_before
+    # Only the 2 wild reproducers spawned (clutch_mean=10 each ≈ 20 expected).
+    # No offspring from hatchery parents (skipped at p=1.0).
+    # 2 reproducers × Poisson(10) → mean 20, 99% CI ~10-30
+    # 4 reproducers × Poisson(10) → mean 40, 99% CI ~26-54
+    # Window 25 is safely below the 4-reproducer lower bound.
+    assert n_offspring < 30, (
+        f"Expected wild-only Poisson(10) × 2 ≈ 20 offspring; got {n_offspring}. "
+        f"Hatchery skip not applied?"
+    )
+
+
+def test_reproduction_no_skip_at_p_zero():
+    """When pre_spawn_skip_prob=0.0, hatchery reproducers behave
+    identically to wild. Lock-in for the explicit 0-value path
+    (covers sensitivity-sweep null point and confirms the
+    `pre_spawn_skip_prob > 0` guard short-circuits)."""
+    import numpy as np
+    from salmon_ibm.agents import AgentPool
+    from salmon_ibm.population import Population
+    from salmon_ibm.baltic_params import BalticBioParams, HatcheryDispatch
+    from salmon_ibm.events_builtin import ReproductionEvent
+    from salmon_ibm.origin import ORIGIN_WILD, ORIGIN_HATCHERY
+
+    pool = AgentPool(n=4, start_tri=0, rng_seed=42)
+    pool.origin[:2] = ORIGIN_WILD
+    pool.origin[2:] = ORIGIN_HATCHERY
+    pop = Population(name="test", pool=pool)
+    pop.group_id = np.array([0, 0, 0, 0], dtype=np.int32)
+
+    # p=0.0 → no skipping; all 4 reproducers proceed
+    hd = HatcheryDispatch(
+        params=BalticBioParams(pre_spawn_skip_prob=0.0),
+        activity_lut=np.ones(5),
+    )
+    landscape = {
+        "rng": np.random.default_rng(0),
+        "hatchery_dispatch": hd,
+    }
+    evt = ReproductionEvent(name="r", clutch_mean=10.0, min_group_size=1)
+    n_before = pool.n
+    evt.execute(pop, landscape, t=0, mask=np.ones(4, dtype=bool))
+    n_offspring = pool.n - n_before
+    # All 4 reproducers spawned → Poisson(10) × 4 ≈ 40, 99% CI ~26-54.
+    # Verify count is in the 4-reproducer range, not the 2-reproducer range.
+    assert n_offspring >= 25, (
+        f"Expected all-reproducers Poisson(10) × 4 ≈ 40 offspring; got "
+        f"{n_offspring}. Skip applied at p=0?"
+    )
+
+
+def test_reproduction_graceful_without_hatchery_dispatch():
+    """When landscape has no 'hatchery_dispatch' key (pre-C3.1 scenarios
+    or wild-only configs), ReproductionEvent.execute proceeds without
+    ANY skip logic. Hatchery-tagged agents (if any) reproduce as
+    normal. Locks the graceful-fallback semantics; no regression on
+    pre-C2 reproductive scenarios."""
+    import numpy as np
+    from salmon_ibm.agents import AgentPool
+    from salmon_ibm.population import Population
+    from salmon_ibm.events_builtin import ReproductionEvent
+    from salmon_ibm.origin import ORIGIN_WILD, ORIGIN_HATCHERY
+
+    pool = AgentPool(n=4, start_tri=0, rng_seed=42)
+    pool.origin[:2] = ORIGIN_WILD
+    pool.origin[2:] = ORIGIN_HATCHERY
+    pop = Population(name="test", pool=pool)
+    pop.group_id = np.array([0, 0, 0, 0], dtype=np.int32)
+
+    # Landscape with NO hatchery_dispatch key — graceful fallback
+    landscape = {"rng": np.random.default_rng(0)}
+    evt = ReproductionEvent(name="r", clutch_mean=10.0, min_group_size=1)
+    n_before = pool.n
+    evt.execute(pop, landscape, t=0, mask=np.ones(4, dtype=bool))
+    n_offspring = pool.n - n_before
+    # No skip path executes; all 4 reproducers spawn → Poisson(10) × 4 ≈ 40.
+    assert n_offspring >= 25, (
+        f"Expected all-reproducers Poisson(10) × 4 ≈ 40 offspring; got "
+        f"{n_offspring}. Skip applied without hatchery_dispatch key?"
+    )

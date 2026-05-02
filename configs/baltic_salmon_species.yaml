@@ -95,9 +95,46 @@ species:
     # DOWNSTREAM (4) UNCHANGED — passive drift; morphological
     # inefficiency suppressed when current provides thrust. No direct
     # citation; rationale is hydrodynamic (drag vs thrust allocation).
+    # C3.1: wild reproducers always proceed (skip probability 0.0)
+    pre_spawn_skip_prob: 0.0
+
     hatchery_overrides:
       activity_by_behavior:
         1: 1.5     # RANDOM:  +25% (1.2 → 1.5)
         3: 1.875   # UPSTREAM: +25% (1.5 → 1.875)
         # HOLD (0), TO_CWR (2), DOWNSTREAM (4) inherit wild values
         # via shallow-merge.
+
+      # C3.1: pre-spawn skip probability for hatchery reproducers.
+      # Empirical anchor: Bouchard, Wellband, Lecomte et al. 2022
+      # (doi:10.1111/eva.13374) — captive-bred Atlantic salmon RRS
+      # 0.65-0.80 (MSW females + males 80%; 1SW males 65%).
+      # Cross-species meta-analytic baseline: Christie, Ford & Blouin
+      # 2014 (doi:10.1111/eva.12183) — early-generation hatchery fish
+      # average HALF the reproductive success of wild counterparts
+      # across 4 salmon species.
+      # Population-scale supportive-breeders study: Jonsson et al.
+      # 2019 (doi:10.1111/csp2.85) — 81% reduction in smolts/breeder
+      # at 95% hatchery, but mixes spawning + offspring survival.
+      # Lithuanian Žeimena/Simnas programme (~4-7 generations since
+      # 1997) is intermediate between Bouchard 2022 and Christie 2014.
+      #
+      # MECHANISTIC SHAPE: Bouchard 2022 found "captive-breeding did
+      # not directly affect the number of offspring per mating event
+      # but instead the number of mating events" — directly validates
+      # the pre-spawn skip-rate model intervention (rather than clutch-
+      # size reduction). This is the strongest single empirical
+      # rationale for the C3.1 model intervention shape.
+      #
+      # CALIBRATION STATUS: 0.3 corresponds to RRS ≈ 0.7, mid-range
+      # of Bouchard 2022 Atlantic salmon estimates. Treat as
+      # calibration-grade. Mandatory sensitivity sweep before
+      # publication: {0.0, 0.15, 0.30, 0.50}. Cap at 0.6 — beyond
+      # exceeds Christie 2014 lower bound for Salmo salar.
+      #
+      # SCOPE-OUT (deferred): origin inheritance (offspring stay
+      # tagged ORIGIN_WILD per C1 scope-OUT); sex-specific skip
+      # (Bouchard 2022 found males more affected; current model
+      # doesn't track sex); year-to-year RRS stochasticity (single
+      # constant skip probability per scenario).
+      pre_spawn_skip_prob: 0.3
