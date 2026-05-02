@@ -11,7 +11,7 @@ from salmon_ibm.events import Event, register_event
 from salmon_ibm.movement import execute_movement
 from salmon_ibm.bioenergetics import BioParams, update_energy, origin_aware_activity_mult
 from salmon_ibm.estuary import salinity_cost, EstuaryParams
-from salmon_ibm.origin import ORIGIN_WILD
+from salmon_ibm.origin import ORIGIN_WILD, ORIGIN_HATCHERY
 
 
 @register_event("movement")
@@ -312,6 +312,20 @@ class ReproductionEvent(Event):
                 population.group_id, list(valid_groups)
             )
         reproducer_idx = np.where(can_reproduce)[0]
+
+        # C3.1: pre-spawn skip filter for hatchery reproducers.
+        # Bernoulli gate before Poisson clutch sampling; matches Bouchard
+        # et al. 2022 (doi:10.1111/eva.13374) finding that captive-breeding
+        # reduces "number of mating events, not offspring per mating".
+        # Wild reproducers (origin=ORIGIN_WILD) always pass through.
+        # Spec: docs/superpowers/specs/2026-05-02-hatchery-c3-spawn-design.md
+        hd = landscape.get("hatchery_dispatch")
+        if hd is not None and hd.params.pre_spawn_skip_prob > 0 and len(reproducer_idx) > 0:
+            is_hatchery = population.pool.origin[reproducer_idx] == ORIGIN_HATCHERY
+            skip_rolls = rng.random(len(reproducer_idx)) < hd.params.pre_spawn_skip_prob
+            keep = ~(is_hatchery & skip_rolls)
+            reproducer_idx = reproducer_idx[keep]
+
         if len(reproducer_idx) == 0:
             return
         clutch_sizes = rng.poisson(self.clutch_mean, size=len(reproducer_idx))

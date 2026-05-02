@@ -83,6 +83,15 @@ class BalticBioParams:
         default_factory=lambda: {0: 1.0, 1: 1.2, 2: 0.8, 3: 1.5, 4: 1.0}
     )
 
+    # Pre-spawn skip probability (C3.1). Bernoulli gate on reproducers
+    # before Poisson clutch sampling; wild=0.0 (always spawns), hatchery
+    # may divert via hatchery_overrides.pre_spawn_skip_prob.
+    # Empirical anchor: Bouchard et al. 2022 (doi:10.1111/eva.13374)
+    # — captive-bred Atlantic salmon RRS 0.65-0.80, "fewer mating events,
+    # not smaller clutches" → skip-rate model intervention is the
+    # right shape (matches Bouchard's mechanistic finding).
+    pre_spawn_skip_prob: float = 0.0
+
     def __post_init__(self):
         if self.T_AVOID <= self.T_OPT:
             raise ValueError(
@@ -116,6 +125,11 @@ class BalticBioParams:
                     f"activity_by_behavior values must be positive floats, "
                     f"got {k}: {v!r}"
                 )
+        if not (0.0 <= self.pre_spawn_skip_prob <= 1.0):
+            raise ValueError(
+                f"pre_spawn_skip_prob must be in [0, 1], got "
+                f"{self.pre_spawn_skip_prob!r}"
+            )
 
     @property
     def T_MAX(self) -> float:
@@ -160,22 +174,28 @@ def _apply_hatchery_overrides(
 ) -> BalticBioParams:
     """Build a hatchery BalticBioParams by overlaying overrides on wild.
 
-    For C2, the only allowed override key is `activity_by_behavior`.
-    Sub-keys must be valid Behavior enum values (0-4). Non-numeric or
-    out-of-range sub-keys raise ValueError at load time.
+    For C3.1, two override semantics are supported:
+    - Dict fields (activity_by_behavior): shallow-merge over wild base.
+    - Scalar fields (pre_spawn_skip_prob): full replacement.
 
-    See docs/superpowers/specs/2026-05-01-hatchery-c2-bioparams-design.md.
+    Sub-keys of activity_by_behavior must be valid Behavior enum values
+    (0-4). Non-numeric or out-of-range sub-keys raise ValueError at load
+    time. New scalar fields are added to SCALAR_OVERRIDE_FIELDS as they
+    ship in future C3.x tasks.
+
+    See docs/superpowers/specs/2026-05-02-hatchery-c3-spawn-design.md.
     """
     from salmon_ibm.agents import Behavior  # local import to avoid cycle
 
-    ALLOWED_OVERRIDE_KEYS = {"activity_by_behavior"}
+    ALLOWED_OVERRIDE_KEYS = {"activity_by_behavior", "pre_spawn_skip_prob"}
+    SCALAR_OVERRIDE_FIELDS = {"pre_spawn_skip_prob"}
     VALID_BEHAVIORS = {int(b) for b in Behavior}  # {0, 1, 2, 3, 4}
 
     unknown = set(overrides) - ALLOWED_OVERRIDE_KEYS
     if unknown:
         raise ValueError(
             f"hatchery_overrides supports only "
-            f"{sorted(ALLOWED_OVERRIDE_KEYS)} in C2; unsupported keys: "
+            f"{sorted(ALLOWED_OVERRIDE_KEYS)} in C3.1; unsupported keys: "
             f"{sorted(unknown)}"
         )
 
@@ -202,11 +222,23 @@ def _apply_hatchery_overrides(
             f"{sorted(invalid_keys)}"
         )
 
-    # Shallow-merge over wild base: missing keys keep wild values.
+    # Shallow-merge over wild base for activity_by_behavior dict
     merged_dict = {**wild_params.activity_by_behavior, **activity_overrides}
-    # dataclasses.replace re-runs __post_init__ validation on the merged
-    # instance, catching e.g. negative override values.
-    return dataclasses.replace(wild_params, activity_by_behavior=merged_dict)
+
+    # Scalar field overrides (C3.1+): full replacement, no merge needed.
+    # Add new C3.x scalar fields to SCALAR_OVERRIDE_FIELDS as they ship.
+    scalar_kwargs = {
+        k: v for k, v in overrides.items() if k in SCALAR_OVERRIDE_FIELDS
+    }
+
+    # dataclasses.replace re-runs __post_init__ validation on the new
+    # instance, catching out-of-range scalar values (e.g. negative skip
+    # probability) at load time.
+    return dataclasses.replace(
+        wild_params,
+        activity_by_behavior=merged_dict,
+        **scalar_kwargs,
+    )
 
 
 def load_baltic_species_config(path: str | Path) -> BalticSpeciesConfig:
