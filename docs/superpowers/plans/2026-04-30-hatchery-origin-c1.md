@@ -1,5 +1,7 @@
 # Hatchery vs Wild Distinction — Tier C1 Implementation Plan
 
+> **STATUS: ✅ EXECUTED 2026-04-30** — All 7 tasks complete. salmon_ibm/origin.py module created; AgentPool.ARRAY_FIELDS extended; Population.add_agents and both introduction events propagate origin; network.py preserves on transfer; OutputLogger 7-touch wire-through complete; YAML loader handles string→int conversion. Full pytest suite green at 829 passing. Spec at docs/superpowers/specs/2026-04-30-hatchery-origin-c1-design.md. Closes the first of three planned tiers (C1 → C2 → C3); next: C2 BalticHatcheryBioParams parameter divergence.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Track origin (wild vs hatchery) on every agent as int8 metadata; thread it through introduction events, inter-population transfer, OutputLogger CSV export, and YAML scenario loading. No physics or behaviour change — C1 is the scaffold for C2 (parameter divergence) and C3 (behaviour divergence) to build on.

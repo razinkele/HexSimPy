@@ -252,6 +252,13 @@ class ScenarioLoader:
             )
             return group
 
+        # Ensure all event modules are imported so EVENT_REGISTRY is populated.
+        # This is idempotent (Python caches module imports), so calling
+        # _build_single_event directly (e.g. from tests) is safe.
+        import salmon_ibm.events_builtin  # noqa: F401
+        import salmon_ibm.events_phase3  # noqa: F401
+        import salmon_ibm.events_hexsim  # noqa: F401
+
         # Look up in EVENT_REGISTRY
         from salmon_ibm.events import EVENT_REGISTRY
 
@@ -315,6 +322,19 @@ class ScenarioLoader:
             "initialization_spatial_data": "initialization_spatial_data",
         }
         params = edef.get("params", {})
+        # Convert origin string ("wild"/"hatchery") to int8. Surfaces
+        # invalid values at scenario-load time, not first simulation
+        # step. See spec
+        # docs/superpowers/specs/2026-04-30-hatchery-origin-c1-design.md.
+        if "origin" in params and isinstance(params["origin"], str):
+            from salmon_ibm.origin import ORIGIN_NAMES
+            s = params["origin"]
+            try:
+                params["origin"] = ORIGIN_NAMES.index(s)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Invalid origin '{s}'; expected one of {ORIGIN_NAMES}"
+                ) from exc
         for key, val in params.items():
             field_name = _PARAM_ALIASES.get(key, key)
             if hasattr(evt, field_name):

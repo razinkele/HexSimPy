@@ -11,6 +11,7 @@ from salmon_ibm.events import Event, register_event
 from salmon_ibm.movement import execute_movement
 from salmon_ibm.bioenergetics import BioParams, update_energy
 from salmon_ibm.estuary import salinity_cost, EstuaryParams
+from salmon_ibm.origin import ORIGIN_WILD
 
 
 @register_event("movement")
@@ -208,6 +209,7 @@ class IntroductionEvent(Event):
     initial_traits: dict[str, str] = field(default_factory=dict)
     initial_accumulators: dict[str, float] = field(default_factory=dict)
     initialization_spatial_data: str = ""
+    origin: int = ORIGIN_WILD
 
     def execute(self, population, landscape, t, mask):
         rng = landscape.get("rng", np.random.default_rng())
@@ -245,7 +247,8 @@ class IntroductionEvent(Event):
             self.initial_mass_mean * 1.5,
         )
         new_idx = population.add_agents(
-            n, pos_arr, mass_g=mass, ed_kJ_g=self.initial_ed
+            n, pos_arr, mass_g=mass, ed_kJ_g=self.initial_ed,
+            origin=self.origin,
         )
         # Tag natal_reach_id from current cell — see salmon_ibm/delta_routing.py.
         mesh = landscape.get("mesh")

@@ -10,6 +10,7 @@ import numpy as np
 from salmon_ibm.agents import AgentPool
 from salmon_ibm.accumulators import AccumulatorManager
 from salmon_ibm.traits import TraitManager
+from salmon_ibm.origin import ORIGIN_WILD
 
 
 @dataclass
@@ -120,6 +121,14 @@ class Population:
         self.pool.exit_branch_id = v
 
     @property
+    def origin(self) -> np.ndarray:
+        return self.pool.origin
+
+    @origin.setter
+    def origin(self, v):
+        self.pool.origin = v
+
+    @property
     def cwr_hours(self) -> np.ndarray:
         return self.pool.cwr_hours
 
@@ -197,6 +206,7 @@ class Population:
         mass_g=None,
         ed_kJ_g: float = 6.5,
         group_id: int = -1,
+        origin: int = ORIGIN_WILD,
     ) -> np.ndarray:
         old_n = self.pool.n
         new_n = old_n + n
@@ -229,6 +239,7 @@ class Population:
         new_arrays["temp_history"][old_n:] = 15.0
         new_arrays["natal_reach_id"][old_n:] = -1
         new_arrays["exit_branch_id"][old_n:] = -1
+        new_arrays["origin"][old_n:] = origin
 
         # Assign all AgentPool arrays at once
         for attr, arr in new_arrays.items():

@@ -5,6 +5,8 @@ from __future__ import annotations
 from enum import IntEnum
 import numpy as np
 
+from salmon_ibm.origin import ORIGIN_WILD
+
 
 class Behavior(IntEnum):
     HOLD = 0
@@ -32,6 +34,7 @@ class AgentPool:
         "temp_history",
         "natal_reach_id",   # int8: cell's reach_id at introduction; -1 if pre-tagging
         "exit_branch_id",   # int8: first delta-branch reach_id touched; sticky; -1 if never
+        "origin",           # int8: 0=wild, 1=hatchery; permanent at introduction
     )
 
     def __init__(
@@ -69,6 +72,7 @@ class AgentPool:
         self.temp_history = np.full((n, 3), 15.0)
         self.natal_reach_id = np.full(n, -1, dtype=np.int8)
         self.exit_branch_id = np.full(n, -1, dtype=np.int8)
+        self.origin = np.full(n, ORIGIN_WILD, dtype=np.int8)
 
         # Optional general-purpose state (Phase 1a)
         self.accumulators = None  # AccumulatorManager | None
