@@ -1498,7 +1498,7 @@ def server(input, output, session):
             T_OPT=t_opt,
             T_MAX=t_max,
         )
-        sim._activity_lut = sim._build_activity_lut()
+        sim.rebuild_luts()
         sim.pool.ed_kJ_g[:] = ed_init
         sim_state.set(sim)
 

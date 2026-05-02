@@ -31,10 +31,15 @@ for full context and calibration notes.
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NamedTuple
 
+import numpy as np
 import yaml
+
+from salmon_ibm.bioenergetics import BioParams  # for BalticSpeciesConfig.wild type widening (used in Task 3)
 
 
 @dataclass
@@ -99,6 +104,18 @@ class BalticBioParams:
             raise ValueError("ED_TISSUE and ED_MORTAL must be > 0")
         if not (0 <= self.spawn_window_start_day <= 365):
             raise ValueError("spawn_window_start_day must be 0-365")
+        if not self.activity_by_behavior:
+            raise ValueError("activity_by_behavior must be non-empty")
+        for k, v in self.activity_by_behavior.items():
+            if not isinstance(k, int) or k < 0:
+                raise ValueError(
+                    f"activity_by_behavior keys must be non-negative ints, got {k!r}"
+                )
+            if not isinstance(v, (int, float)) or v <= 0:
+                raise ValueError(
+                    f"activity_by_behavior values must be positive floats, "
+                    f"got {k}: {v!r}"
+                )
 
     @property
     def T_MAX(self) -> float:
@@ -110,19 +127,110 @@ class BalticBioParams:
         return self.T_AVOID
 
 
-def load_baltic_species_config(path: str | Path) -> BalticBioParams:
-    """Load the canonical baltic_salmon_species.yaml into BalticBioParams.
+@dataclass(frozen=True)
+class HatcheryDispatch:
+    """Bundle hatchery params + their derived activity LUT atomically.
+
+    Holding params and LUT separately as paired nullables on Simulation
+    invites desync (one rebuilt, one stale). This bundle makes the
+    invariant `params is None ↔ lut is None` structurally impossible
+    to violate, and gives callers a single nullable to guard on
+    (`if landscape.get('hatchery_dispatch') is None: ...`).
+    """
+    params: BalticBioParams
+    activity_lut: np.ndarray
+
+
+class BalticSpeciesConfig(NamedTuple):
+    """Loaded species config — wild + optional hatchery override.
+
+    Always returned by load_baltic_species_config(); legacy non-Baltic
+    path returns BalticSpeciesConfig(wild=plain_BioParams, hatchery=None)
+    so callers don't need isinstance branching. The `wild` field is
+    typed as `BioParams | BalticBioParams` because the legacy path
+    wraps a plain `BioParams`.
+    """
+    wild: BioParams | BalticBioParams
+    hatchery: BalticBioParams | None
+
+
+def _apply_hatchery_overrides(
+    wild_params: BalticBioParams,
+    overrides: dict,
+) -> BalticBioParams:
+    """Build a hatchery BalticBioParams by overlaying overrides on wild.
+
+    For C2, the only allowed override key is `activity_by_behavior`.
+    Sub-keys must be valid Behavior enum values (0-4). Non-numeric or
+    out-of-range sub-keys raise ValueError at load time.
+
+    See docs/superpowers/specs/2026-05-01-hatchery-c2-bioparams-design.md.
+    """
+    from salmon_ibm.agents import Behavior  # local import to avoid cycle
+
+    ALLOWED_OVERRIDE_KEYS = {"activity_by_behavior"}
+    VALID_BEHAVIORS = {int(b) for b in Behavior}  # {0, 1, 2, 3, 4}
+
+    unknown = set(overrides) - ALLOWED_OVERRIDE_KEYS
+    if unknown:
+        raise ValueError(
+            f"hatchery_overrides supports only "
+            f"{sorted(ALLOWED_OVERRIDE_KEYS)} in C2; unsupported keys: "
+            f"{sorted(unknown)}"
+        )
+
+    activity_overrides_raw = overrides.get("activity_by_behavior", {})
+    # Coerce YAML string keys to int (PyYAML may emit '1' rather than 1).
+    # Wrap in try/except so non-numeric keys produce an actionable message
+    # rather than a bare 'invalid literal for int()' traceback.
+    try:
+        activity_overrides = {
+            int(k): float(v) for k, v in activity_overrides_raw.items()
+        }
+    except (ValueError, TypeError) as exc:
+        raise ValueError(
+            f"hatchery_overrides.activity_by_behavior keys must be integers "
+            f"(Behavior enum values 0-4); got non-integer key in "
+            f"{activity_overrides_raw!r}"
+        ) from exc
+
+    invalid_keys = set(activity_overrides) - VALID_BEHAVIORS
+    if invalid_keys:
+        raise ValueError(
+            f"hatchery_overrides.activity_by_behavior keys must be valid "
+            f"Behavior enum values {sorted(VALID_BEHAVIORS)}; got invalid: "
+            f"{sorted(invalid_keys)}"
+        )
+
+    # Shallow-merge over wild base: missing keys keep wild values.
+    merged_dict = {**wild_params.activity_by_behavior, **activity_overrides}
+    # dataclasses.replace re-runs __post_init__ validation on the merged
+    # instance, catching e.g. negative override values.
+    return dataclasses.replace(wild_params, activity_by_behavior=merged_dict)
+
+
+def load_baltic_species_config(path: str | Path) -> BalticSpeciesConfig:
+    """Load the canonical baltic_salmon_species.yaml into BalticSpeciesConfig.
+
+    Always returns a BalticSpeciesConfig NamedTuple. If the YAML's
+    species.BalticAtlanticSalmon block contains a hatchery_overrides:
+    sub-block, .hatchery is populated; otherwise .hatchery is None.
 
     YAML schema (minimum):
 
         species:
           BalticAtlanticSalmon:
             cmax_A: 0.303
-            T_OPT: 16.0
-            # ... other fields from BalticBioParams
+            activity_by_behavior: {0: 1.0, 1: 1.2, 2: 0.8, 3: 1.5, 4: 1.0}
+            # optional:
+            hatchery_overrides:
+              activity_by_behavior:
+                1: 1.5
+                3: 1.875
 
-    Unknown keys are silently filtered (the inSTREAM source YAML has
-    additional fields HexSim doesn't consume).
+    Unknown top-level keys in BalticAtlanticSalmon are silently filtered
+    (legacy tolerance). Unknown keys in hatchery_overrides RAISE
+    ValueError (strict — typos there are scientifically dangerous).
     """
     with open(path) as f:
         cfg = yaml.safe_load(f)
@@ -131,7 +239,15 @@ def load_baltic_species_config(path: str | Path) -> BalticBioParams:
         raise ValueError(
             f"{path}: missing 'species.BalticAtlanticSalmon' block"
         )
+    # Pop hatchery_overrides BEFORE the known-field filter so it doesn't
+    # get silently dropped.
+    hatchery_overrides = block.pop("hatchery_overrides", None)
     # Filter to fields BalticBioParams knows about; extra keys tolerated.
     known = {f.name for f in BalticBioParams.__dataclass_fields__.values()}
     kwargs = {k: v for k, v in block.items() if k in known}
-    return BalticBioParams(**kwargs)
+    wild = BalticBioParams(**kwargs)
+
+    if hatchery_overrides is None:
+        return BalticSpeciesConfig(wild=wild, hatchery=None)
+    hatchery = _apply_hatchery_overrides(wild, hatchery_overrides)
+    return BalticSpeciesConfig(wild=wild, hatchery=hatchery)

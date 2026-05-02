@@ -107,9 +107,11 @@ class StubEvent(Event):
 
 class FakePopulation:
     def __init__(self, n=10):
+        from salmon_ibm.origin import ORIGIN_WILD
         self.n = n
         self.alive = np.ones(n, dtype=bool)
         self.arrived = np.zeros(n, dtype=bool)
+        self.origin = np.full(n, ORIGIN_WILD, dtype=np.int8)
 
 
 class TestEventSequencer:

@@ -9,7 +9,7 @@ import numpy as np
 
 from salmon_ibm.events import Event, register_event
 from salmon_ibm.movement import execute_movement
-from salmon_ibm.bioenergetics import BioParams, update_energy
+from salmon_ibm.bioenergetics import BioParams, update_energy, origin_aware_activity_mult
 from salmon_ibm.estuary import salinity_cost, EstuaryParams
 from salmon_ibm.origin import ORIGIN_WILD
 
@@ -53,6 +53,11 @@ class MovementEvent(Event):
 class SurvivalEvent(Event):
     """Bioenergetics energy update + thermal/starvation mortality."""
 
+    # NOTE: bio_params.activity_by_behavior on this event is dead weight
+    # — activity dispatch goes through landscape["activity_lut"] and
+    # landscape["hatchery_dispatch"]. Local activity_by_behavior values
+    # here are silently ignored. bio_params is still used for
+    # T_ACUTE_LETHAL / T_MAX (line 122). See C2 spec.
     bio_params: BioParams = field(default_factory=BioParams)
     thermal: bool = True
     starvation: bool = True
@@ -66,7 +71,15 @@ class SurvivalEvent(Event):
         alive = mask
 
         if self.starvation and alive.any():
-            activity = activity_lut[population.behavior]
+            # Was: activity = activity_lut[population.behavior]
+            hd = landscape.get("hatchery_dispatch")
+            hatch_lut = hd.activity_lut if hd is not None else None
+            activity = origin_aware_activity_mult(
+                population.behavior,
+                population.origin,
+                activity_lut,
+                hatch_lut,
+            )
             sal = fields.get("salinity")
             if sal is None:
                 sal = np.zeros(len(fields["temperature"]))
@@ -212,6 +225,14 @@ class IntroductionEvent(Event):
     origin: int = ORIGIN_WILD
 
     def execute(self, population, landscape, t, mask):
+        from salmon_ibm.origin import ORIGIN_HATCHERY  # local to avoid module-init cost
+        if self.origin == ORIGIN_HATCHERY and landscape.get("hatchery_dispatch") is None:
+            raise ValueError(
+                f"IntroductionEvent '{self.name}' tags new agents as HATCHERY, "
+                f"but the simulation has no hatchery_dispatch configured. "
+                f"Add a 'hatchery_overrides:' block under "
+                f"species.BalticAtlanticSalmon in the species YAML."
+            )
         rng = landscape.get("rng", np.random.default_rng())
         n = self.n_agents
         if self.initialization_spatial_data:
@@ -306,6 +327,14 @@ class ReproductionEvent(Event):
             self.offspring_mass_mean * 0.5,
             self.offspring_mass_mean * 1.5,
         )
+        # NOTE: origin is intentionally NOT propagated here per C1
+        # spec scope-OUT (docs/superpowers/specs/2026-04-30-hatchery-
+        # origin-c1-design.md). Offspring of hatchery parents default
+        # to ORIGIN_WILD via Population.add_agents's default kwarg.
+        # The biological case for inheritance (genetic + epigenetic
+        # carryover from hatchery parents) is real but unsettled for
+        # Atlantic salmon; deferring to a future tier (post-C3.x)
+        # rather than baking in an arbitrary inheritance probability.
         new_idx = population.add_agents(
             total_offspring,
             offspring_positions,

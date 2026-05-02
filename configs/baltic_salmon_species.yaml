@@ -58,3 +58,46 @@ species:
     spawn_temp_min_c: 5.0
     spawn_temp_max_c: 14.0
       # [Heggberget & Wallace 1984; Heinimaa & Heinimaa 2003 for Baltic reference]
+
+    # --- Activity multipliers by behavior ---
+    activity_by_behavior:
+      0: 1.0   # HOLD
+      1: 1.2   # RANDOM
+      2: 0.8   # TO_CWR
+      3: 1.5   # UPSTREAM
+      4: 1.0   # DOWNSTREAM
+    # NOTE: wild baseline inherited from inSTREAM Snyder Chinook;
+    # Baltic-specific verification has not been done. The hatchery
+    # contrast below is layered on a known-uncertain baseline.
+    #
+    # C2 hatchery vs wild parameter divergence (see
+    # docs/superpowers/specs/2026-05-01-hatchery-c2-bioparams-design.md).
+    # Empirically-bounded activity scaling factor representing reduced
+    # aerobic scope (Zhang et al. 2016, doi:10.1016/j.aquaculture.2016.05.015)
+    # and higher swimming cost per unit displacement (Enders, Boisclair
+    # & Roy 2004, doi:10.1139/f04-211: 12-29% range in seventh-generation
+    # domesticated Salmo salar; F1 costs not statistically different
+    # from wild in same study). Lithuanian programme (~4-7 generations
+    # since 1997) falls in intermediate range.
+    #
+    # CALIBRATION STATUS: +25% increment is empirically bracketed but
+    # not directly measured for Lithuanian Žeimena/Simnas hatchery
+    # stocks. Treat as calibration-grade. Mandatory sensitivity sweep
+    # before publication: {0%, +12.5%, +25%, +37.5%}. Cap at +40%
+    # without additional citation support.
+    #
+    # EFFECT SIZE: ~0.21 pp mass-loss differential over 21d realistic
+    # mixed-behavior migration. C2 alone is the architectural enabler
+    # for compound contrast (with osmoregulation stress, longer
+    # corridors, future C3 behaviour divergences); not standalone
+    # survival driver.
+    #
+    # DOWNSTREAM (4) UNCHANGED — passive drift; morphological
+    # inefficiency suppressed when current provides thrust. No direct
+    # citation; rationale is hydrodynamic (drag vs thrust allocation).
+    hatchery_overrides:
+      activity_by_behavior:
+        1: 1.5     # RANDOM:  +25% (1.2 → 1.5)
+        3: 1.875   # UPSTREAM: +25% (1.5 → 1.875)
+        # HOLD (0), TO_CWR (2), DOWNSTREAM (4) inherit wild values
+        # via shallow-merge.

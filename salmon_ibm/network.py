@@ -199,6 +199,13 @@ class SwitchPopulationEvent(Event):
         if hasattr(target, "natal_reach_id") and hasattr(source, "natal_reach_id"):
             target.natal_reach_id[new_idx] = source.natal_reach_id[transfer]
             target.exit_branch_id[new_idx] = source.exit_branch_id[transfer]
+        # The hasattr guards are permanently true on real Population
+        # objects (origin is in AgentPool.ARRAY_FIELDS since C1 + Population
+        # exposes it via @property proxy). The defensive guards mirror
+        # the natal_reach_id idiom above and survive for the same reason:
+        # alternative Population stand-ins in tests may not expose the
+        # full attribute surface. Leave as-is — the cost is one Python
+        # attribute lookup per inter-population transfer event.
         if hasattr(target, "origin") and hasattr(source, "origin"):
             target.origin[new_idx] = source.origin[transfer]
         source.alive[transfer] = False

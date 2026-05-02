@@ -290,7 +290,15 @@ class PlantDynamicsEvent(Event):
         if len(seed_positions) == 0:
             return
 
-        # Create new agents (seedlings) at viable positions
+        # Create new agents (seedlings) at viable positions.
+        # NOTE: origin is intentionally NOT propagated here per C1
+        # spec scope-OUT (docs/superpowers/specs/2026-04-30-hatchery-
+        # origin-c1-design.md). Phase-3 seedlings default to
+        # ORIGIN_WILD via Population.add_agents's default kwarg.
+        # Phase-3 is plant-world / vegetation-dynamics and the
+        # hatchery-vs-wild distinction is a salmon (Phase-1/2)
+        # concept; tagging seedlings as anything other than wild
+        # would be a category error.
         if hasattr(population, "add_agents"):
             new_idx = population.add_agents(
                 len(seed_positions),
