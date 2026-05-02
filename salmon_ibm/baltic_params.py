@@ -83,6 +83,15 @@ class BalticBioParams:
         default_factory=lambda: {0: 1.0, 1: 1.2, 2: 0.8, 3: 1.5, 4: 1.0}
     )
 
+    # Pre-spawn skip probability (C3.1). Bernoulli gate on reproducers
+    # before Poisson clutch sampling; wild=0.0 (always spawns), hatchery
+    # may divert via hatchery_overrides.pre_spawn_skip_prob.
+    # Empirical anchor: Bouchard et al. 2022 (doi:10.1111/eva.13374)
+    # — captive-bred Atlantic salmon RRS 0.65-0.80, "fewer mating events,
+    # not smaller clutches" → skip-rate model intervention is the
+    # right shape (matches Bouchard's mechanistic finding).
+    pre_spawn_skip_prob: float = 0.0
+
     def __post_init__(self):
         if self.T_AVOID <= self.T_OPT:
             raise ValueError(
@@ -116,6 +125,11 @@ class BalticBioParams:
                     f"activity_by_behavior values must be positive floats, "
                     f"got {k}: {v!r}"
                 )
+        if not (0.0 <= self.pre_spawn_skip_prob <= 1.0):
+            raise ValueError(
+                f"pre_spawn_skip_prob must be in [0, 1], got "
+                f"{self.pre_spawn_skip_prob!r}"
+            )
 
     @property
     def T_MAX(self) -> float:
