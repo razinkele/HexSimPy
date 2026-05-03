@@ -29,6 +29,7 @@ class Landscape(TypedDict, total=False):
     log_dir: str
     n_micro_steps_per_cell: np.ndarray  # NEW: per-cell hop budget
     hatchery_dispatch: "HatcheryDispatch | None"  # NEW (C2)
+    species_config: "BalticSpeciesConfig | None"  # NEW (C3.2)
 
 
 # Module-level constants for resolution-aware movement (Task 0.5).
@@ -604,6 +605,7 @@ class Simulation:
             "network": self._network,
             "n_micro_steps_per_cell": self._n_micro_steps_per_cell,
             "hatchery_dispatch": self.hatchery_dispatch,  # NEW (C2)
+            "species_config": getattr(self, "_species_config", None),  # NEW (C3.2)
         }
         self._sequencer.step(self.population, landscape, t)
         self.current_t += 1

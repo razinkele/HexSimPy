@@ -252,3 +252,36 @@ def test_extended_overrides_still_reject_unknown_keys():
     overrides = {"unknown_key": 42}
     with pytest.raises(ValueError, match=r"unsupported keys"):
         _apply_hatchery_overrides(wild, overrides)
+
+
+def test_simulation_step_injects_species_config_into_landscape():
+    """C3.2: Simulation.step() injects _species_config into the
+    landscape dict so events can access it. Load-bearing — the spec
+    flagged the absence of this injection as a CRITICAL silent-failure
+    mode in pass-1 review. Locks the wire-through via static-source
+    inspection (avoids needing full Simulation construction, which
+    requires mesh / environment / scenario fixtures the C3.2 plan does
+    not own)."""
+    import inspect
+    from salmon_ibm.simulation import Landscape, Simulation
+
+    # The Landscape TypedDict declares the field.
+    assert "species_config" in Landscape.__annotations__
+
+    # Simulation.step() body literally constructs the landscape dict
+    # with `"species_config": ...getattr(self, "_species_config", None)...`.
+    # A regression that drops this entry would crash CI here.
+    src = inspect.getsource(Simulation.step)
+    assert '"species_config"' in src and '"_species_config"' in src, (
+        "Simulation.step() must inject species_config into landscape; "
+        "C3.2 spec section 'simulation.py changes' mandates this entry."
+    )
+    # Residual false-positive: a refactor that nests species_config
+    # into another dict (e.g. `est_cfg["species_config"]`) would keep
+    # the literal in the source but break landscape.get("species_config").
+    # Lock the top-level pairing.
+    assert 'species_config": getattr(self, "_species_config"' in src, (
+        "species_config must be a top-level entry of the landscape dict; "
+        "nesting it (e.g. into est_cfg) would break "
+        "landscape.get('species_config') in event handlers."
+    )
