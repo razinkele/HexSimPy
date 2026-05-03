@@ -267,9 +267,34 @@ class IntroductionEvent(Event):
             self.initial_mass_mean * 0.5,
             self.initial_mass_mean * 1.5,
         )
+        # C3.2: sample sea_age from origin-aware trinomial distribution.
+        # Spec: docs/superpowers/specs/2026-05-03-hatchery-c3.2-seaage-design.md
+        from salmon_ibm.baltic_params import BalticBioParams
+        from salmon_ibm.sea_age import SEA_AGE_UNSET
+        species_cfg = landscape.get("species_config")
+        hd = landscape.get("hatchery_dispatch")
+        is_baltic = (species_cfg is not None
+                     and isinstance(species_cfg.wild, BalticBioParams))
+        if is_baltic:
+            if self.origin == ORIGIN_HATCHERY:
+                # C2 runtime guard above already raised if hd is None.
+                dist = hd.params.sea_age_distribution
+            else:
+                dist = species_cfg.wild.sea_age_distribution
+            ages = np.array(sorted(dist.keys()), dtype=np.int8)
+            probs = np.array([dist[int(a)] for a in ages.tolist()], dtype=np.float64)
+            sea_age_values = rng.choice(ages, size=n, p=probs)
+        elif self.origin == ORIGIN_HATCHERY:
+            raise ValueError(
+                f"IntroductionEvent {self.name!r} tags HATCHERY but "
+                f"species_config is non-Baltic; sea_age_distribution "
+                f"undefined."
+            )
+        else:
+            sea_age_values = SEA_AGE_UNSET   # legacy non-Baltic WILD
         new_idx = population.add_agents(
             n, pos_arr, mass_g=mass, ed_kJ_g=self.initial_ed,
-            origin=self.origin,
+            origin=self.origin, sea_age=sea_age_values,
         )
         # Tag natal_reach_id from current cell — see salmon_ibm/delta_routing.py.
         mesh = landscape.get("mesh")

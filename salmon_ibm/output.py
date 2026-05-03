@@ -41,6 +41,7 @@ class OutputLogger:
             self._natal_reach_id_arr = np.empty((max_steps, max_agents), dtype=np.int8)
             self._exit_branch_id_arr = np.empty((max_steps, max_agents), dtype=np.int8)
             self._origin_arr = np.empty((max_steps, max_agents), dtype=np.int8)
+            self._sea_age_arr = np.empty((max_steps, max_agents), dtype=np.int8)
         else:
             self._times: list[np.ndarray] = []
             self._agent_ids: list[np.ndarray] = []
@@ -54,6 +55,7 @@ class OutputLogger:
             self._natal_reach_id: list[np.ndarray] = []
             self._exit_branch_id: list[np.ndarray] = []
             self._origin: list[np.ndarray] = []
+            self._sea_age: list[np.ndarray] = []
 
     def log_step(self, t: int, population: "Population"):
         pool = population.pool
@@ -81,6 +83,7 @@ class OutputLogger:
             self._natal_reach_id_arr[r, :n] = pool.natal_reach_id[:n]
             self._exit_branch_id_arr[r, :n] = pool.exit_branch_id[:n]
             self._origin_arr[r, :n] = pool.origin[:n]
+            self._sea_age_arr[r, :n] = pool.sea_age[:n]
             self._n_rows += 1
         else:
             self._times.append(np.full(n, t, dtype=np.int32))
@@ -95,12 +98,13 @@ class OutputLogger:
             self._natal_reach_id.append(pool.natal_reach_id.copy())
             self._exit_branch_id.append(pool.exit_branch_id.copy())
             self._origin.append(pool.origin.copy())
+            self._sea_age.append(pool.sea_age.copy())
 
     def to_dataframe(self) -> pd.DataFrame:
         empty_cols = [
             "time", "agent_id", "tri_idx", "lat", "lon",
             "ed_kJ_g", "behavior", "alive", "arrived",
-            "natal_reach_id", "exit_branch_id", "origin",
+            "natal_reach_id", "exit_branch_id", "origin", "sea_age",
         ]
         if self._preallocated:
             if self._n_rows == 0:
@@ -121,6 +125,7 @@ class OutputLogger:
                     "natal_reach_id": self._natal_reach_id_arr[r, :n],
                     "exit_branch_id": self._exit_branch_id_arr[r, :n],
                     "origin": self._origin_arr[r, :n],
+                    "sea_age": self._sea_age_arr[r, :n],
                 }))
             return pd.concat(parts, ignore_index=True)
         if not self._times:
@@ -139,6 +144,7 @@ class OutputLogger:
                 "natal_reach_id": np.concatenate(self._natal_reach_id),
                 "exit_branch_id": np.concatenate(self._exit_branch_id),
                 "origin": np.concatenate(self._origin),
+                "sea_age": np.concatenate(self._sea_age),
             }
         )
 

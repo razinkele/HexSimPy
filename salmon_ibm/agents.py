@@ -6,6 +6,7 @@ from enum import IntEnum
 import numpy as np
 
 from salmon_ibm.origin import ORIGIN_WILD
+from salmon_ibm.sea_age import SEA_AGE_UNSET
 
 
 class Behavior(IntEnum):
@@ -35,6 +36,7 @@ class AgentPool:
         "natal_reach_id",   # int8: cell's reach_id at introduction; -1 if pre-tagging
         "exit_branch_id",   # int8: first delta-branch reach_id touched; sticky; -1 if never
         "origin",           # int8: 0=wild, 1=hatchery; permanent at introduction
+        "sea_age",          # int8: 1SW/2SW/3SW at introduction; -1 = sentinel
     )
 
     def __init__(
@@ -73,6 +75,7 @@ class AgentPool:
         self.natal_reach_id = np.full(n, -1, dtype=np.int8)
         self.exit_branch_id = np.full(n, -1, dtype=np.int8)
         self.origin = np.full(n, ORIGIN_WILD, dtype=np.int8)
+        self.sea_age = np.full(n, SEA_AGE_UNSET, dtype=np.int8)
 
         # Optional general-purpose state (Phase 1a)
         self.accumulators = None  # AccumulatorManager | None

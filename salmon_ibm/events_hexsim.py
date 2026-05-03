@@ -410,6 +410,7 @@ class PatchIntroductionEvent(Event):
                 f"Add a 'hatchery_overrides:' block under "
                 f"species.BalticAtlanticSalmon in the species YAML."
             )
+        rng = landscape.get("rng", np.random.default_rng())
         spatial_registry = landscape.get("spatial_data", {})
         layer = spatial_registry.get(self.patch_spatial_data)
         if layer is None:
@@ -425,10 +426,35 @@ class PatchIntroductionEvent(Event):
         nonzero_cells = np.where(layer != 0)[0]
         if len(nonzero_cells) == 0:
             return
+        # C3.2: sample sea_age from origin-aware trinomial distribution.
+        from salmon_ibm.baltic_params import BalticBioParams
+        from salmon_ibm.sea_age import SEA_AGE_UNSET
+        species_cfg = landscape.get("species_config")
+        hd = landscape.get("hatchery_dispatch")
+        is_baltic = (species_cfg is not None
+                     and isinstance(species_cfg.wild, BalticBioParams))
+        n_intro = len(nonzero_cells)
+        if is_baltic:
+            if self.origin == ORIGIN_HATCHERY:
+                dist = hd.params.sea_age_distribution
+            else:
+                dist = species_cfg.wild.sea_age_distribution
+            ages = np.array(sorted(dist.keys()), dtype=np.int8)
+            probs = np.array([dist[int(a)] for a in ages.tolist()], dtype=np.float64)
+            sea_age_values = rng.choice(ages, size=n_intro, p=probs)
+        elif self.origin == ORIGIN_HATCHERY:
+            raise ValueError(
+                f"PatchIntroductionEvent {self.name!r} tags HATCHERY but "
+                f"species_config is non-Baltic; sea_age_distribution "
+                f"undefined."
+            )
+        else:
+            sea_age_values = SEA_AGE_UNSET
         new_idx = population.add_agents(
             len(nonzero_cells),
             nonzero_cells,
             origin=self.origin,
+            sea_age=sea_age_values,
         )
         mesh = landscape.get("mesh")
         if mesh is not None:

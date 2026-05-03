@@ -98,6 +98,15 @@ species:
     # C3.1: wild reproducers always proceed (skip probability 0.0)
     pre_spawn_skip_prob: 0.0
 
+    # Sea-age distribution (trinomial 1SW/2SW/3SW). Wild baseline
+    # anchored to WGBAST annual-report ranges for wild Baltic stocks.
+    # Validated in BalticBioParams.__post_init__ (keys in {1,2,3},
+    # positive, sum = 1.0 ± 1e-6).
+    sea_age_distribution:
+      1: 0.35
+      2: 0.55
+      3: 0.10
+
     hatchery_overrides:
       activity_by_behavior:
         1: 1.5     # RANDOM:  +25% (1.2 → 1.5)
@@ -138,3 +147,15 @@ species:
       # doesn't track sex); year-to-year RRS stochasticity (single
       # constant skip probability per scenario).
       pre_spawn_skip_prob: 0.3
+
+      # Hatchery sea-age shift toward grilse (1SW). Empirical anchor:
+      # Jokikokko, Kallio-Nyberg & Jutila 2004
+      # (doi:10.1111/j.1439-0426.2004.00491.x) — Simojoki
+      # reared-stocked-as-smolts produce considerably higher 1SW
+      # fraction. Sensitivity sweep 1SW in {0.35, 0.45, 0.55, 0.65};
+      # cap 0.7. Full-replacement override (all three keys
+      # required). See spec for scope-OUT and full provenance.
+      sea_age_distribution:
+        1: 0.55
+        2: 0.40
+        3: 0.05

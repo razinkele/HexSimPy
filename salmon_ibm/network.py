@@ -208,4 +208,12 @@ class SwitchPopulationEvent(Event):
         # attribute lookup per inter-population transfer event.
         if hasattr(target, "origin") and hasattr(source, "origin"):
             target.origin[new_idx] = source.origin[transfer]
+        # C3.2: propagate sea_age on inter-population transfer.
+        # Use the hasattr-guarded idiom verbatim (NOT try/except, NOT
+        # isinstance). Mirrors origin/natal_reach_id propagation idioms
+        # in this same method. Multi-mesh transfers may produce
+        # encoding-mismatched outputs — same documented limitation as
+        # natal_reach_id and origin.
+        if hasattr(target, "sea_age") and hasattr(source, "sea_age"):
+            target.sea_age[new_idx] = source.sea_age[transfer]
         source.alive[transfer] = False

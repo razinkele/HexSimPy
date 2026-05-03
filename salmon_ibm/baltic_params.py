@@ -40,6 +40,7 @@ import numpy as np
 import yaml
 
 from salmon_ibm.bioenergetics import BioParams  # for BalticSpeciesConfig.wild type widening (used in Task 3)
+from salmon_ibm.sea_age import VALID_SEA_AGES
 
 
 @dataclass
@@ -92,6 +93,15 @@ class BalticBioParams:
     # right shape (matches Bouchard's mechanistic finding).
     pre_spawn_skip_prob: float = 0.0
 
+    # Sea-age distribution (C3.2). Trinomial over VALID_SEA_AGES.
+    # Wild baseline anchored to WGBAST annual-report ranges.
+    # Validated in __post_init__: keys ⊂ {1,2,3} (rejects bool AND
+    # numpy ints via `type(k) is int`), positive floats, sum to 1.0
+    # within 1e-6.
+    sea_age_distribution: dict[int, float] = field(
+        default_factory=lambda: {1: 0.35, 2: 0.55, 3: 0.10}
+    )
+
     def __post_init__(self):
         if self.T_AVOID <= self.T_OPT:
             raise ValueError(
@@ -129,6 +139,36 @@ class BalticBioParams:
             raise ValueError(
                 f"pre_spawn_skip_prob must be in [0, 1], got "
                 f"{self.pre_spawn_skip_prob!r}"
+            )
+        # C3.2: sea_age_distribution validation.
+        if not self.sea_age_distribution:
+            raise ValueError("sea_age_distribution must be non-empty")
+        for k, v in self.sea_age_distribution.items():
+            # type(k) is int — rejects bool (type(True) is bool) and
+            # numpy integer types (type(np.int64(1)) is np.int64).
+            # The error message includes type(k).__name__ so users see
+            # "got numpy.int64; pass int(k)" rather than a confusing
+            # "must be in {1,2,3}" when they passed numerically valid keys.
+            if type(k) is not int:
+                raise ValueError(
+                    f"sea_age_distribution keys must be Python int "
+                    f"(got {type(k).__module__}.{type(k).__name__} "
+                    f"for key {k!r}); cast via int(k) at the call site"
+                )
+            if k not in VALID_SEA_AGES:
+                raise ValueError(
+                    f"sea_age_distribution keys must be in {{1, 2, 3}}, "
+                    f"got {k!r}"
+                )
+            if not isinstance(v, (int, float)) or v <= 0:
+                raise ValueError(
+                    f"sea_age_distribution values must be positive floats, "
+                    f"got {k}: {v!r}"
+                )
+        total = sum(self.sea_age_distribution.values())
+        if abs(total - 1.0) > 1e-6:
+            raise ValueError(
+                f"sea_age_distribution must sum to 1.0, got {total!r}"
             )
 
     @property
@@ -174,35 +214,46 @@ def _apply_hatchery_overrides(
 ) -> BalticBioParams:
     """Build a hatchery BalticBioParams by overlaying overrides on wild.
 
-    For C3.1, two override semantics are supported:
-    - Dict fields (activity_by_behavior): shallow-merge over wild base.
-    - Scalar fields (pre_spawn_skip_prob): full replacement.
+    Override semantics by field:
+    - activity_by_behavior (C2): shallow-merge over wild base — empirical
+      reports per-behavior delta tables.
+    - pre_spawn_skip_prob (C3.1): scalar replacement.
+    - sea_age_distribution (C3.2): FULL replacement — empirical reports
+      whole trinomials (Jokikokko 2004); a partial merge that happens to
+      produce identity-with-wild would silent-no-op, hiding the
+      intervention.
 
     Sub-keys of activity_by_behavior must be valid Behavior enum values
-    (0-4). Non-numeric or out-of-range sub-keys raise ValueError at load
-    time. New scalar fields are added to SCALAR_OVERRIDE_FIELDS as they
-    ship in future C3.x tasks.
+    (0-4). Sub-keys of sea_age_distribution must be exactly {1, 2, 3}
+    (the override path applies the same `type(k) is int` rejection as
+    BalticBioParams.__post_init__ to prevent int(True) == 1 from
+    silently passing).
 
-    See docs/superpowers/specs/2026-05-02-hatchery-c3-spawn-design.md.
+    Post-replace `__post_init__` re-validation is the merge-output safety
+    net — never bypass `dataclasses.replace`.
+
+    See docs/superpowers/specs/2026-05-03-hatchery-c3.2-seaage-design.md.
     """
     from salmon_ibm.agents import Behavior  # local import to avoid cycle
 
-    ALLOWED_OVERRIDE_KEYS = {"activity_by_behavior", "pre_spawn_skip_prob"}
+    ALLOWED_OVERRIDE_KEYS = {
+        "activity_by_behavior",
+        "pre_spawn_skip_prob",
+        "sea_age_distribution",
+    }
     SCALAR_OVERRIDE_FIELDS = {"pre_spawn_skip_prob"}
-    VALID_BEHAVIORS = {int(b) for b in Behavior}  # {0, 1, 2, 3, 4}
+    VALID_BEHAVIORS = {int(b) for b in Behavior}
 
     unknown = set(overrides) - ALLOWED_OVERRIDE_KEYS
     if unknown:
         raise ValueError(
             f"hatchery_overrides supports only "
-            f"{sorted(ALLOWED_OVERRIDE_KEYS)} in C3.1; unsupported keys: "
+            f"{sorted(ALLOWED_OVERRIDE_KEYS)} in C3.2; unsupported keys: "
             f"{sorted(unknown)}"
         )
 
+    # --- activity_by_behavior (C2: shallow-merge) -------------------------
     activity_overrides_raw = overrides.get("activity_by_behavior", {})
-    # Coerce YAML string keys to int (PyYAML may emit '1' rather than 1).
-    # Wrap in try/except so non-numeric keys produce an actionable message
-    # rather than a bare 'invalid literal for int()' traceback.
     try:
         activity_overrides = {
             int(k): float(v) for k, v in activity_overrides_raw.items()
@@ -221,22 +272,51 @@ def _apply_hatchery_overrides(
             f"Behavior enum values {sorted(VALID_BEHAVIORS)}; got invalid: "
             f"{sorted(invalid_keys)}"
         )
+    merged_activity = {**wild_params.activity_by_behavior, **activity_overrides}
 
-    # Shallow-merge over wild base for activity_by_behavior dict
-    merged_dict = {**wild_params.activity_by_behavior, **activity_overrides}
+    # --- sea_age_distribution (C3.2: FULL replacement) --------------------
+    sea_age_kwargs: dict = {}
+    if "sea_age_distribution" in overrides:
+        sea_age_raw = overrides["sea_age_distribution"]
+        # Reject bool / numpy-int keys BEFORE int() coercion. Mirrors
+        # BalticBioParams.__post_init__'s `type(k) is int` discipline.
+        for k in sea_age_raw:
+            if type(k) is not int:
+                raise ValueError(
+                    f"hatchery_overrides.sea_age_distribution keys must be "
+                    f"Python int (got "
+                    f"{type(k).__module__}.{type(k).__name__} for key "
+                    f"{k!r}); cast via int(k) at the call site"
+                )
+        # Coerce values to float (PyYAML may emit int).
+        try:
+            sea_age_coerced = {int(k): float(v) for k, v in sea_age_raw.items()}
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"hatchery_overrides.sea_age_distribution values must be "
+                f"numeric; got {sea_age_raw!r}"
+            ) from exc
+        # Full replacement — keys must be exactly {1, 2, 3}.
+        if set(sea_age_coerced.keys()) != {1, 2, 3}:
+            raise ValueError(
+                f"hatchery_overrides.sea_age_distribution keys must be "
+                f"exactly {{1, 2, 3}} (full replacement; partial merge "
+                f"would silent-no-op against the wild baseline); got "
+                f"keys {sorted(sea_age_coerced.keys())!r}"
+            )
+        sea_age_kwargs["sea_age_distribution"] = sea_age_coerced
 
-    # Scalar field overrides (C3.1+): full replacement, no merge needed.
-    # Add new C3.x scalar fields to SCALAR_OVERRIDE_FIELDS as they ship.
+    # --- scalar fields (C3.1+) --------------------------------------------
     scalar_kwargs = {
         k: v for k, v in overrides.items() if k in SCALAR_OVERRIDE_FIELDS
     }
 
-    # dataclasses.replace re-runs __post_init__ validation on the new
-    # instance, catching out-of-range scalar values (e.g. negative skip
-    # probability) at load time.
+    # dataclasses.replace re-runs __post_init__ on the new instance,
+    # catching any merge-output that violates the field invariants.
     return dataclasses.replace(
         wild_params,
-        activity_by_behavior=merged_dict,
+        activity_by_behavior=merged_activity,
+        **sea_age_kwargs,
         **scalar_kwargs,
     )
 
