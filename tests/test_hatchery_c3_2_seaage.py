@@ -25,6 +25,7 @@ from salmon_ibm.events_hexsim import PatchIntroductionEvent
 from salmon_ibm.interactions import MultiPopulationManager
 from salmon_ibm.network import SwitchPopulationEvent
 from salmon_ibm.origin import ORIGIN_HATCHERY, ORIGIN_WILD
+from salmon_ibm.output import OutputLogger
 from salmon_ibm.population import Population
 from salmon_ibm.sea_age import (
     SEA_AGE_1SW,
@@ -553,3 +554,32 @@ def test_switch_population_propagates_sea_age():
     )
     # All source agents marked dead.
     assert not src.pool.alive.any()
+
+
+def test_output_logger_emits_sea_age_column(tmp_path):
+    """C3.2: OutputLogger.to_dataframe includes a `sea_age` column with
+    values restricted to {-1, 1, 2, 3}. Both the preallocated and the
+    growing-list paths must populate the column."""
+    pop = _make_population(n=4)
+    pop.pool.sea_age[:] = [SEA_AGE_UNSET, SEA_AGE_1SW, SEA_AGE_2SW, SEA_AGE_3SW]
+    centroids = np.zeros((10, 2))
+
+    # Growing-list path
+    logger = OutputLogger(path=str(tmp_path / "out.csv"), centroids=centroids)
+    logger.log_step(t=0, population=pop)
+    df = logger.to_dataframe()
+    assert "sea_age" in df.columns
+    assert set(df["sea_age"].unique()) <= {-1, 1, 2, 3}
+    assert (df["sea_age"].values == np.array([-1, 1, 2, 3], dtype=np.int8)).all()
+
+    # Preallocated path
+    logger2 = OutputLogger(
+        path=str(tmp_path / "out2.csv"),
+        centroids=centroids,
+        max_steps=1,
+        max_agents=4,
+    )
+    logger2.log_step(t=0, population=pop)
+    df2 = logger2.to_dataframe()
+    assert "sea_age" in df2.columns
+    assert (df2["sea_age"].values == np.array([-1, 1, 2, 3], dtype=np.int8)).all()
