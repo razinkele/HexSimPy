@@ -22,6 +22,8 @@ from salmon_ibm.baltic_params import (
 from salmon_ibm.bioenergetics import BioParams
 from salmon_ibm.events_builtin import IntroductionEvent
 from salmon_ibm.events_hexsim import PatchIntroductionEvent
+from salmon_ibm.interactions import MultiPopulationManager
+from salmon_ibm.network import SwitchPopulationEvent
 from salmon_ibm.origin import ORIGIN_HATCHERY, ORIGIN_WILD
 from salmon_ibm.population import Population
 from salmon_ibm.sea_age import (
@@ -507,3 +509,47 @@ def test_patch_introduction_n_zero_no_op():
     )
     evt.execute(pop, landscape, t=0, mask=None)  # no raise
     assert pop.pool.n == 0
+
+
+def test_switch_population_propagates_sea_age():
+    """C3.2 test 11: SwitchPopulationEvent transfers sea_age from source
+    to target. Use REAL Population instances (not MagicMock) — Mock
+    satisfies hasattr but its __setitem__ no-ops, masking regressions.
+
+    Asserts BIT-EXACT element-order preservation: source [1, 2, 3] →
+    target [1, 2, 3] in the same order (NOT just set-wise membership).
+    A regression to `target.sea_age[new_idx] = source.sea_age[transfer[::-1]]`
+    (reversed) would pass set-wise checks but fail this test.
+
+    NOTE: MultiPopulationManager lives in salmon_ibm/interactions.py.
+    Its `register` method takes either (name, population) or just
+    (population) — see salmon_ibm/interactions.py:26."""
+    src = _make_population(n=3)
+    src.pool.sea_age[:] = [SEA_AGE_1SW, SEA_AGE_2SW, SEA_AGE_3SW]
+    src.pool.alive[:] = True
+    tgt = _make_population(n=0)
+    multi_pop = MultiPopulationManager()
+    multi_pop.register("src", src)
+    multi_pop.register("tgt", tgt)
+
+    landscape = {
+        "rng": np.random.default_rng(12345),
+        "multi_pop_mgr": multi_pop,
+    }
+    evt = SwitchPopulationEvent(
+        name="transfer",
+        source_pop="src",
+        target_pop="tgt",
+        transfer_probability=1.0,
+    )
+    mask = np.ones(3, dtype=bool)
+    evt.execute(src, landscape, t=0, mask=mask)
+    # Bit-exact element-order: source [SW1, SW2, SW3] → target in same
+    # order (transfer order is the source's iteration order under
+    # transfer_probability=1.0).
+    np.testing.assert_array_equal(
+        tgt.pool.sea_age,
+        np.array([SEA_AGE_1SW, SEA_AGE_2SW, SEA_AGE_3SW], dtype=np.int8),
+    )
+    # All source agents marked dead.
+    assert not src.pool.alive.any()
