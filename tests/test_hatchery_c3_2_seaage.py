@@ -21,6 +21,7 @@ from salmon_ibm.baltic_params import (
 )
 from salmon_ibm.bioenergetics import BioParams
 from salmon_ibm.events_builtin import IntroductionEvent
+from salmon_ibm.events_hexsim import PatchIntroductionEvent
 from salmon_ibm.origin import ORIGIN_HATCHERY, ORIGIN_WILD
 from salmon_ibm.population import Population
 from salmon_ibm.sea_age import (
@@ -449,3 +450,60 @@ def test_introduction_event_hatchery_in_non_baltic_raises():
     )
     with pytest.raises(ValueError, match=r"non-Baltic.*sea_age_distribution"):
         evt.execute(pop, landscape, t=0, mask=None)
+
+
+def test_patch_introduction_writes_sea_age():
+    """C3.2 test 9: PatchIntroductionEvent samples sea_age. Covers the
+    new rng lookup AND the sampling block in events_hexsim.py.
+
+    NOTE: PatchIntroductionEvent's dataclass field is named
+    `patch_spatial_data` (NOT `spatial_data` — verified at
+    events_hexsim.py:401). Layer count is computed from the array
+    rather than hardcoded to avoid by-eye counting errors."""
+    pop = _make_population(n=0)
+    cfg = load_baltic_species_config(CONFIG_PATH)
+    layer = np.array([0, 1, 1, 0, 1, 0, 1, 0, 1, 0], dtype=np.int8)
+    expected_count = int((layer != 0).sum())  # 5 nonzero cells
+    landscape = {
+        "rng": np.random.default_rng(12345),
+        "spatial_data": {"intro_layer": layer},
+        "hatchery_dispatch": None,
+        "species_config": cfg,
+        "n_cells": 10,
+    }
+    evt = PatchIntroductionEvent(
+        name="patch_intro",
+        patch_spatial_data="intro_layer",
+        origin=ORIGIN_WILD,
+    )
+    evt.execute(pop, landscape, t=0, mask=None)
+    sea_ages = pop.pool.sea_age
+    assert sea_ages.shape == (expected_count,)
+    assert np.all(np.isin(sea_ages, [1, 2, 3]))
+
+
+def test_patch_introduction_n_zero_no_op():
+    """C3.2: PatchIntroductionEvent with all-zero layer is a no-op.
+
+    Locks the early-return short-circuit at events_hexsim.py:426-427
+    (`if len(nonzero_cells) == 0: return`). The Task 7 sampling block
+    is inserted AFTER the early-return, so an all-zero layer never
+    reaches `rng.choice(..., size=0, ...)` — but the early-return
+    itself must remain in place; this test catches its accidental
+    removal."""
+    pop = _make_population(n=0)
+    cfg = load_baltic_species_config(CONFIG_PATH)
+    landscape = {
+        "rng": np.random.default_rng(12345),
+        "spatial_data": {"empty_layer": np.zeros(10, dtype=np.int8)},
+        "hatchery_dispatch": None,
+        "species_config": cfg,
+        "n_cells": 10,
+    }
+    evt = PatchIntroductionEvent(
+        name="empty_patch",
+        patch_spatial_data="empty_layer",
+        origin=ORIGIN_WILD,
+    )
+    evt.execute(pop, landscape, t=0, mask=None)  # no raise
+    assert pop.pool.n == 0
