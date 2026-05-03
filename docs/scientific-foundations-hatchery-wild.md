@@ -17,7 +17,24 @@ calibration-grade.
 
 The document is organised by **biological mechanism**, not by code
 file. For the implementation-level mapping, see the per-tier specs
-in `docs/superpowers/specs/`.
+in `docs/superpowers/specs/` and per-tier plans in
+`docs/superpowers/plans/`.
+
+**Implementation status as of 2026-05-03:**
+
+| Tier  | Spec status        | Plan status        | Code status                          |
+|-------|--------------------|--------------------|--------------------------------------|
+| C1    | Final 2026-04-30   | Executed           | Shipped: PR #3 merged, commit 5791802|
+| C2    | Final 2026-05-01   | Executed           | Shipped: PR #4 merged, commit 8a9192c|
+| C3.1  | Final 2026-05-02   | Executed           | Shipped: PR #5 merged, commit 0284c45|
+| C3.2  | v4.1 converged 2026-05-03 (5-pass review) | v2.1 converged 2026-05-03 (2-pass review) | Pending implementation |
+| C3.3  | Not yet drafted    | Not yet drafted    | Future                                |
+
+Tags: v1.7.4 covers C1 + C2; v1.7.5 covers C3.1; v1.7.6 will cover
+C3.2 once implemented and merged. C3.2 spec at
+`docs/superpowers/specs/2026-05-03-hatchery-c3.2-seaage-design.md`;
+C3.2 implementation plan at
+`docs/superpowers/plans/2026-05-03-hatchery-c3.2-seaage.md`.
 
 ---
 
