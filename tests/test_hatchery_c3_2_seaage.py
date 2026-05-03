@@ -5,11 +5,19 @@ Spec: docs/superpowers/specs/2026-05-03-hatchery-c3.2-seaage-design.md
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
+import yaml
 
 from salmon_ibm.agents import AgentPool
-from salmon_ibm.baltic_params import BalticBioParams
+from salmon_ibm.baltic_params import (
+    BalticBioParams,
+    BalticSpeciesConfig,
+    _apply_hatchery_overrides,
+    load_baltic_species_config,
+)
 from salmon_ibm.population import Population
 from salmon_ibm.sea_age import (
     SEA_AGE_1SW,
@@ -164,3 +172,83 @@ def test_sea_age_distribution_rejects_invalid():
         BalticBioParams(sea_age_distribution={
             np.int64(1): 0.5, np.int64(2): 0.25, np.int64(3): 0.25,
         })
+
+
+CONFIG_PATH = Path("configs/baltic_salmon_species.yaml")
+
+
+def test_sea_age_distribution_loads_from_yaml(tmp_path):
+    """C3.2 test 1: deployed YAML loads both wild + hatchery sea_age
+    distributions; cfg.hatchery is not cfg.wild; both sum to 1."""
+    cfg = load_baltic_species_config(CONFIG_PATH)
+    assert isinstance(cfg, BalticSpeciesConfig)
+    assert cfg.wild.sea_age_distribution == {1: 0.35, 2: 0.55, 3: 0.10}
+    assert cfg.hatchery is not None
+    assert cfg.hatchery.sea_age_distribution == {1: 0.55, 2: 0.40, 3: 0.05}
+    assert cfg.hatchery is not cfg.wild
+    assert abs(sum(cfg.wild.sea_age_distribution.values()) - 1.0) < 1e-9
+    assert abs(sum(cfg.hatchery.sea_age_distribution.values()) - 1.0) < 1e-9
+
+
+def test_sea_age_full_replacement_override():
+    """C3.2 test 3: hatchery override fully replaces the wild distribution
+    (NOT shallow-merge). All three keys must be supplied."""
+    wild = BalticBioParams()
+    overrides = {"sea_age_distribution": {1: 0.55, 2: 0.40, 3: 0.05}}
+    hatchery = _apply_hatchery_overrides(wild, overrides)
+    assert hatchery.sea_age_distribution == {1: 0.55, 2: 0.40, 3: 0.05}
+    # Wild unchanged (not aliased through the merge):
+    assert wild.sea_age_distribution == {1: 0.35, 2: 0.55, 3: 0.10}
+
+
+def test_sea_age_partial_override_rejected():
+    """C3.2 test 4: partial sea_age_distribution override raises rather
+    than silently merging into the wild base (closes silent-no-op
+    failure mode where override happens to merge to wild)."""
+    wild = BalticBioParams()
+    overrides = {"sea_age_distribution": {1: 0.55}}  # missing 2 and 3
+    with pytest.raises(ValueError, match=r"keys must be exactly \{1, 2, 3\}"):
+        _apply_hatchery_overrides(wild, overrides)
+
+
+def test_sea_age_no_override_inherits_wild():
+    """C3.2 test 12: hatchery_overrides without sea_age_distribution key
+    inherits the wild trinomial; locks the 'absent entirely' branch of
+    full-replacement semantics."""
+    wild = BalticBioParams()
+    overrides = {"activity_by_behavior": {1: 1.5}}  # no sea_age_distribution
+    hatchery = _apply_hatchery_overrides(wild, overrides)
+    assert hatchery.sea_age_distribution == wild.sea_age_distribution
+
+
+def test_sea_age_override_path_rejects_bool_keys():
+    """C3.2 test 2 (override-path subset, bool variant): the
+    hatchery-override coercion path applies the same `type(k) is int`
+    rejection BEFORE int(k) coercion, so int(True) == 1 cannot silently
+    pass."""
+    wild = BalticBioParams()
+    overrides = {"sea_age_distribution": {True: 0.55, 2: 0.40, 3: 0.05}}
+    with pytest.raises(ValueError, match=r"got.*bool"):
+        _apply_hatchery_overrides(wild, overrides)
+
+
+def test_sea_age_override_path_rejects_numpy_int_keys():
+    """C3.2 test 2 (override-path subset, numpy variant): mirrors the
+    __post_init__ check so YAML loaders that emit np.int64 (some do)
+    don't bypass the override-path safeguard via silent int(k)
+    coercion."""
+    wild = BalticBioParams()
+    overrides = {"sea_age_distribution": {
+        np.int64(1): 0.55, np.int64(2): 0.40, np.int64(3): 0.05,
+    }}
+    with pytest.raises(ValueError, match=r"numpy\.int64.*int\(k\)"):
+        _apply_hatchery_overrides(wild, overrides)
+
+
+def test_extended_overrides_still_reject_unknown_keys():
+    """C3.2: ALLOWED_OVERRIDE_KEYS expansion still rejects unknown keys
+    (regression for C2/C3.1)."""
+    wild = BalticBioParams()
+    overrides = {"unknown_key": 42}
+    with pytest.raises(ValueError, match=r"unsupported keys"):
+        _apply_hatchery_overrides(wild, overrides)
