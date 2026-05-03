@@ -15,9 +15,13 @@ from salmon_ibm.agents import AgentPool
 from salmon_ibm.baltic_params import (
     BalticBioParams,
     BalticSpeciesConfig,
+    HatcheryDispatch,
     _apply_hatchery_overrides,
     load_baltic_species_config,
 )
+from salmon_ibm.bioenergetics import BioParams
+from salmon_ibm.events_builtin import IntroductionEvent
+from salmon_ibm.origin import ORIGIN_HATCHERY, ORIGIN_WILD
 from salmon_ibm.population import Population
 from salmon_ibm.sea_age import (
     SEA_AGE_1SW,
@@ -285,3 +289,163 @@ def test_simulation_step_injects_species_config_into_landscape():
         "nesting it (e.g. into est_cfg) would break "
         "landscape.get('species_config') in event handlers."
     )
+
+
+def _baltic_landscape(seed: int = 12345, *, hatchery: bool = True) -> tuple[Population, dict]:
+    """Helper: minimal Baltic-configured landscape for IntroductionEvent tests."""
+    pop = _make_population(n=0)
+    cfg = load_baltic_species_config(CONFIG_PATH)
+    if hatchery:
+        hd = HatcheryDispatch(
+            params=cfg.hatchery,
+            activity_lut=np.ones(5, dtype=np.float64),
+        )
+    else:
+        hd = None
+    landscape = {
+        "rng": np.random.default_rng(seed),
+        "spatial_data": {},
+        "hatchery_dispatch": hd,
+        "species_config": cfg,
+        "n_cells": 10,
+    }
+    return pop, landscape
+
+
+def test_introduction_event_writes_wild_sea_age():
+    """C3.2 test 5: IntroductionEvent with origin=WILD samples sea_age
+    from the wild trinomial.
+
+    Assertion style: tolerance-band counts (NOT exact equality). With
+    seed 12345 + N=10000, the multinomial draw is deterministic FOR A
+    FIXED NumPy version, but `Generator.choice` was reimplemented in
+    NumPy 2.0; pinning exact counts would silently break on a NumPy
+    version bump. Bands are ~4σ around the expected proportions —
+    wide enough to absorb minor RNG-algorithm changes, narrow enough
+    to detect a regression to the wrong distribution shape."""
+    pop, landscape = _baltic_landscape(seed=12345)
+    evt = IntroductionEvent(
+        name="wild_intro",
+        n_agents=10000,
+        positions=[0],
+        origin=ORIGIN_WILD,
+    )
+    evt.execute(pop, landscape, t=0, mask=None)
+    sea_ages = pop.pool.sea_age
+    assert sea_ages.shape == (10000,)
+    assert np.all(np.isin(sea_ages, [1, 2, 3]))
+    counts = {a: int((sea_ages == a).sum()) for a in (1, 2, 3)}
+    # Expected: 1SW=3500, 2SW=5500, 3SW=1000. ±~200 bands.
+    assert 3300 <= counts[1] <= 3700, f"1SW count {counts[1]} outside expected"
+    assert 5300 <= counts[2] <= 5700, f"2SW count {counts[2]} outside expected"
+    assert 850 <= counts[3] <= 1150, f"3SW count {counts[3]} outside expected"
+
+
+def test_introduction_event_wild_path_no_hatchery_dispatch():
+    """C3.2: pure wild-only production scenario — landscape has
+    species_config but hatchery_dispatch is None. The WILD code path
+    must NOT touch hd.params (would AttributeError on None). Closes
+    the silent-failure mode where _baltic_landscape's `hatchery=True`
+    default masks regressions that read hd.params unconditionally.
+
+    This is the typical Lithuanian wild-only scenario after stripping
+    the `hatchery_overrides:` block from the species YAML."""
+    pop, landscape = _baltic_landscape(seed=12345, hatchery=False)
+    assert landscape["hatchery_dispatch"] is None  # lock the precondition
+    evt = IntroductionEvent(
+        name="wild_only",
+        n_agents=100,
+        positions=[0],
+        origin=ORIGIN_WILD,
+    )
+    evt.execute(pop, landscape, t=0, mask=None)
+    # No raise; sea_age values populated from the wild distribution.
+    assert np.all(np.isin(pop.pool.sea_age, [1, 2, 3]))
+
+
+def test_introduction_event_n_zero_cohort():
+    """C3.2: IntroductionEvent with n_agents=0 is a no-op — no agents
+    added, no rng.choice on empty `size=0`."""
+    pop, landscape = _baltic_landscape(seed=12345)
+    evt = IntroductionEvent(
+        name="empty_intro",
+        n_agents=0,
+        positions=[0],
+        origin=ORIGIN_WILD,
+    )
+    evt.execute(pop, landscape, t=0, mask=None)
+    assert pop.pool.n == 0
+    assert pop.pool.sea_age.shape == (0,)
+
+
+def test_introduction_event_writes_hatchery_sea_age():
+    """C3.2 test 6: IntroductionEvent with origin=HATCHERY samples sea_age
+    from the hatchery trinomial."""
+    pop, landscape = _baltic_landscape(seed=12345)
+    evt = IntroductionEvent(
+        name="hatch_intro",
+        n_agents=10000,
+        positions=[0],
+        origin=ORIGIN_HATCHERY,
+    )
+    evt.execute(pop, landscape, t=0, mask=None)
+    sea_ages = pop.pool.sea_age
+    assert np.all(np.isin(sea_ages, [1, 2, 3]))
+    counts = {a: int((sea_ages == a).sum()) for a in (1, 2, 3)}
+    assert 5300 <= counts[1] <= 5700, f"1SW count {counts[1]} outside expected"
+    assert 3800 <= counts[2] <= 4200, f"2SW count {counts[2]} outside expected"
+    assert 350 <= counts[3] <= 650, f"3SW count {counts[3]} outside expected"
+
+
+def test_introduction_event_legacy_baltic_skipped():
+    """C3.2 test 7: legacy non-Baltic species_config (wild = plain
+    BioParams) → WILD agents introduced with sea_age=SEA_AGE_UNSET.
+    isinstance discriminator skips sampling; no raise."""
+    pop = _make_population(n=0)
+    legacy_cfg = BalticSpeciesConfig(wild=BioParams(), hatchery=None)
+    landscape = {
+        "rng": np.random.default_rng(0),
+        "spatial_data": {},
+        "hatchery_dispatch": None,
+        "species_config": legacy_cfg,
+        "n_cells": 10,
+    }
+    evt = IntroductionEvent(
+        name="legacy_intro",
+        n_agents=5,
+        positions=[0],
+        origin=ORIGIN_WILD,
+    )
+    evt.execute(pop, landscape, t=0, mask=None)
+    np.testing.assert_array_equal(pop.pool.sea_age, np.full(5, SEA_AGE_UNSET))
+
+
+def test_introduction_event_hatchery_in_non_baltic_raises():
+    """C3.2 test 8: HATCHERY origin in a non-Baltic species_config raises
+    ValueError with the C3.2 message (NOT the C2 message). Test
+    constructs a non-None hatchery_dispatch stub so the C2 guard
+    does not fire."""
+    pop = _make_population(n=0)
+    legacy_cfg = BalticSpeciesConfig(wild=BioParams(), hatchery=None)
+    # Stub HatcheryDispatch with the LEGACY wild as params — this would
+    # be a misconfiguration in production but lets us bypass the C2
+    # guard that fires on hatchery_dispatch is None.
+    stub_hd = HatcheryDispatch(
+        params=BalticBioParams(),
+        activity_lut=np.ones(5, dtype=np.float64),
+    )
+    landscape = {
+        "rng": np.random.default_rng(0),
+        "spatial_data": {},
+        "hatchery_dispatch": stub_hd,
+        "species_config": legacy_cfg,
+        "n_cells": 10,
+    }
+    evt = IntroductionEvent(
+        name="bad_intro",
+        n_agents=5,
+        positions=[0],
+        origin=ORIGIN_HATCHERY,
+    )
+    with pytest.raises(ValueError, match=r"non-Baltic.*sea_age_distribution"):
+        evt.execute(pop, landscape, t=0, mask=None)
