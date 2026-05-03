@@ -11,6 +11,7 @@ from salmon_ibm.agents import AgentPool
 from salmon_ibm.accumulators import AccumulatorManager
 from salmon_ibm.traits import TraitManager
 from salmon_ibm.origin import ORIGIN_WILD
+from salmon_ibm.sea_age import SEA_AGE_1SW, SEA_AGE_UNSET, VALID_SEA_AGES
 
 
 @dataclass
@@ -129,6 +130,14 @@ class Population:
         self.pool.origin = v
 
     @property
+    def sea_age(self) -> np.ndarray:
+        return self.pool.sea_age
+
+    @sea_age.setter
+    def sea_age(self, v):
+        self.pool.sea_age = v
+
+    @property
     def cwr_hours(self) -> np.ndarray:
         return self.pool.cwr_hours
 
@@ -165,6 +174,25 @@ class Population:
     @property
     def grouped(self) -> np.ndarray:
         return self.pool.alive & (self.group_id >= 0)
+
+    def adult_sea_age_mask(self) -> np.ndarray:
+        """C3.2: return mask of agents with valid sea-age values (1, 2, 3).
+
+        Excludes the SEA_AGE_UNSET (-1) sentinel that marks offspring,
+        non-Baltic legacy scenarios, or pre-introduction agents. Uses
+        np.isin (NOT >= 1) for forward-compat: a future 4SW addition
+        extends VALID_SEA_AGES, and >= 1 would silently admit garbage
+        int8 writes of 5..127.
+
+        Future C3.x consumers (sea-age → body-size, sea-age → fecundity)
+        MUST use this helper rather than rolling their own mask. See the
+        Sentinel-discipline section of
+        docs/superpowers/specs/2026-05-03-hatchery-c3.2-seaage-design.md.
+        """
+        return np.isin(
+            self.pool.sea_age,
+            np.asarray(VALID_SEA_AGES, dtype=np.int8),
+        )
 
     # --- Dynamic resizing ---
     def remove_agents(self, indices: np.ndarray) -> None:
@@ -207,7 +235,16 @@ class Population:
         ed_kJ_g: float = 6.5,
         group_id: int = -1,
         origin: int = ORIGIN_WILD,
+        sea_age=SEA_AGE_UNSET,
     ) -> np.ndarray:
+        # C3.2: validate sea_age shape before any state mutation.
+        if isinstance(sea_age, np.ndarray):
+            if sea_age.ndim != 1 or sea_age.shape[0] != n:
+                raise ValueError(
+                    f"sea_age array shape {sea_age.shape!r} does not "
+                    f"match expected ({n},); pass a scalar to broadcast "
+                    f"or a 1-D array of length n."
+                )
         old_n = self.pool.n
         new_n = old_n + n
 
@@ -240,6 +277,7 @@ class Population:
         new_arrays["natal_reach_id"][old_n:] = -1
         new_arrays["exit_branch_id"][old_n:] = -1
         new_arrays["origin"][old_n:] = origin
+        new_arrays["sea_age"][old_n:] = sea_age
 
         # Assign all AgentPool arrays at once
         for attr, arr in new_arrays.items():
