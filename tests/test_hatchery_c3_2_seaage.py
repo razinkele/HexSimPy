@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from salmon_ibm.agents import AgentPool
+from salmon_ibm.baltic_params import BalticBioParams
 from salmon_ibm.population import Population
 from salmon_ibm.sea_age import (
     SEA_AGE_1SW,
@@ -120,3 +121,46 @@ def test_adult_sea_age_mask_excludes_unset_and_garbage():
     np.testing.assert_array_equal(
         mask, [False, True, True, True, False, False]
     )
+
+
+def test_sea_age_distribution_default_loads():
+    """C3.2 test 1 (partial): default BalticBioParams has the wild
+    sea-age trinomial; validates non-empty + sums-to-1."""
+    p = BalticBioParams()
+    assert p.sea_age_distribution == {1: 0.35, 2: 0.55, 3: 0.10}
+    assert abs(sum(p.sea_age_distribution.values()) - 1.0) < 1e-9
+
+
+def test_sea_age_distribution_rejects_invalid():
+    """C3.2 test 2: __post_init__ raises on empty, non-summing, invalid
+    keys, nonpositive values, bool-as-int, and numpy-int keys."""
+    # Empty
+    with pytest.raises(ValueError, match=r"non-empty"):
+        BalticBioParams(sea_age_distribution={})
+
+    # Non-summing
+    with pytest.raises(ValueError, match=r"sum to 1.0"):
+        BalticBioParams(sea_age_distribution={1: 0.5, 2: 0.5, 3: 0.5})
+
+    # Invalid key (out of {1, 2, 3})
+    with pytest.raises(ValueError, match=r"keys must be in \{1, 2, 3\}"):
+        BalticBioParams(sea_age_distribution={0: 1.0})
+
+    # Nonpositive value
+    with pytest.raises(ValueError, match=r"positive floats"):
+        BalticBioParams(sea_age_distribution={1: -0.1, 2: 0.5, 3: 0.6})
+
+    # Bool key (type(True) is bool, NOT int — `type(k) is int` rejects it).
+    # Error message format is `f"got {type(k).__module__}.{type(k).__name__}"`,
+    # which renders as "got builtins.bool" — regex must allow the
+    # "builtins." prefix.
+    with pytest.raises(ValueError, match=r"got.*bool"):
+        BalticBioParams(sea_age_distribution={True: 0.5, 2: 0.25, 3: 0.25})
+
+    # Numpy int key — error message must include type name AND actionable
+    # hint (`int(k)`). Locks both halves of the spec's mandate so a
+    # regression that drops the actionable hint can't slip through.
+    with pytest.raises(ValueError, match=r"numpy\.int64.*int\(k\)"):
+        BalticBioParams(sea_age_distribution={
+            np.int64(1): 0.5, np.int64(2): 0.25, np.int64(3): 0.25,
+        })

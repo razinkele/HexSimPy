@@ -40,6 +40,7 @@ import numpy as np
 import yaml
 
 from salmon_ibm.bioenergetics import BioParams  # for BalticSpeciesConfig.wild type widening (used in Task 3)
+from salmon_ibm.sea_age import VALID_SEA_AGES
 
 
 @dataclass
@@ -92,6 +93,15 @@ class BalticBioParams:
     # right shape (matches Bouchard's mechanistic finding).
     pre_spawn_skip_prob: float = 0.0
 
+    # Sea-age distribution (C3.2). Trinomial over VALID_SEA_AGES.
+    # Wild baseline anchored to WGBAST annual-report ranges.
+    # Validated in __post_init__: keys ⊂ {1,2,3} (rejects bool AND
+    # numpy ints via `type(k) is int`), positive floats, sum to 1.0
+    # within 1e-6.
+    sea_age_distribution: dict[int, float] = field(
+        default_factory=lambda: {1: 0.35, 2: 0.55, 3: 0.10}
+    )
+
     def __post_init__(self):
         if self.T_AVOID <= self.T_OPT:
             raise ValueError(
@@ -129,6 +139,36 @@ class BalticBioParams:
             raise ValueError(
                 f"pre_spawn_skip_prob must be in [0, 1], got "
                 f"{self.pre_spawn_skip_prob!r}"
+            )
+        # C3.2: sea_age_distribution validation.
+        if not self.sea_age_distribution:
+            raise ValueError("sea_age_distribution must be non-empty")
+        for k, v in self.sea_age_distribution.items():
+            # type(k) is int — rejects bool (type(True) is bool) and
+            # numpy integer types (type(np.int64(1)) is np.int64).
+            # The error message includes type(k).__name__ so users see
+            # "got numpy.int64; pass int(k)" rather than a confusing
+            # "must be in {1,2,3}" when they passed numerically valid keys.
+            if type(k) is not int:
+                raise ValueError(
+                    f"sea_age_distribution keys must be Python int "
+                    f"(got {type(k).__module__}.{type(k).__name__} "
+                    f"for key {k!r}); cast via int(k) at the call site"
+                )
+            if k not in VALID_SEA_AGES:
+                raise ValueError(
+                    f"sea_age_distribution keys must be in {{1, 2, 3}}, "
+                    f"got {k!r}"
+                )
+            if not isinstance(v, (int, float)) or v <= 0:
+                raise ValueError(
+                    f"sea_age_distribution values must be positive floats, "
+                    f"got {k}: {v!r}"
+                )
+        total = sum(self.sea_age_distribution.values())
+        if abs(total - 1.0) > 1e-6:
+            raise ValueError(
+                f"sea_age_distribution must sum to 1.0, got {total!r}"
             )
 
     @property
