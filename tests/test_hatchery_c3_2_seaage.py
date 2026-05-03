@@ -583,3 +583,21 @@ def test_output_logger_emits_sea_age_column(tmp_path):
     df2 = logger2.to_dataframe()
     assert "sea_age" in df2.columns
     assert (df2["sea_age"].values == np.array([-1, 1, 2, 3], dtype=np.int8)).all()
+
+
+def test_compact_preserves_sea_age():
+    """C3.2 test 10: compact() preserves sea_age values for surviving
+    agents after mortality. Locks the ARRAY_FIELDS auto-handling
+    invariant against future refactors."""
+    pop = _make_population(n=4)
+    pop.pool.sea_age[:] = [SEA_AGE_1SW, SEA_AGE_2SW, SEA_AGE_3SW, SEA_AGE_1SW]
+    pop.pool.alive[:] = True
+    # Kill agents 0 and 2; survivors are at indices 1 and 3 with
+    # sea_age = [SW2, SW1].
+    pop.pool.alive[0] = False
+    pop.pool.alive[2] = False
+    pop.compact()
+    np.testing.assert_array_equal(
+        pop.pool.sea_age,
+        np.array([SEA_AGE_2SW, SEA_AGE_1SW], dtype=np.int8),
+    )
