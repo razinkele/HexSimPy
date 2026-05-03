@@ -72,12 +72,24 @@ def test_introduction_event_propagates_origin():
     # hatchery_dispatch is in the landscape. Provide a sentinel
     # HatcheryDispatch so the guard passes and we can verify origin
     # propagation (the actual test purpose).
-    from salmon_ibm.baltic_params import BalticBioParams, HatcheryDispatch
+    # C3.2 added a second guard requiring species_config to be Baltic
+    # for HATCHERY agents — provide a Baltic-aware species_config so
+    # the C3.2 sampling block uses the wild/hatchery distributions
+    # rather than raising "non-Baltic" on the synthetic landscape.
+    from salmon_ibm.baltic_params import (
+        BalticBioParams, BalticSpeciesConfig, HatcheryDispatch,
+    )
+    baltic_params = BalticBioParams()
     sentinel_hd = HatcheryDispatch(
-        params=BalticBioParams(),
+        params=baltic_params,
         activity_lut=np.ones(5),
     )
-    landscape = {"rng": np.random.default_rng(0), "hatchery_dispatch": sentinel_hd}
+    species_cfg = BalticSpeciesConfig(wild=baltic_params, hatchery=baltic_params)
+    landscape = {
+        "rng": np.random.default_rng(0),
+        "hatchery_dispatch": sentinel_hd,
+        "species_config": species_cfg,
+    }
 
     # Event base class requires `name`; trigger defaults to EveryStep.
     evt = IntroductionEvent(
