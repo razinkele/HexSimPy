@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from salmon_ibm.agents import AgentPool
+from salmon_ibm.population import Population
 from salmon_ibm.sea_age import (
     SEA_AGE_1SW,
     SEA_AGE_2SW,
@@ -56,9 +57,6 @@ def test_agentpool_initializes_sea_age_to_unset():
     assert pool.sea_age.dtype == np.int8
     assert pool.sea_age.shape == (10,)
     np.testing.assert_array_equal(pool.sea_age, np.full(10, SEA_AGE_UNSET))
-
-
-from salmon_ibm.population import Population
 
 
 def _make_population(n: int = 5) -> Population:

@@ -11,7 +11,7 @@ from salmon_ibm.agents import AgentPool
 from salmon_ibm.accumulators import AccumulatorManager
 from salmon_ibm.traits import TraitManager
 from salmon_ibm.origin import ORIGIN_WILD
-from salmon_ibm.sea_age import SEA_AGE_1SW, SEA_AGE_UNSET, VALID_SEA_AGES
+from salmon_ibm.sea_age import SEA_AGE_UNSET, VALID_SEA_AGES
 
 
 @dataclass
