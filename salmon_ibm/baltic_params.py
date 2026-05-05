@@ -102,6 +102,14 @@ class BalticBioParams:
         default_factory=lambda: {1: 0.35, 2: 0.55, 3: 0.10}
     )
 
+    # Homing precision (C3.3). Probability that a returning adult
+    # chooses its natal delta branch on first entry to any branch.
+    # Wild ~0.95 anchored to Vasemägi 2005 (doi:10.1038/sj.hdy.6800693)
+    # "more than twice the straying rate of wild conspecifics"
+    # implying wild straying ~5%. Validated in __post_init__:
+    # 0 ≤ p ≤ 1.
+    homing_precision: float = 0.95
+
     def __post_init__(self):
         if self.T_AVOID <= self.T_OPT:
             raise ValueError(
@@ -169,6 +177,12 @@ class BalticBioParams:
         if abs(total - 1.0) > 1e-6:
             raise ValueError(
                 f"sea_age_distribution must sum to 1.0, got {total!r}"
+            )
+        # C3.3: homing_precision validation.
+        if not (0.0 <= self.homing_precision <= 1.0):
+            raise ValueError(
+                f"homing_precision must be in [0, 1], got "
+                f"{self.homing_precision!r}"
             )
 
     @property
