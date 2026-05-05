@@ -34,7 +34,10 @@ class AgentPool:
         "arrived",
         "temp_history",
         "natal_reach_id",   # int8: cell's reach_id at introduction; -1 if pre-tagging
-        "exit_branch_id",   # int8: first delta-branch reach_id touched; sticky; -1 if never
+        "exit_branch_id",   # int8: delta-branch homing decision (C3.3:
+                            # -1=untagged, natal_rid=homed, ≠natal_rid=
+                            # strayed; set at first-touch via origin-aware
+                            # draw); sticky — never reset.
         "origin",           # int8: 0=wild, 1=hatchery; permanent at introduction
         "sea_age",          # int8: 1SW/2SW/3SW at introduction; -1 = sentinel
     )
