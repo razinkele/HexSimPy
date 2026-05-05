@@ -59,3 +59,41 @@ def test_homing_precision_loads_from_yaml():
     assert cfg.hatchery is not None
     assert cfg.hatchery.homing_precision == 0.65
     assert cfg.hatchery is not cfg.wild
+
+
+# --- Task 3: _BranchEntryCache + _branch_entry_cell -----------------------
+
+from salmon_ibm.delta_routing import _branch_entry_cell
+
+
+class _CacheTestMesh:
+    """Minimal mesh for testing _branch_entry_cell cache invalidation.
+    Only needs reach_id and reach_names attributes."""
+    def __init__(self, reach_id: np.ndarray, reach_names: list[str]):
+        self.reach_id = reach_id
+        self.reach_names = reach_names
+
+
+def test_branch_entry_cell_cache_invalidates_on_reassignment():
+    """C3.3 test 15: _BranchEntryCache uses identity comparison
+    (not id() int) — sound under CPython id-recycling. Reassigning
+    mesh.reach_id to a new array with a DIFFERENT min-index for the
+    branch must produce a fresh lookup, not return the cached old
+    min-index."""
+    # Original: branch rid=0 has cells at indices [3, 7, 9]; min = 3.
+    original = np.array([1, 1, 1, 0, 1, 1, 1, 0, 1, 0], dtype=np.int8)
+    mesh = _CacheTestMesh(
+        reach_id=original,
+        reach_names=["Atmata", "Skirvyte"],
+    )
+    M_old = _branch_entry_cell(mesh, branch_rid=0)
+    assert M_old == 3  # caches
+
+    # Reassign to a new array where rid=0's cells are now at [1, 5];
+    # min = 1 (DIFFERENT from cached 3 — load-bearing for the test).
+    new_arr = np.array([1, 0, 1, 1, 1, 0, 1, 1, 1, 1], dtype=np.int8)
+    assert np.where(new_arr == 0)[0].min() != M_old  # M_new != M_old
+    mesh.reach_id = new_arr
+
+    M_new = _branch_entry_cell(mesh, branch_rid=0)
+    assert M_new == 1  # NOT 3 — cache invalidated by identity check.

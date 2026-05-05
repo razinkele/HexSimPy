@@ -17,7 +17,13 @@ enforces this at runtime.
 """
 from __future__ import annotations
 
+import logging
+from dataclasses import dataclass, field
+
 import numpy as np
+
+from salmon_ibm.baltic_params import BalticBioParams
+from salmon_ibm.origin import ORIGIN_HATCHERY
 
 BRANCH_FRACTIONS: dict[str, float] = {
     "Skirvyte": 0.51,   # main flow to Kaliningrad / SW lagoon
@@ -32,6 +38,76 @@ if abs(_total - 1.0) >= 1e-9:
 del _total
 
 DELTA_BRANCH_REACHES: frozenset[str] = frozenset(BRANCH_FRACTIONS)
+
+ERR_HOMING_BRANCH_ENTRY_MISSING = "homing-branch-entry-missing"
+ERR_HOMING_HATCHERY_NO_DISPATCH = "homing-hatchery-no-dispatch"
+
+
+@dataclass
+class _BranchEntryCache:
+    """Cache of branch_rid → entry_cell, keyed on the identity of
+    the stored mesh.reach_id array.
+
+    Why a class (not two correlated attrs on the mesh): the cache
+    invariant ("stored_reach_id is mesh.reach_id") is invisible if
+    split across two raw attributes. A future caller introducing
+    dynamic mesh edits MUST be able to invalidate the cache via a
+    named method, not by setting two sentinel attrs in the right
+    order.
+
+    Identity comparison (NOT `id()` int): CPython reuses id() values
+    after GC, so `id()`-keyed caches can silently return stale
+    entries when mesh.reach_id is reassigned. `stored is not new`
+    is sound under id-recycling.
+
+    NOT detected: in-place mutation (`mesh.reach_id[k] = v`) leaves
+    array identity intact. Future dynamic-mesh tiers MUST call
+    `mesh._branch_entry_cache.invalidate()` after in-place mutations.
+    """
+    stored_reach_id: np.ndarray | None = None
+    cells: dict[int, int] = field(default_factory=dict)
+
+    def get(self, mesh, branch_rid: int) -> int:
+        """Return the cached entry cell for branch_rid, rebuilding
+        on identity mismatch."""
+        if self.stored_reach_id is not mesh.reach_id:
+            self.stored_reach_id = mesh.reach_id
+            self.cells = {}
+        if branch_rid not in self.cells:
+            matches = np.where(mesh.reach_id == branch_rid)[0]
+            self.cells[branch_rid] = (
+                int(matches.min()) if len(matches) > 0 else -1
+            )
+        return self.cells[branch_rid]
+
+    def invalidate(self) -> None:
+        """Force full rebuild on next get() call. Required after
+        in-place mutation of mesh.reach_id (no production path
+        currently does this; documented for future dynamic-mesh
+        tiers)."""
+        self.stored_reach_id = None
+        self.cells = {}
+
+
+def _branch_entry_cell(mesh, branch_rid: int) -> int:
+    """Return a deterministic cell of branch_rid for teleport target.
+
+    Returns the lowest-index cell with reach_id == branch_rid. This
+    is a layout artifact, NOT the seaward-most cell. Acceptable
+    because UPSTREAM movement disperses the post-teleport cluster
+    within ~5 steps. Hydrologically-correct entry-cell selection is
+    deferred to a future tier.
+
+    Returns -1 if no cells match. By contract, this should never be
+    reachable at runtime: the init-time invariant
+    `assert_branch_topology` checks all branch_rids have cells
+    BEFORE any agent moves.
+    """
+    cache = getattr(mesh, "_branch_entry_cache", None)
+    if cache is None:
+        cache = _BranchEntryCache()
+        mesh._branch_entry_cache = cache
+    return cache.get(mesh, branch_rid)
 
 
 def split_discharge(q_total: float | np.ndarray) -> dict[str, np.ndarray]:
