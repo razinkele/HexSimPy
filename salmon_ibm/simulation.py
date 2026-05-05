@@ -298,6 +298,10 @@ class Simulation:
         # Routes to BalticSpeciesConfig always (unified return type since Task 3).
         loaded = load_bio_params_from_config(config)  # always BalticSpeciesConfig
         self._species_config = loaded  # cached for rebuild_luts() — no per-slider disk I/O
+        # C3.3: init-time invariant — fail fast if delta branch topology
+        # is inconsistent (missing branches or BRANCH_FRACTIONS mismatch).
+        # No-op for non-Baltic / legacy meshes.
+        delta_routing.assert_branch_topology(self.mesh)
         self.bio_params = loaded.wild
         if loaded.hatchery is not None:
             hatch_lut = self._build_activity_lut_for(
@@ -471,7 +475,9 @@ class Simulation:
 
     def _event_update_exit_branch(self, population, landscape, t, mask):
         """First-touch sticky tagging of exit_branch_id by delta branch."""
-        delta_routing.update_exit_branch_id(population.pool, self.mesh)
+        delta_routing.update_exit_branch_id(
+            population.pool, self.mesh, landscape=landscape,
+        )
 
     def _event_fish_predation(self, population, landscape, t, mask):
         """Per-cell Bernoulli mortality from fish predation.
