@@ -107,6 +107,13 @@ species:
       2: 0.55
       3: 0.10
 
+    # Probability that a returning adult chooses its natal delta
+    # branch on first entry to any branch. Wild ~0.95 anchored to
+    # Vasemägi 2005 (doi:10.1038/sj.hdy.6800693). See
+    # docs/scientific-foundations-hatchery-wild.md §7 for full
+    # provenance, calibration sweep, and scope-OUT items.
+    homing_precision: 0.95
+
     hatchery_overrides:
       activity_by_behavior:
         1: 1.5     # RANDOM:  +25% (1.2 → 1.5)
@@ -159,3 +166,13 @@ species:
         1: 0.55
         2: 0.40
         3: 0.05
+
+      # Hatchery shift toward straying. Anchors:
+      # Vasemägi 2005 (doi:10.1038/sj.hdy.6800693) — primary
+      # Insulander 2001 (doi:10.1046/j.1365-2400.2001.00177.x)
+      # Källo 2022 (doi:10.1093/icesjms/fsac079)
+      # Jokikokko 2006 (doi:10.1111/j.0022-1112.2006.00892.x)
+      # Sweep ∈ {0.45, 0.55, 0.65, 0.75}; cap 0.85. See
+      # docs/scientific-foundations-hatchery-wild.md §7 for full
+      # provenance.
+      homing_precision: 0.65

@@ -254,8 +254,12 @@ def _apply_hatchery_overrides(
         "activity_by_behavior",
         "pre_spawn_skip_prob",
         "sea_age_distribution",
+        "homing_precision",  # NEW (C3.3)
     }
-    SCALAR_OVERRIDE_FIELDS = {"pre_spawn_skip_prob"}
+    SCALAR_OVERRIDE_FIELDS = {
+        "pre_spawn_skip_prob",
+        "homing_precision",  # NEW (C3.3)
+    }
     VALID_BEHAVIORS = {int(b) for b in Behavior}
 
     unknown = set(overrides) - ALLOWED_OVERRIDE_KEYS
