@@ -323,3 +323,147 @@ def test_homing_atomic_on_branch_entry_cell_failure(monkeypatch):
         update_exit_branch_id(pool, mesh, landscape=landscape)
     np.testing.assert_array_equal(pool.exit_branch_id, pre_exit)
     np.testing.assert_array_equal(pool.tri_idx, pre_tri)
+
+
+# --- Task 8: integration tests 10/11b/13/14 ------------------------------
+
+def test_homing_baltic_default_distribution():
+    """C3.3 test 10: mixed wild + hatchery cohort with full Baltic
+    config; exit_branch_id distribution matches expected mixture
+    PER ORIGIN (not just the cohort marginal — would mask a
+    precision-swap bug)."""
+    from salmon_ibm.origin import ORIGIN_WILD, ORIGIN_HATCHERY
+    mesh = _BalticTestMesh()
+    n_per = 10000
+    pool = _make_pool_with_origin(2 * n_per, origin_value=ORIGIN_WILD, natal_rid=0)
+    pool.origin[n_per:] = ORIGIN_HATCHERY
+    landscape = _make_baltic_landscape(seed=12345)
+    update_exit_branch_id(pool, mesh, landscape=landscape)
+
+    wild_mask = pool.origin == ORIGIN_WILD
+    hatch_mask = pool.origin == ORIGIN_HATCHERY
+    wild_counts = np.bincount(pool.exit_branch_id[wild_mask], minlength=3)
+    hatch_counts = np.bincount(pool.exit_branch_id[hatch_mask], minlength=3)
+
+    # Wild (p=0.95): expected Atmata=9500, Skirvyte=350, Gilija=150.
+    assert 9400 <= wild_counts[0] <= 9600, f"wild Atmata {wild_counts[0]}"
+    assert 250 <= wild_counts[1] <= 450, f"wild Skirvyte {wild_counts[1]}"
+    assert 90 <= wild_counts[2] <= 210, f"wild Gilija {wild_counts[2]}"
+
+    # Hatchery (p=0.65): expected Atmata=6500, Skirvyte=2444, Gilija=1056.
+    assert 6300 <= hatch_counts[0] <= 6700, f"hatch Atmata {hatch_counts[0]}"
+    assert 2244 <= hatch_counts[1] <= 2644, f"hatch Skirvyte {hatch_counts[1]}"
+    assert 856 <= hatch_counts[2] <= 1256, f"hatch Gilija {hatch_counts[2]}"
+
+
+import logging
+
+
+def test_homing_cross_pop_hatchery_warning_emitted(caplog):
+    """C3.3 test 13: ORIGIN_HATCHERY agent + hatchery_dispatch=None
+    + Baltic species_config + natal=Atmata (delta branch — load-
+    bearing for entering homing dispatch path, not passive
+    fallback). Warning emitted via stdlib logging at logger
+    'salmon_ibm.delta_routing'; wild-precision fallback runs to
+    completion."""
+    from salmon_ibm.origin import ORIGIN_HATCHERY
+    caplog.set_level(logging.WARNING, logger="salmon_ibm.delta_routing")
+    mesh = _BalticTestMesh()
+    pool = _make_pool_with_origin(1, origin_value=ORIGIN_HATCHERY, natal_rid=0)
+    cfg = load_baltic_species_config(CONFIG_PATH)
+    landscape = {
+        "rng": np.random.default_rng(12345),
+        "species_config": cfg,
+        "hatchery_dispatch": None,  # CROSS-POP MISMATCH
+    }
+    update_exit_branch_id(pool, mesh, landscape=landscape)
+
+    matching_records = [
+        r for r in caplog.records
+        if r.name == "salmon_ibm.delta_routing"
+        and "homing-hatchery-no-dispatch" in r.getMessage()
+    ]
+    assert matching_records, (
+        f"Expected ERR_HOMING_HATCHERY_NO_DISPATCH warning; got "
+        f"records: {[(r.name, r.getMessage()) for r in caplog.records]!r}"
+    )
+    branch_rids_set = set(int(r) for r in _branch_reach_ids(mesh))
+    assert int(pool.exit_branch_id[0]) in branch_rids_set, (
+        f"exit_branch_id {pool.exit_branch_id[0]} not in branch_rids_set "
+        f"{branch_rids_set} — wild-precision fallback may not have "
+        f"run to completion."
+    )
+
+
+def test_homing_empty_target_cohort_is_noop():
+    """C3.3 test 14: when no agents are on a delta branch (target
+    mask is all False), update_exit_branch_id is a clean no-op:
+    no mutation, no exception, even with full Baltic landscape."""
+    from salmon_ibm.origin import ORIGIN_HATCHERY
+    mesh = _BalticTestMesh()
+    pool = _make_pool_with_origin(5, origin_value=ORIGIN_HATCHERY, natal_rid=0)
+    pool.tri_idx[:] = -1  # off-mesh: target mask filters out
+    landscape = _make_baltic_landscape(seed=12345)
+    pre_exit = pool.exit_branch_id.copy()
+    pre_tri = pool.tri_idx.copy()
+    update_exit_branch_id(pool, mesh, landscape=landscape)
+    np.testing.assert_array_equal(pool.exit_branch_id, pre_exit)
+    np.testing.assert_array_equal(pool.tri_idx, pre_tri)
+
+
+import ast
+import inspect
+import io
+import tokenize
+
+
+def test_homing_dispatch_commit_outside_try_block():
+    """C3.3 test 11b: structural atomicity — the vectorised commit
+    lines (pool.exit_branch_id[...] = ... ; pool.tri_idx[...] = ...)
+    MUST be at the same lexical scope as the for-loop, NOT inside
+    any try/except/finally. Tokenize + AST hybrid:
+    1. Get source text via inspect.getsource.
+    2. Find COMMENT token containing 'C3.3-ATOMIC-COMMIT' via tokenize.
+    3. Parse with ast and build parent map.
+    4. Find the two Assign nodes after the marker line.
+    5. Assert no Try ancestor in their parent chain.
+    """
+    from salmon_ibm import delta_routing
+
+    source = inspect.getsource(delta_routing.update_exit_branch_id)
+    marker_line = None
+    for tok in tokenize.tokenize(io.BytesIO(source.encode()).readline):
+        if tok.type == tokenize.COMMENT and "C3.3-ATOMIC-COMMIT" in tok.string:
+            marker_line = tok.start[0]
+            break
+    assert marker_line is not None, (
+        "C3.3-ATOMIC-COMMIT marker comment missing from "
+        "update_exit_branch_id — did a refactor remove it?"
+    )
+
+    tree = ast.parse(source)
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            child._parent = parent
+
+    post_marker_assigns = sorted(
+        [n for n in ast.walk(tree) if isinstance(n, ast.Assign) and n.lineno > marker_line],
+        key=lambda n: n.lineno,
+    )
+    assert len(post_marker_assigns) >= 2, (
+        "Expected at least 2 Assign nodes after the marker; got "
+        f"{len(post_marker_assigns)}."
+    )
+
+    for assign in post_marker_assigns[:2]:
+        node = assign
+        while hasattr(node, "_parent"):
+            node = node._parent
+            if isinstance(node, ast.FunctionDef):
+                break
+            assert not isinstance(node, ast.Try), (
+                f"Atomicity violation: Assign at line {assign.lineno} "
+                f"is inside a Try block. The C3.3-ATOMIC-COMMIT "
+                f"vectorised commit must NOT be wrapped in "
+                f"try/except/finally."
+            )
