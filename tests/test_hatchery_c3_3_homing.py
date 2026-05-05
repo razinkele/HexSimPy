@@ -139,3 +139,187 @@ def test_assert_branch_topology_raises_on_missing_fractions_entry():
         reach_names = ["Skirvyte", "Atmata", "Rusne"]
     with pytest.raises(ValueError, match=r"BRANCH_FRACTIONS"):
         assert_branch_topology(_MissingFractionsMesh())
+
+
+# --- Task 6: update_exit_branch_id origin-aware dispatch -----------------
+
+from salmon_ibm.delta_routing import (
+    BRANCH_FRACTIONS,
+    update_exit_branch_id,
+    _branch_reach_ids,
+)
+from salmon_ibm.bioenergetics import BioParams
+
+
+class _BalticTestMesh:
+    """Minimal Baltic-style mesh for C3.3 dispatch tests.
+
+    Layout: cells 0-4 = Atmata (rid=0), cells 5-9 = Skirvyte (rid=1),
+    cells 10-14 = Gilija (rid=2). 15 cells total. reach_names matches
+    BRANCH_FRACTIONS keys exactly so assert_branch_topology passes.
+    """
+    def __init__(self):
+        self.reach_id = np.concatenate([
+            np.full(5, 0, dtype=np.int8),   # Atmata
+            np.full(5, 1, dtype=np.int8),   # Skirvyte
+            np.full(5, 2, dtype=np.int8),   # Gilija
+        ])
+        self.reach_names = ["Atmata", "Skirvyte", "Gilija"]
+
+
+def _make_baltic_landscape(seed: int = 12345, *, hatchery: bool = True):
+    """Helper: minimal Baltic-configured landscape for homing tests."""
+    from salmon_ibm.baltic_params import HatcheryDispatch
+    cfg = load_baltic_species_config(CONFIG_PATH)
+    if hatchery:
+        hd = HatcheryDispatch(
+            params=cfg.hatchery,
+            activity_lut=np.ones(5, dtype=np.float64),
+        )
+    else:
+        hd = None
+    return {
+        "rng": np.random.default_rng(seed),
+        "species_config": cfg,
+        "hatchery_dispatch": hd,
+    }
+
+
+def _make_pool_with_origin(n: int, *, origin_value: int, natal_rid: int = 0):
+    """Helper: pool with N agents, all on Atmata (cell 0), tagged with
+    origin and natal_reach_id."""
+    class _DispatchPool:
+        pass
+    pool = _DispatchPool()
+    pool.tri_idx = np.zeros(n, dtype=np.intp)  # all on cell 0 = Atmata
+    pool.alive = np.ones(n, dtype=bool)
+    pool.exit_branch_id = np.full(n, -1, dtype=np.int8)
+    pool.natal_reach_id = np.full(n, natal_rid, dtype=np.int8)
+    pool.origin = np.full(n, origin_value, dtype=np.int8)
+    return pool
+
+
+def test_wild_perfect_homing_at_p_one(monkeypatch):
+    """C3.3 test 4: p=1.0, N=10000 wild agents — exact equality
+    (deterministic, no tolerance band). All agents must end up
+    in their natal branch (Atmata, rid=0)."""
+    from salmon_ibm.origin import ORIGIN_WILD
+    mesh = _BalticTestMesh()
+    pool = _make_pool_with_origin(10000, origin_value=ORIGIN_WILD, natal_rid=0)
+    landscape = _make_baltic_landscape(seed=12345, hatchery=False)
+    monkeypatch.setattr(
+        landscape["species_config"].wild, "homing_precision", 1.0,
+    )
+    update_exit_branch_id(pool, mesh, landscape=landscape)
+    assert (pool.exit_branch_id == 0).all()
+
+
+def test_hatchery_strays_at_p_zero(monkeypatch):
+    """C3.3 test 5: p=0.0, N=10000 hatchery agents distribute across
+    non-natal branches with BRANCH_FRACTIONS-renormalised weights.
+    Natal=Atmata; non-natal stray weights:
+    Skirvyte 0.51/0.73=0.6986, Gilija 0.22/0.73=0.3014.
+    Expected counts at N=10000: Skirvyte ~6986, Gilija ~3014."""
+    from salmon_ibm.origin import ORIGIN_HATCHERY
+    mesh = _BalticTestMesh()
+    pool = _make_pool_with_origin(10000, origin_value=ORIGIN_HATCHERY, natal_rid=0)
+    landscape = _make_baltic_landscape(seed=12345)
+    monkeypatch.setattr(
+        landscape["hatchery_dispatch"].params, "homing_precision", 0.0,
+    )
+    update_exit_branch_id(pool, mesh, landscape=landscape)
+    assert (pool.exit_branch_id != 0).all()
+    counts = np.bincount(pool.exit_branch_id, minlength=3)
+    assert 6800 <= counts[1] <= 7200, f"Skirvyte count {counts[1]}"
+    assert 2800 <= counts[2] <= 3200, f"Gilija count {counts[2]}"
+
+
+def test_homing_skipped_if_natal_not_branch():
+    """C3.3 test 6: agent with natal_reach_id NOT in branch_rids_set
+    falls through to passive first-touch tag."""
+    from salmon_ibm.origin import ORIGIN_HATCHERY
+    mesh = _BalticTestMesh()
+    pool = _make_pool_with_origin(
+        5, origin_value=ORIGIN_HATCHERY, natal_rid=99,
+    )
+    landscape = _make_baltic_landscape(seed=12345)
+    update_exit_branch_id(pool, mesh, landscape=landscape)
+    # Agents on Atmata (cur_reach=0) get exit_branch_id=0 via passive tag.
+    assert (pool.exit_branch_id == 0).all()
+
+
+def test_homing_skipped_if_non_baltic():
+    """C3.3 test 7: legacy non-Baltic species_config (wild = plain
+    BioParams) → falls through to passive first-touch tag."""
+    from salmon_ibm.origin import ORIGIN_WILD
+    mesh = _BalticTestMesh()
+    pool = _make_pool_with_origin(5, origin_value=ORIGIN_WILD, natal_rid=0)
+    legacy_cfg = BalticSpeciesConfig(wild=BioParams(), hatchery=None)
+    landscape = {
+        "rng": np.random.default_rng(0),
+        "species_config": legacy_cfg,
+        "hatchery_dispatch": None,
+    }
+    update_exit_branch_id(pool, mesh, landscape=landscape)
+    assert (pool.exit_branch_id == 0).all()
+
+
+def test_homing_teleports_to_entry_cell(monkeypatch):
+    """C3.3 test 8: when drawn ≠ current, agent's tri_idx lands on
+    the cached `_branch_entry_cell` of drawn branch; exit_branch_id
+    matches drawn."""
+    from salmon_ibm.origin import ORIGIN_WILD
+    mesh = _BalticTestMesh()
+    pool = _make_pool_with_origin(1, origin_value=ORIGIN_WILD, natal_rid=0)
+    landscape = _make_baltic_landscape(seed=12345, hatchery=False)
+    monkeypatch.setattr(
+        landscape["species_config"].wild, "homing_precision", 0.0,
+    )
+    update_exit_branch_id(pool, mesh, landscape=landscape)
+    drawn = pool.exit_branch_id[0]
+    assert drawn in (1, 2)
+    expected_cell = 5 if drawn == 1 else 10
+    assert pool.tri_idx[0] == expected_cell
+
+
+def test_homing_no_teleport_when_drawn_equals_current(monkeypatch):
+    """C3.3 test 9: when drawn == current, tri_idx is UNCHANGED;
+    only exit_branch_id is set (no spurious teleport)."""
+    from salmon_ibm.origin import ORIGIN_WILD
+    mesh = _BalticTestMesh()
+    pool = _make_pool_with_origin(1, origin_value=ORIGIN_WILD, natal_rid=0)
+    pool.tri_idx[0] = 2  # specific Atmata cell (not entry cell 0)
+    landscape = _make_baltic_landscape(seed=12345, hatchery=False)
+    monkeypatch.setattr(
+        landscape["species_config"].wild, "homing_precision", 1.0,
+    )
+    update_exit_branch_id(pool, mesh, landscape=landscape)
+    assert pool.exit_branch_id[0] == 0  # Atmata
+    assert pool.tri_idx[0] == 2  # UNCHANGED — no teleport
+
+
+def test_homing_atomic_on_branch_entry_cell_failure(monkeypatch):
+    """C3.3 test 11: inject mock that raises in `_branch_entry_cell`;
+    assert no pool field is mutated."""
+    from salmon_ibm.origin import ORIGIN_HATCHERY
+    from salmon_ibm import delta_routing
+    mesh = _BalticTestMesh()
+    pool = _make_pool_with_origin(3, origin_value=ORIGIN_HATCHERY, natal_rid=0)
+    landscape = _make_baltic_landscape(seed=12345)
+    monkeypatch.setattr(
+        landscape["hatchery_dispatch"].params, "homing_precision", 0.0,
+    )
+    call_count = {"n": 0}
+    original = delta_routing._branch_entry_cell
+    def _failing(mesh_arg, branch_rid):
+        call_count["n"] += 1
+        if call_count["n"] >= 2:
+            raise RuntimeError("injected mid-loop failure")
+        return original(mesh_arg, branch_rid)
+    monkeypatch.setattr(delta_routing, "_branch_entry_cell", _failing)
+    pre_exit = pool.exit_branch_id.copy()
+    pre_tri = pool.tri_idx.copy()
+    with pytest.raises(RuntimeError, match=r"injected mid-loop"):
+        update_exit_branch_id(pool, mesh, landscape=landscape)
+    np.testing.assert_array_equal(pool.exit_branch_id, pre_exit)
+    np.testing.assert_array_equal(pool.tri_idx, pre_tri)

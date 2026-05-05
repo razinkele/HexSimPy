@@ -55,6 +55,13 @@ class _FakePool:
         self.tri_idx = np.asarray(tri_idx, dtype=np.int64)
         self.alive = np.asarray(alive, dtype=bool)
         self.exit_branch_id = np.asarray(exit_branch_id, dtype=np.int8)
+        # C3.3 backward-compat: update_exit_branch_id reads these
+        # via the Baltic dispatch path; keyword-only landscape=None
+        # default routes the existing tests through the passive-tag
+        # short-circuit, but the attributes must still exist.
+        n = self.tri_idx.size
+        self.natal_reach_id = np.full(n, -1, dtype=np.int8)
+        self.origin = np.zeros(n, dtype=np.int8)  # ORIGIN_WILD
 
 
 class _FakeMesh:

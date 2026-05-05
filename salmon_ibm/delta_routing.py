@@ -218,21 +218,30 @@ def _branch_reach_ids(mesh) -> np.ndarray:
     return rids
 
 
-def update_exit_branch_id(pool, mesh) -> None:
-    """First-touch sticky tagging of pool.exit_branch_id by delta branch.
+def update_exit_branch_id(pool, mesh, *, landscape=None) -> None:
+    """First-touch tagging of pool.exit_branch_id by delta branch.
 
-    Mutates pool.exit_branch_id in place. For each alive agent currently in
-    a delta-branch reach (Atmata/Skirvyte/Gilija) whose exit_branch_id is
-    still -1, sets it to the current reach_id. Once written, never resets
-    — first-touch is the science contract.
+    Two paths:
 
-    No-op when the mesh has no reach_names (TriMesh / HexMesh fallbacks).
+    (A) PASSIVE (legacy, pre-C3.3 behavior). Triggered when
+        landscape is None OR species_config is missing/non-Baltic
+        OR agent's natal_reach_id is not a delta branch.
+
+    (B) HOMING-BIASED (C3.3). Triggered when landscape has a
+        Baltic species_config AND the agent's natal_reach_id IS a
+        delta branch. Draws the chosen branch via origin-aware
+        homing-precision; teleports on stray. Atomicity:
+        stage-then-commit (no mid-loop pool mutation).
+
+    Spec: docs/superpowers/specs/2026-05-03-hatchery-c3.3-homing-design.md
     """
     if not getattr(mesh, "reach_names", None):
-        return
+        return  # legacy mesh fallback (TriMesh / HexMesh)
     branch_rids = _branch_reach_ids(mesh)
     if len(branch_rids) == 0:
         return
+
+    # Prelude (mirrors pre-C3.3 logic).
     tri = pool.tri_idx
     safe_tri = np.where(tri >= 0, tri, 0)
     cur_reach = mesh.reach_id[safe_tri]
@@ -240,5 +249,96 @@ def update_exit_branch_id(pool, mesh) -> None:
     on_mesh = tri >= 0
     untagged = pool.exit_branch_id == -1
     target = is_branch & untagged & pool.alive & on_mesh
-    if target.any():
-        pool.exit_branch_id[target] = cur_reach[target]
+    if not target.any():
+        return
+    target_indices = np.where(target)[0]
+
+    # Path (A): no Baltic species_config OR no landscape — passive tag.
+    species_cfg = landscape.get("species_config") if landscape else None
+    is_baltic = (
+        species_cfg is not None
+        and isinstance(species_cfg.wild, BalticBioParams)
+    )
+    if not is_baltic:
+        _first_touch_passive_tag(pool, target_indices, cur_reach)
+        return
+
+    # Path (B): Baltic — origin-aware homing draw with atomicity.
+    hd = landscape.get("hatchery_dispatch")
+    if "rng" not in landscape:
+        raise ValueError(
+            "Baltic homing dispatch requires landscape['rng']; got "
+            f"keys: {sorted(landscape.keys())!r}. Calibration runs "
+            "rely on a seeded RNG; a default rng would break "
+            "reproducibility silently."
+        )
+    rng = landscape["rng"]
+    branch_rids_set = set(int(r) for r in branch_rids)
+    n_targets = len(target_indices)
+    staged_rid = np.full(n_targets, -1, dtype=np.int8)
+    staged_cell = np.full(n_targets, -1, dtype=np.intp)
+    is_homing_decision = np.zeros(n_targets, dtype=bool)
+    passive_indices: list[int] = []
+
+    for k, i in enumerate(target_indices):
+        natal_rid = int(pool.natal_reach_id[i])
+        if natal_rid not in branch_rids_set:
+            passive_indices.append(i)
+            continue
+
+        if pool.origin[i] == ORIGIN_HATCHERY:
+            if hd is None:
+                logging.getLogger(__name__).warning(
+                    "%s: ORIGIN_HATCHERY agent %d at homing time but "
+                    "hatchery_dispatch is None — falling back to wild "
+                    "homing precision (Vasemägi 2005 wild baseline). "
+                    "Likely SwitchPopulationEvent crossed populations "
+                    "with mismatched hatchery configs. See spec "
+                    "out-of-scope: 'Cross-population transfer "
+                    "alignment'.",
+                    ERR_HOMING_HATCHERY_NO_DISPATCH,
+                    int(i),
+                )
+                p_home = species_cfg.wild.homing_precision
+            else:
+                p_home = hd.params.homing_precision
+        else:
+            p_home = species_cfg.wild.homing_precision
+
+        non_natal = [b for b in branch_rids_set if b != natal_rid]
+        stray_w = np.array(
+            [branch_stray_weight(b, mesh) for b in non_natal],
+            dtype=np.float64,
+        )
+        stray_w /= stray_w.sum()
+        all_branches = np.array([natal_rid] + non_natal, dtype=np.int8)
+        all_probs = np.concatenate([[p_home], (1 - p_home) * stray_w])
+
+        drawn_rid = int(rng.choice(all_branches, p=all_probs))
+        staged_rid[k] = drawn_rid
+        is_homing_decision[k] = True
+
+        if drawn_rid != int(cur_reach[i]):
+            entry_cell = _branch_entry_cell(mesh, drawn_rid)
+            if entry_cell < 0:
+                raise RuntimeError(
+                    f"_branch_entry_cell returned -1 for branch_rid "
+                    f"{drawn_rid} during homing dispatch. This should "
+                    f"have been caught at simulation init by "
+                    f"assert_branch_topology(). Likely cause: mesh "
+                    f"mutated post-init."
+                )
+            staged_cell[k] = entry_cell
+
+    # C3.3-ATOMIC-COMMIT — vectorised commit (atomic per-agent
+    # across the batch). MUST stay at the same lexical scope as the
+    # for-loop above; MUST NOT be inside try/except/finally. This
+    # marker comment is referenced by test 11b's AST anchor — do
+    # not remove or rename without updating the test.
+    homing_idx = target_indices[is_homing_decision]
+    pool.exit_branch_id[homing_idx] = staged_rid[is_homing_decision]
+    teleport_mask = staged_cell >= 0
+    pool.tri_idx[target_indices[teleport_mask]] = staged_cell[teleport_mask]
+    if passive_indices:
+        passive_arr = np.array(passive_indices, dtype=np.intp)
+        _first_touch_passive_tag(pool, passive_arr, cur_reach)
