@@ -110,6 +110,30 @@ def _branch_entry_cell(mesh, branch_rid: int) -> int:
     return cache.get(mesh, branch_rid)
 
 
+def branch_stray_weight(branch_rid: int, mesh) -> float:
+    """Look up BRANCH_FRACTIONS by branch_rid, NOT by name.
+
+    BRANCH_FRACTIONS is name-keyed (Skirvyte/Atmata/Gilija). This
+    wraps the int→str→float chain so dispatch call sites are
+    int-keyed only. Future tributary-tier topology changes that
+    add/remove branches localise the breakage to this helper.
+    """
+    return BRANCH_FRACTIONS[mesh.reach_names[branch_rid]]
+
+
+def _first_touch_passive_tag(
+    pool, indices: np.ndarray, cur_reach: np.ndarray
+) -> None:
+    """Vectorised passive first-touch tag (legacy pre-C3.3 behavior).
+
+    Sets pool.exit_branch_id[indices] = cur_reach[indices]. Used as
+    the fall-through path for non-Baltic / non-delta-natal /
+    landscape-missing scenarios. Extracted so future tiers can reuse
+    the "passive observer" semantics without re-deriving them.
+    """
+    pool.exit_branch_id[indices] = cur_reach[indices]
+
+
 def split_discharge(q_total: float | np.ndarray) -> dict[str, np.ndarray]:
     """Apply BRANCH_FRACTIONS to a Nemunas climatology (scalar or (T,) array).
 
