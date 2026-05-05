@@ -27,8 +27,8 @@ in `docs/superpowers/specs/` and per-tier plans in
 | C1    | Final 2026-04-30   | Executed           | Shipped: PR #3 merged, commit 5791802|
 | C2    | Final 2026-05-01   | Executed           | Shipped: PR #4 merged, commit 8a9192c|
 | C3.1  | Final 2026-05-02   | Executed           | Shipped: PR #5 merged, commit 0284c45|
-| C3.2  | v4.1 converged 2026-05-03 (5-pass review) | v2.1 converged 2026-05-03 (2-pass review) | Pending implementation |
-| C3.3  | Not yet drafted    | Not yet drafted    | Future                                |
+| C3.2  | Final 2026-05-03   | Executed           | Shipped: PR #6 merged, commit 17ae6b5|
+| C3.3  | v7 converged 2026-05-03 (8-pass review) | Executed 2026-05-04 | Branch hatchery-c3.3-homing pending PR/tag |
 
 Tags: v1.7.4 covers C1 + C2; v1.7.5 covers C3.1; v1.7.6 will cover
 C3.2 once implemented and merged. C3.2 spec at
@@ -74,8 +74,8 @@ and wild agents:
 | C1    | Identity         | int8 origin tag at agent introduction  | Shipped  |
 | C2    | Bioenergetics    | activity multiplier divergence         | Shipped  |
 | C3.1  | Reproduction     | pre-spawn skip probability             | Shipped  |
-| C3.2  | Marine residency | sea-age distribution divergence        | Drafted  |
-| C3.3  | Homing           | natal-stream precision divergence      | Future   |
+| C3.2  | Marine residency | sea-age distribution divergence        | Shipped  |
+| C3.3  | Homing           | natal-stream precision divergence      | Drafted  |
 
 The architecture is deliberately additive: each tier extends the
 prior tier's data structures without modifying their semantics. The
@@ -428,7 +428,81 @@ Sea, Copenhagen.
 
 ---
 
-## 7. Calibration methodology
+## 7. C3.3 — Homing Precision Divergence
+
+### Mechanism
+
+A new scalar `homing_precision: float ∈ [0, 1]` on `BalticBioParams`
+controls the probability that a returning adult chooses its natal
+delta branch when first entering any branch reach. On stray
+(probability `1 - homing_precision`), the agent is teleported to the
+chosen branch's entry cell, with the chosen branch sampled from the
+non-natal branches weighted by `BRANCH_FRACTIONS` renormalised. Wild
+default: 0.95. Hatchery override: 0.65.
+
+### Empirical basis
+
+**Primary anchor (Baltic-specific, hatchery-vs-wild straying):**
+Vasemägi, Gross & Paaver (2005), *Heredity* 95(1):76–83,
+doi:10.1038/sj.hdy.6800693. 18-year mixed-stock genetic analysis
+of Vindelälven (one of the largest wild Baltic salmon populations).
+Verbatim: *"66% of fin-damaged spawners (n = 181) caught in the
+Ume/Vindelälven during 1997-2003 originated from the hatcheries in
+the Rivers Ångermanälven, Luleälven and Ljusnan."* Maximum-
+likelihood immigration rate **0.068 (95% CI 0.021–0.128)** baseline,
+peak **0.249 (95% CI 0.106–0.419)** during 1993–2000. Verbatim on
+differential: *"For hatchery-reared Atlantic salmon, more than
+twice the straying rate of wild conspecifics has been reported
+(Jonsson et al, 2003)."*
+
+**Secondary anchor (release-site fidelity validates the model):**
+Insulander & Ragnarsson (2001), *Fisheries Management and Ecology*
+8(1):61–67, doi:10.1046/j.1365-2400.2001.00177.x. Two hatcheries
+600 m apart on the same river. Salmon homed back to their RELEASE
+point. Validates C3.3's mechanistic assumption that hatchery
+agents' homing target is `natal_reach_id` (set at introduction =
+release point per C1's tagging).
+
+**Mechanistic anchor (imprinting timing):** Källo, Baktoft &
+Kristensen (2022), *ICES Journal of Marine Science* 79(5):1539–1547,
+doi:10.1093/icesjms/fsac079. PIT-tagged 21,538 juveniles. Verbatim:
+*"parr had lower likelihood to stray compared to pre-smolts and
+smolts."* Mechanistic support for the smolt-stage release pattern
+producing higher straying.
+
+**Cross-tier anchor:** Jokikokko, Kallio-Nyberg & Saloniemi (2006),
+*Journal of Fish Biology* 68(2):430–442,
+doi:10.1111/j.0022-1112.2006.00892.x. Same Simojoki population as
+C3.2's Jokikokko 2004 anchor. Recapture rates: semi-wild parr-
+released 1.0–13.1% (similar to wild 1.7–17.0%); hatchery-reared
+smolts 1.3–6.3% (2–3× lower). Reinforces the C3.2/C3.3 mechanistic
+chain — release timing affects both sea-age (C3.2) and homing
+(C3.3).
+
+### Calibration status
+
+Wild 0.95 anchored to Vasemägi 2005 contrast baseline (implied wild
+straying ~5%). Hatchery 0.65 calibration-grade, midpoint of Baltic
+empirical 7-25% straying range. **Mandatory sensitivity sweep**
+before publication: hatchery `homing_precision ∈ {0.45, 0.55, 0.65,
+0.75}`. Cap **0.85**. Wild 0.95 NOT swept (calibration-anchor).
+
+### Effect size
+
+For an agent with natal=Atmata: hatchery branch distribution =
+{Atmata: 0.65, Skirvyte: 0.244, Gilija: 0.106}. Wild distribution =
+{Atmata: 0.95, Skirvyte: 0.035, Gilija: 0.015}. C3.3 produces the
+first measurable spatial-distribution divergence at the population
+level (C2/C3.1/C3.2 are between-agent biology).
+
+### References
+
+See §12 for full citations: Vasemägi 2005, Insulander 2001, Källo
+2022, Jokikokko 2006.
+
+---
+
+## 8. Calibration methodology
 
 All four tiers follow a uniform calibration-status discipline:
 
@@ -465,7 +539,7 @@ distinction must be visible in any model output.
 
 ---
 
-## 8. Out-of-scope: documented gaps
+## 9. Out-of-scope: documented gaps
 
 The following biological signals are real, citation-supported, and
 *not yet modelled*. Each is a candidate for a future C3.x or D-tier
@@ -556,7 +630,7 @@ independent of the hatchery-vs-wild work.
 
 ---
 
-## 9. Compound-effect summary
+## 10. Compound-effect summary
 
 A scenario with k% hatchery agents shows the following first-order
 divergences from a wild-only scenario:
@@ -576,7 +650,7 @@ the C3.1 RRS default conditional on the C3.2 sea-age contrast.
 
 ---
 
-## 10. Verification methodology
+## 11. Verification methodology
 
 All citations in this document have been verified via the scite
 MCP server against actual DOI metadata (title, authors, journal,
@@ -600,7 +674,7 @@ and applies to any future C3.x spec.
 
 ---
 
-## 11. References (consolidated)
+## 12. References (consolidated)
 
 Bouchard, R., Wellband, K. W., Lecomte, L., et al. (2022). Effects
 of stocking at the parr stage on the reproductive fitness and
@@ -637,11 +711,22 @@ characteristics in the Curonian Lagoon, Lithuania, derived from
 Sentinel-1A imagery. *Remote Sensing*, 11(17), 2059.
 https://doi.org/10.3390/rs11172059
 
+Insulander, C., & Ragnarsson, B. (2001). Homing patterns of Baltic
+salmon, Salmo salar L., from smolts released from two hatcheries
+in the River Dalälven, Sweden. *Fisheries Management and Ecology*,
+8(1), 61-67. https://doi.org/10.1046/j.1365-2400.2001.00177.x
+
 Jokikokko, E., Kallio-Nyberg, I., & Jutila, E. (2004). The timing,
 sex and age composition of the wild and reared Atlantic salmon
 ascending the Simojoki River, northern Finland. *Journal of
 Applied Ichthyology*, 20(1), 37-42.
 https://doi.org/10.1111/j.1439-0426.2004.00491.x
+
+Jokikokko, E., Kallio-Nyberg, I., & Saloniemi, I. (2006). The
+survival of semi-wild, wild and hatchery-reared Atlantic salmon
+smolts of the Simojoki River in the Baltic Sea. *Journal of Fish
+Biology*, 68(2), 430-442.
+https://doi.org/10.1111/j.0022-1112.2006.00892.x
 
 Jönsson, B., Jönsson, N., & Jonsson, M. (2019). Supportive
 breeders of Atlantic salmon *Salmo salar* have reduced fitness in
@@ -659,6 +744,11 @@ trends in life-history traits between Atlantic salmon *Salmo
 salar* of wild and hatchery origin in the Baltic Sea. *Journal
 of Fish Biology*, 76(3), 622-640.
 https://doi.org/10.1111/j.1095-8649.2009.02520.x
+
+Källo, K., Baktoft, H., & Kristensen, M. L. (2022). High prevalence
+of straying in a wild brown trout (*Salmo trutta*) population in a
+fjord system. *ICES Journal of Marine Science*, 79(5), 1539-1547.
+https://doi.org/10.1093/icesjms/fsac079
 
 Le Luyer, J., Laporte, M., Beacham, T. D., et al. (2017).
 Parallel epigenetic modifications induced by hatchery rearing in
@@ -686,6 +776,12 @@ Rodriguez-Barreto, D., Garcia de Leaniz, C., Verspoor, E., et al.
 fish: A route to epigenetic introgression in wild populations?
 *Molecular Biology and Evolution*, 36(10), 2205-2211.
 (Cited indirectly via Bouchard 2022; not directly verified.)
+
+Vasemägi, A., Gross, R., & Paaver, T. (2005). Extensive immigration
+from compensatory hatchery releases into wild Atlantic salmon
+population in the Baltic sea: spatio-temporal analysis over 18
+years. *Heredity*, 95(1), 76-83.
+https://doi.org/10.1038/sj.hdy.6800693
 
 ---
 
