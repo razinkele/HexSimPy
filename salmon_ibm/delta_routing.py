@@ -134,6 +134,52 @@ def _first_touch_passive_tag(
     pool.exit_branch_id[indices] = cur_reach[indices]
 
 
+def assert_branch_topology(mesh) -> None:
+    """Init-time invariant: every delta-branch reach has cells AND
+    a BRANCH_FRACTIONS entry. Raises ValueError on violation.
+
+    Eliminates two runtime corruption modes:
+    1. _branch_entry_cell returning -1 mid-step (would desync
+       exit_branch_id and tri_idx if the runtime tried to recover).
+    2. branch_stray_weight raising KeyError mid-loop (would abort
+       the entire batch's stage-then-commit).
+
+    Both modes are caught at config load with actionable messages
+    naming the missing branch. O(N_branches) cost, runs once.
+
+    Early-return discipline (single check, no dead code):
+    - reach_names absent (`getattr(...) is None`) → NO-OP (true
+      legacy mesh; runtime path also no-ops via the same check).
+    - reach_names present but `_branch_reach_ids(mesh)` empty →
+      NO-OP (mesh has reach_names for non-Baltic-relevant reaches).
+    """
+    has_reach_names = getattr(mesh, "reach_names", None) is not None
+    if not has_reach_names:
+        return  # legacy mesh — no Baltic dispatch ever fires
+    branch_rids = _branch_reach_ids(mesh)
+    if len(branch_rids) == 0:
+        return  # legacy / non-Baltic mesh with reach_names
+    # If mesh has ANY BRANCH_FRACTIONS key in reach_names, ALL must be present
+    # — partial delta config means some adults can't route their natal branch.
+    missing_in_reach_names = [
+        br for br in BRANCH_FRACTIONS if br not in mesh.reach_names
+    ]
+    missing_cells: list[tuple[int, str]] = []
+    for rid in branch_rids:
+        rid_int = int(rid)
+        if _branch_entry_cell(mesh, rid_int) < 0:
+            missing_cells.append((rid_int, mesh.reach_names[rid_int]))
+    if missing_cells or missing_in_reach_names:
+        raise ValueError(
+            f"Delta branch topology invariant violated. "
+            f"Branches with no cells on mesh: {missing_cells!r}. "
+            f"Branches in BRANCH_FRACTIONS but missing from "
+            f"mesh.reach_names: {missing_in_reach_names!r}. Both are "
+            f"checked at simulation init to fail-fast rather than "
+            f"corrupt state mid-step."
+        )
+
+
 def split_discharge(q_total: float | np.ndarray) -> dict[str, np.ndarray]:
     """Apply BRANCH_FRACTIONS to a Nemunas climatology (scalar or (T,) array).
 

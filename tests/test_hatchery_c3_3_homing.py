@@ -97,3 +97,45 @@ def test_branch_entry_cell_cache_invalidates_on_reassignment():
 
     M_new = _branch_entry_cell(mesh, branch_rid=0)
     assert M_new == 1  # NOT 3 — cache invalidated by identity check.
+
+
+# --- Task 5: assert_branch_topology --------------------------------------
+
+from salmon_ibm.delta_routing import assert_branch_topology
+
+
+def test_assert_branch_topology_no_op_on_legacy_mesh():
+    """assert_branch_topology no-ops when reach_names is missing
+    (legacy TriMesh / HexMesh fallback paths)."""
+    class _LegacyMesh:
+        reach_id = np.array([0, 0, 0], dtype=np.int8)
+    # No reach_names attribute → no-op, no raise.
+    assert_branch_topology(_LegacyMesh())
+
+
+def test_assert_branch_topology_raises_on_missing_branch_cells():
+    """C3.3 test 12 (a): raises ValueError when a branch_rid has
+    no cells on the mesh. Error message names at least one of
+    Atmata/Skirvyte/Gilija."""
+    # mesh has reach_names listing all 3 branches but reach_id only
+    # has cells for indices 0 (Skirvyte) and 1 (Atmata) — Gilija
+    # (index 2) has zero cells.
+    class _MissingCellsMesh:
+        reach_id = np.array([0, 0, 1, 1, 0], dtype=np.int8)
+        reach_names = ["Skirvyte", "Atmata", "Gilija"]
+    with pytest.raises(ValueError, match=r"Atmata|Skirvyte|Gilija"):
+        assert_branch_topology(_MissingCellsMesh())
+
+
+def test_assert_branch_topology_raises_on_missing_fractions_entry():
+    """C3.3 test 12 (b): raises ValueError when a branch_rid has
+    cells but the branch name is missing from BRANCH_FRACTIONS.
+    Error message references BRANCH_FRACTIONS."""
+    class _MissingFractionsMesh:
+        # All 3 branches have cells, but reach_names contains
+        # an unknown branch name "Rusne" that's not in
+        # BRANCH_FRACTIONS.
+        reach_id = np.array([0, 0, 1, 1, 2, 2], dtype=np.int8)
+        reach_names = ["Skirvyte", "Atmata", "Rusne"]
+    with pytest.raises(ValueError, match=r"BRANCH_FRACTIONS"):
+        assert_branch_topology(_MissingFractionsMesh())
