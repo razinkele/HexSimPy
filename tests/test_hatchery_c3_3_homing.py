@@ -5,6 +5,11 @@ Spec: docs/superpowers/specs/2026-05-03-hatchery-c3.3-homing-design.md
 
 from __future__ import annotations
 
+import ast
+import inspect
+import io
+import logging
+import tokenize
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +20,14 @@ from salmon_ibm.baltic_params import (
     BalticSpeciesConfig,
     _apply_hatchery_overrides,
     load_baltic_species_config,
+)
+from salmon_ibm.bioenergetics import BioParams
+from salmon_ibm.delta_routing import (
+    BRANCH_FRACTIONS,
+    _branch_entry_cell,
+    _branch_reach_ids,
+    assert_branch_topology,
+    update_exit_branch_id,
 )
 
 
@@ -63,9 +76,6 @@ def test_homing_precision_loads_from_yaml():
 
 # --- Task 3: _BranchEntryCache + _branch_entry_cell -----------------------
 
-from salmon_ibm.delta_routing import _branch_entry_cell
-
-
 class _CacheTestMesh:
     """Minimal mesh for testing _branch_entry_cell cache invalidation.
     Only needs reach_id and reach_names attributes."""
@@ -100,9 +110,6 @@ def test_branch_entry_cell_cache_invalidates_on_reassignment():
 
 
 # --- Task 5: assert_branch_topology --------------------------------------
-
-from salmon_ibm.delta_routing import assert_branch_topology
-
 
 def test_assert_branch_topology_no_op_on_legacy_mesh():
     """assert_branch_topology no-ops when reach_names is missing
@@ -142,14 +149,6 @@ def test_assert_branch_topology_raises_on_missing_fractions_entry():
 
 
 # --- Task 6: update_exit_branch_id origin-aware dispatch -----------------
-
-from salmon_ibm.delta_routing import (
-    BRANCH_FRACTIONS,
-    update_exit_branch_id,
-    _branch_reach_ids,
-)
-from salmon_ibm.bioenergetics import BioParams
-
 
 class _BalticTestMesh:
     """Minimal Baltic-style mesh for C3.3 dispatch tests.
@@ -356,9 +355,6 @@ def test_homing_baltic_default_distribution():
     assert 856 <= hatch_counts[2] <= 1256, f"hatch Gilija {hatch_counts[2]}"
 
 
-import logging
-
-
 def test_homing_cross_pop_hatchery_warning_emitted(caplog):
     """C3.3 test 13: ORIGIN_HATCHERY agent + hatchery_dispatch=None
     + Baltic species_config + natal=Atmata (delta branch — load-
@@ -409,12 +405,6 @@ def test_homing_empty_target_cohort_is_noop():
     update_exit_branch_id(pool, mesh, landscape=landscape)
     np.testing.assert_array_equal(pool.exit_branch_id, pre_exit)
     np.testing.assert_array_equal(pool.tri_idx, pre_tri)
-
-
-import ast
-import inspect
-import io
-import tokenize
 
 
 def test_homing_dispatch_commit_outside_try_block():

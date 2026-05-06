@@ -266,7 +266,7 @@ def _apply_hatchery_overrides(
     if unknown:
         raise ValueError(
             f"hatchery_overrides supports only "
-            f"{sorted(ALLOWED_OVERRIDE_KEYS)} in C3.2; unsupported keys: "
+            f"{sorted(ALLOWED_OVERRIDE_KEYS)}; unsupported keys: "
             f"{sorted(unknown)}"
         )
 

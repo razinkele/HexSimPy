@@ -279,6 +279,10 @@ def update_exit_branch_id(pool, mesh, *, landscape=None) -> None:
     staged_cell = np.full(n_targets, -1, dtype=np.intp)
     is_homing_decision = np.zeros(n_targets, dtype=bool)
     passive_indices: list[int] = []
+    # Emit cross-pop warning at most once per dispatch call: 1000 hatchery
+    # agents in one batch should produce 1 log line, not 1000. The first
+    # offending agent's index is recorded so the operator can grep state.
+    cross_pop_warned = False
 
     for k, i in enumerate(target_indices):
         natal_rid = int(pool.natal_reach_id[i])
@@ -288,17 +292,19 @@ def update_exit_branch_id(pool, mesh, *, landscape=None) -> None:
 
         if pool.origin[i] == ORIGIN_HATCHERY:
             if hd is None:
-                logging.getLogger(__name__).warning(
-                    "%s: ORIGIN_HATCHERY agent %d at homing time but "
-                    "hatchery_dispatch is None — falling back to wild "
-                    "homing precision (Vasemägi 2005 wild baseline). "
-                    "Likely SwitchPopulationEvent crossed populations "
-                    "with mismatched hatchery configs. See spec "
-                    "out-of-scope: 'Cross-population transfer "
-                    "alignment'.",
-                    ERR_HOMING_HATCHERY_NO_DISPATCH,
-                    int(i),
-                )
+                if not cross_pop_warned:
+                    logging.getLogger(__name__).warning(
+                        "%s: ORIGIN_HATCHERY agent %d (first of batch) at "
+                        "homing time but hatchery_dispatch is None — "
+                        "falling back to wild homing precision (Vasemägi "
+                        "2005 wild baseline). Likely SwitchPopulationEvent "
+                        "crossed populations with mismatched hatchery "
+                        "configs. See spec out-of-scope: 'Cross-population "
+                        "transfer alignment'.",
+                        ERR_HOMING_HATCHERY_NO_DISPATCH,
+                        int(i),
+                    )
+                    cross_pop_warned = True
                 p_home = species_cfg.wild.homing_precision
             else:
                 p_home = hd.params.homing_precision

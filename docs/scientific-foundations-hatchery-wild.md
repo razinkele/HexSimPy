@@ -20,7 +20,7 @@ file. For the implementation-level mapping, see the per-tier specs
 in `docs/superpowers/specs/` and per-tier plans in
 `docs/superpowers/plans/`.
 
-**Implementation status as of 2026-05-03:**
+**Implementation status as of 2026-05-06:**
 
 | Tier  | Spec status        | Plan status        | Code status                          |
 |-------|--------------------|--------------------|--------------------------------------|
@@ -28,13 +28,10 @@ in `docs/superpowers/specs/` and per-tier plans in
 | C2    | Final 2026-05-01   | Executed           | Shipped: PR #4 merged, commit 8a9192c|
 | C3.1  | Final 2026-05-02   | Executed           | Shipped: PR #5 merged, commit 0284c45|
 | C3.2  | Final 2026-05-03   | Executed           | Shipped: PR #6 merged, commit 17ae6b5|
-| C3.3  | v7 converged 2026-05-03 (8-pass review) | Executed 2026-05-04 | Branch hatchery-c3.3-homing pending PR/tag |
+| C3.3  | Final 2026-05-03 (v7, 8-pass review) | Executed 2026-05-06 | Merged to main 2026-05-06, commit 4fafa8b; PR/tag/deploy pending |
 
-Tags: v1.7.4 covers C1 + C2; v1.7.5 covers C3.1; v1.7.6 will cover
-C3.2 once implemented and merged. C3.2 spec at
-`docs/superpowers/specs/2026-05-03-hatchery-c3.2-seaage-design.md`;
-C3.2 implementation plan at
-`docs/superpowers/plans/2026-05-03-hatchery-c3.2-seaage.md`.
+Tags: v1.7.4 covers C1 + C2; v1.7.5 covers C3.1; v1.7.6 covers C3.2.
+v1.7.7 will cover C3.3 once pushed to origin.
 
 ---
 
@@ -75,7 +72,7 @@ and wild agents:
 | C2    | Bioenergetics    | activity multiplier divergence         | Shipped  |
 | C3.1  | Reproduction     | pre-spawn skip probability             | Shipped  |
 | C3.2  | Marine residency | sea-age distribution divergence        | Shipped  |
-| C3.3  | Homing           | natal-stream precision divergence      | Drafted  |
+| C3.3  | Homing           | natal-stream precision divergence      | Shipped  |
 
 The architecture is deliberately additive: each tier extends the
 prior tier's data structures without modifying their semantics. The
