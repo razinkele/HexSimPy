@@ -69,15 +69,37 @@ class _BranchEntryCache:
 
     def get(self, mesh, branch_rid: int) -> int:
         """Return the cached entry cell for branch_rid, rebuilding
-        on identity mismatch."""
+        on identity mismatch.
+
+        When `mesh._water_nbr_count` is available, prefer the
+        lowest-index cell that is BOTH a branch cell AND has water
+        neighbors (so the teleported agent can move on the next
+        timestep). Without this, an agent landing on a dry-boundary
+        cell with `cnt == 0` is permanently stuck.
+
+        Falls back to lowest-index-by-reach_id when `_water_nbr_count`
+        is missing (legacy meshes / bare test fixtures) — preserves
+        the pre-hotfix contract.
+        """
         if self.stored_reach_id is not mesh.reach_id:
             self.stored_reach_id = mesh.reach_id
             self.cells = {}
         if branch_rid not in self.cells:
             matches = np.where(mesh.reach_id == branch_rid)[0]
-            self.cells[branch_rid] = (
-                int(matches.min()) if len(matches) > 0 else -1
-            )
+            if len(matches) == 0:
+                self.cells[branch_rid] = -1
+            else:
+                water_count = getattr(mesh, "_water_nbr_count", None)
+                if water_count is not None and len(water_count) >= len(mesh.reach_id):
+                    swimmable = matches[water_count[matches] > 0]
+                    if len(swimmable) > 0:
+                        self.cells[branch_rid] = int(swimmable.min())
+                    else:
+                        # All branch cells are dry — caller is
+                        # responsible (assert_branch_topology raises).
+                        self.cells[branch_rid] = int(matches.min())
+                else:
+                    self.cells[branch_rid] = int(matches.min())
         return self.cells[branch_rid]
 
     def invalidate(self) -> None:
@@ -165,18 +187,31 @@ def assert_branch_topology(mesh) -> None:
         br for br in BRANCH_FRACTIONS if br not in mesh.reach_names
     ]
     missing_cells: list[tuple[int, str]] = []
+    unswimmable_cells: list[tuple[int, str]] = []
+    water_count = getattr(mesh, "_water_nbr_count", None)
+    has_water_check = (
+        water_count is not None and len(water_count) >= len(mesh.reach_id)
+    )
     for rid in branch_rids:
         rid_int = int(rid)
-        if _branch_entry_cell(mesh, rid_int) < 0:
+        entry = _branch_entry_cell(mesh, rid_int)
+        if entry < 0:
             missing_cells.append((rid_int, mesh.reach_names[rid_int]))
-    if missing_cells or missing_in_reach_names:
+        elif has_water_check and water_count[entry] == 0:
+            # Even the swim-preferred entry cell is dry. C3.3 teleport
+            # would strand the agent (movement kernels skip when
+            # cnt == 0). Catch at init rather than mid-step.
+            unswimmable_cells.append((rid_int, mesh.reach_names[rid_int]))
+    if missing_cells or missing_in_reach_names or unswimmable_cells:
         raise ValueError(
             f"Delta branch topology invariant violated. "
             f"Branches with no cells on mesh: {missing_cells!r}. "
             f"Branches in BRANCH_FRACTIONS but missing from "
-            f"mesh.reach_names: {missing_in_reach_names!r}. Both are "
-            f"checked at simulation init to fail-fast rather than "
-            f"corrupt state mid-step."
+            f"mesh.reach_names: {missing_in_reach_names!r}. "
+            f"Branches whose entry cell has zero water neighbors "
+            f"(unswimmable — C3.3 teleport would strand agents): "
+            f"{unswimmable_cells!r}. All are checked at simulation "
+            f"init to fail-fast rather than corrupt state mid-step."
         )
 
 

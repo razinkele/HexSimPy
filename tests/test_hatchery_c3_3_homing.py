@@ -109,6 +109,59 @@ def test_branch_entry_cell_cache_invalidates_on_reassignment():
     assert M_new == 1  # NOT 3 — cache invalidated by identity check.
 
 
+def test_branch_entry_cell_prefers_swimmable_cell():
+    """C3.3 hotfix: when a mesh exposes _water_nbr_count, the entry
+    cell must be the lowest-index cell that is BOTH a branch cell
+    AND has water neighbors. Without this, an agent teleported to a
+    dry boundary cell (zero neighbors) is permanently stuck —
+    movement kernels skip when cnt == 0."""
+    class _SwimmableMesh:
+        # 9 cells: rid=0 [0..4], rid=1 [5..8]. Cells 0+1 are dry
+        # boundary (water_nbr_count = 0); cells 2..8 are swimmable.
+        reach_id = np.array([0, 0, 0, 0, 0, 1, 1, 1, 1], dtype=np.int8)
+        reach_names = ["Atmata", "Skirvyte"]
+        _water_nbr_count = np.array(
+            [0, 0, 3, 3, 3, 3, 3, 3, 3], dtype=np.int32,
+        )
+    mesh = _SwimmableMesh()
+    # Lowest-index cell of rid=0 is 0, but it's dry. First swimmable
+    # rid=0 cell is index 2.
+    assert _branch_entry_cell(mesh, branch_rid=0) == 2
+    # Second branch unaffected (all swimmable; lowest-index = 5).
+    assert _branch_entry_cell(mesh, branch_rid=1) == 5
+
+
+def test_branch_entry_cell_falls_back_without_water_nbr_count():
+    """C3.3 hotfix regression: legacy meshes / test fixtures lacking
+    `_water_nbr_count` continue to use lowest-index-by-reach_id
+    semantics. Backward-compat for any caller still on the older
+    contract."""
+    class _NoWaterCountMesh:
+        reach_id = np.array([0, 0, 1, 1], dtype=np.int8)
+        reach_names = ["Atmata", "Skirvyte"]
+    mesh = _NoWaterCountMesh()
+    assert _branch_entry_cell(mesh, branch_rid=0) == 0
+    assert _branch_entry_cell(mesh, branch_rid=1) == 2
+
+
+def test_branch_entry_cell_falls_back_when_no_swimmable_cell():
+    """C3.3 hotfix: if a branch has cells but NONE are swimmable,
+    `_branch_entry_cell` returns the lowest-index match (legacy
+    behavior). Catastrophic config — but the helper itself doesn't
+    raise; assert_branch_topology is the gatekeeper that fails
+    fast at init."""
+    class _AllDryBranchMesh:
+        reach_id = np.array([0, 0, 0, 1, 1], dtype=np.int8)
+        reach_names = ["Atmata", "Skirvyte"]
+        # rid=0 cells (0,1,2) all dry; rid=1 cells (3,4) all swimmable.
+        _water_nbr_count = np.array([0, 0, 0, 3, 3], dtype=np.int32)
+    mesh = _AllDryBranchMesh()
+    # No swimmable rid=0 cell → falls back to lowest-index = 0.
+    assert _branch_entry_cell(mesh, branch_rid=0) == 0
+    # rid=1 is normal.
+    assert _branch_entry_cell(mesh, branch_rid=1) == 3
+
+
 # --- Task 5: assert_branch_topology --------------------------------------
 
 def test_assert_branch_topology_no_op_on_legacy_mesh():
@@ -132,6 +185,34 @@ def test_assert_branch_topology_raises_on_missing_branch_cells():
         reach_names = ["Skirvyte", "Atmata", "Gilija"]
     with pytest.raises(ValueError, match=r"Atmata|Skirvyte|Gilija"):
         assert_branch_topology(_MissingCellsMesh())
+
+
+def test_assert_branch_topology_raises_on_all_branches_unswimmable():
+    """C3.3 hotfix: when a mesh exposes _water_nbr_count and every
+    cell of every branch has zero water neighbors, the topology
+    invariant must fail fast. Catches the worst-case mesh-config
+    error where teleport would strand all returning adults."""
+    class _AllDryDeltaMesh:
+        # All 3 branches present but ALL cells have 0 water neighbors.
+        reach_id = np.array([0, 0, 1, 1, 2, 2], dtype=np.int8)
+        reach_names = ["Atmata", "Skirvyte", "Gilija"]
+        _water_nbr_count = np.zeros(6, dtype=np.int32)
+    with pytest.raises(ValueError, match=r"unswimmable|water"):
+        assert_branch_topology(_AllDryDeltaMesh())
+
+
+def test_assert_branch_topology_raises_on_one_branch_unswimmable():
+    """C3.3 hotfix: even if SOME branches are swimmable, one
+    fully-dry branch is enough to fail the invariant. Realistic
+    failure mode: someone removes a delta-branch cell from a config
+    leaving the branch reach_id but no swimmable cells."""
+    class _OneDryBranchMesh:
+        reach_id = np.array([0, 0, 1, 1, 2, 2], dtype=np.int8)
+        reach_names = ["Atmata", "Skirvyte", "Gilija"]
+        # rid=2 (Gilija) cells dry; others swimmable.
+        _water_nbr_count = np.array([3, 3, 3, 3, 0, 0], dtype=np.int32)
+    with pytest.raises(ValueError, match=r"unswimmable|water"):
+        assert_branch_topology(_OneDryBranchMesh())
 
 
 def test_assert_branch_topology_raises_on_missing_fractions_entry():
