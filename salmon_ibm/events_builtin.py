@@ -23,6 +23,15 @@ class MovementEvent(Event):
     cwr_threshold: float = 16.0
 
     def execute(self, population, landscape, t, mask):
+        # C4: latched dormancy check. No-ops on legacy non-Baltic
+        # landscapes (no "env" key) or after first successful call
+        # (latched). Local import avoids any circular-import risk if
+        # events_builtin is imported before movement during Python's
+        # module load.
+        from salmon_ibm.movement import _check_dormant_gradient
+        pool = getattr(population, "pool", population)
+        _check_dormant_gradient(landscape, pool)
+
         mesh = landscape["mesh"]
         fields = landscape["fields"]
         rng = landscape["rng"]

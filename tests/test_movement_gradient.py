@@ -153,3 +153,145 @@ def test_compute_dist_from_sea_y_junction_tie_break():
     # for them. Cell 2 (lon-offset arm) is only approximately
     # equidistant; the determinism check above already covers it.
     assert out1[1] == out1[3]
+
+
+# -----------------------------------------------------------------------------
+# Task 6 — _check_dormant_gradient helper tests (4e, 4f + sanity)
+# -----------------------------------------------------------------------------
+
+# Reuse synthetic-NC builders from tests/test_h3_env.py for the Case-B
+# happy-path test (Test 4f).
+from tests.test_h3_env import _build_minimal_h3_nc, _build_mesh_from_nc
+
+
+def _make_landscape(env, dist_from_sea_arr=None):
+    """Helper: minimal landscape dict for dormancy-check tests.
+
+    `dist_from_sea_arr` overrides what the helper inspects; if None,
+    uses env.fields["dist_from_sea"] as-is.
+    """
+    fields = dict(env.fields) if hasattr(env, "fields") else {}
+    if dist_from_sea_arr is not None:
+        fields["dist_from_sea"] = dist_from_sea_arr
+    return {
+        "env": env,
+        "fields": fields,
+        "rng": np.random.default_rng(0),
+    }
+
+
+def _make_pool(behaviors):
+    """Helper: minimal pool stand-in with .behavior array."""
+    class _FakePool:
+        pass
+    pool = _FakePool()
+    pool.behavior = np.asarray(behaviors, dtype=np.int8)
+    return pool
+
+
+def test_check_dormant_gradient_raises_on_flat_zero_with_directed_agents():
+    """C4 Test 4e (part 1): env-A loaded via Case A path -> flat-zero ->
+    directed agent -> raise containing the err-id."""
+    from salmon_ibm.movement import _check_dormant_gradient
+    from salmon_ibm.agents import Behavior
+    from salmon_ibm.h3_env import ERR_DIST_FROM_SEA_MISSING
+
+    class _FakeEnv:
+        pass
+    env_a = _FakeEnv()
+    env_a.fields = {"dist_from_sea": np.zeros(10, dtype=np.float32)}
+    env_a._dormant_gradient_check_done = False
+
+    pool = _make_pool([int(Behavior.UPSTREAM), int(Behavior.HOLD)])
+    landscape = _make_landscape(env_a)
+
+    with pytest.raises(RuntimeError, match=ERR_DIST_FROM_SEA_MISSING):
+        _check_dormant_gradient(landscape, pool)
+
+
+def test_check_dormant_gradient_per_env_isolation():
+    """C4 Test 4e (part 2): env-A's latch does NOT affect env-B's
+    independent check. Regression test for the pass-7 module-global
+    -> per-env-instance refactor."""
+    from salmon_ibm.movement import _check_dormant_gradient
+    from salmon_ibm.agents import Behavior
+
+    class _FakeEnv:
+        pass
+
+    env_a = _FakeEnv()
+    env_a.fields = {"dist_from_sea": np.zeros(10, dtype=np.float32)}
+    env_a._dormant_gradient_check_done = False
+
+    pool = _make_pool([int(Behavior.UPSTREAM)])
+
+    with pytest.raises(RuntimeError):
+        _check_dormant_gradient(_make_landscape(env_a), pool)
+    assert env_a._dormant_gradient_check_done is True
+
+    env_b = _FakeEnv()
+    env_b.fields = {"dist_from_sea": np.zeros(10, dtype=np.float32)}
+    env_b._dormant_gradient_check_done = False
+    with pytest.raises(RuntimeError):
+        _check_dormant_gradient(_make_landscape(env_b), pool)
+    assert env_b._dormant_gradient_check_done is True
+
+
+def test_check_dormant_gradient_happy_path_latches(tmp_path, caplog):
+    """C4 Test 4f: load env via H3Environment.from_netcdf with a
+    valid Case-B NC; check fires no raise and latches True. Tests the
+    end-to-end Case-B init -> helper-call sequence."""
+    from salmon_ibm.movement import _check_dormant_gradient
+    from salmon_ibm.h3_env import H3Environment
+    from salmon_ibm.agents import Behavior
+
+    nc_path = tmp_path / "happy_path.nc"
+    valid = np.array([0.0, 100.0, 200.0, np.nan], dtype=np.float32)
+    _build_minimal_h3_nc(nc_path, dist_from_sea_arr=valid)
+    mesh = _build_mesh_from_nc(nc_path)
+    env = H3Environment.from_netcdf(str(nc_path), mesh)
+    assert env._dormant_gradient_check_done is False  # Case B init OK
+
+    pool = _make_pool([int(Behavior.UPSTREAM)])
+    # No raise — gradient has positive values.
+    _check_dormant_gradient(_make_landscape(env), pool)
+    assert env._dormant_gradient_check_done is True
+
+    # Second call: latched. Even with the gradient now-zeroed, no raise.
+    env.fields["dist_from_sea"][:] = 0.0
+    _check_dormant_gradient(_make_landscape(env), pool)
+
+
+def test_check_dormant_gradient_no_directed_agents_no_raise():
+    """C4 sanity: flat-zero gradient + only HOLD/RANDOM/TO_CWR agents
+    -> no raise (the check is gated on UPSTREAM/DOWNSTREAM presence)."""
+    from salmon_ibm.movement import _check_dormant_gradient
+    from salmon_ibm.agents import Behavior
+
+    class _FakeEnv:
+        pass
+    env = _FakeEnv()
+    env.fields = {"dist_from_sea": np.zeros(10, dtype=np.float32)}
+    env._dormant_gradient_check_done = False
+
+    pool = _make_pool([
+        int(Behavior.HOLD),
+        int(Behavior.RANDOM),
+        int(Behavior.TO_CWR),
+    ])
+    _check_dormant_gradient(_make_landscape(env), pool)
+    assert env._dormant_gradient_check_done is True
+
+
+def test_check_dormant_gradient_no_env_in_landscape_no_raise():
+    """C4 sanity: legacy non-Baltic landscape (no env key) -> no-op."""
+    from salmon_ibm.movement import _check_dormant_gradient
+    from salmon_ibm.agents import Behavior
+
+    landscape = {
+        "fields": {"dist_from_sea": np.zeros(10, dtype=np.float32)},
+        "rng": np.random.default_rng(0),
+        # NO "env" key.
+    }
+    pool = _make_pool([int(Behavior.UPSTREAM)])
+    _check_dormant_gradient(landscape, pool)  # must not raise

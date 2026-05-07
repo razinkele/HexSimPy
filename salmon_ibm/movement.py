@@ -29,6 +29,46 @@ def _use_numba():
 
 
 from salmon_ibm.agents import Behavior
+from salmon_ibm.h3_env import ERR_DIST_FROM_SEA_MISSING
+
+
+def _check_dormant_gradient(landscape, pool) -> None:
+    """C4: raise once per env-instance if ``dist_from_sea`` is flat-zero
+    AND any agent is in UPSTREAM/DOWNSTREAM behavior.
+
+    Signature: takes ``landscape`` (dict) + ``pool`` (AgentPool stand-in
+    with ``.behavior`` int8 array). Computes ``has_directed`` from
+    ``pool.behavior`` directly — does not depend on the kernel's bucket
+    construction. This decouples the dormancy check from
+    ``execute_movement``'s internals so the check can be called from
+    ``MovementEvent.execute`` (which does not have buckets).
+
+    Latch is per-env-instance via ``env._dormant_gradient_check_done``,
+    NOT module-global — pass-7 review-loop pinned this to avoid
+    cross-test landscape-swap leakage. Initialised to False by
+    ``H3Environment.from_netcdf`` in both Case A and Case B paths.
+
+    No-op if landscape has no ``env`` key (legacy non-Baltic) OR if
+    the env's flag is already True (latched after first call).
+    """
+    env = landscape.get("env")
+    if env is None or getattr(env, "_dormant_gradient_check_done", True):
+        return  # legacy env, or check already run
+
+    has_directed = bool(np.any(
+        (pool.behavior == int(Behavior.UPSTREAM))
+        | (pool.behavior == int(Behavior.DOWNSTREAM))
+    ))
+    if has_directed and not np.any(landscape["fields"]["dist_from_sea"]):
+        env._dormant_gradient_check_done = True  # latch BEFORE raise
+        raise RuntimeError(
+            f"{ERR_DIST_FROM_SEA_MISSING}: dist_from_sea is flat-zero "
+            "AND agents are in UPSTREAM/DOWNSTREAM behavior. Movement "
+            "will not progress (legacy SSH=0 dormant state). Rebuild "
+            "the landscape NC with build_h3_multires_landscape.py to "
+            "populate dist_from_sea."
+        )
+    env._dormant_gradient_check_done = True
 
 
 def execute_movement(
