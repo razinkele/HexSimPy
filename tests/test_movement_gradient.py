@@ -563,3 +563,86 @@ def test_production_mesh_gradient_sanity():
             f"{branch} inversion: min={branch_min:.1f}m <= "
             f"mean(OpenBaltic)={ob_mean:.1f}m"
         )
+
+
+# -----------------------------------------------------------------------------
+# Task 9 — post-C3.3-teleport topology invariant (Test 7)
+# -----------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    not PRODUCTION_NC.exists(),
+    reason="production NC missing",
+)
+def test_post_c33_teleport_invariant():
+    """C4 Test 7: for each delta-branch reach, the C3.3 teleport
+    target cell has at least one strictly-higher dist_from_sea
+    water neighbor — guarantees a teleported strayer can progress
+    inland on the next UPSTREAM step."""
+    from salmon_ibm.delta_routing import _branch_entry_cell
+
+    ds = xr.open_dataset(str(PRODUCTION_NC), engine="h5netcdf")
+    dist = ds["dist_from_sea"].values
+    water_mask = ds["water_mask"].values
+    reach_id = ds["reach_id"].values
+    reach_names = ds.attrs.get("reach_names", "").split(",")
+    nbr_starts = ds["nbr_starts"].values
+    nbr_idx = ds["nbr_idx"].values
+    ds.close()
+
+    # Build a minimal mesh that satisfies _branch_entry_cell's interface.
+    # Per pass-1 review: must build BOTH _water_nbrs AND _water_nbr_count
+    # (the C3.3 swimmable-cell preference reads _water_nbr_count, but
+    # other helpers in the dispatch chain may read _water_nbrs).
+    class _MeshShim:
+        pass
+    mesh = _MeshShim()
+    mesh.reach_id = reach_id
+    mesh.reach_names = reach_names
+    mesh.water_mask = water_mask
+
+    max_deg = int(np.diff(nbr_starts).max())
+    mesh._water_nbrs = np.full(
+        (len(reach_id), max_deg), -1, dtype=np.int32,
+    )
+    mesh._water_nbr_count = np.zeros(len(reach_id), dtype=np.int32)
+    for i in range(len(reach_id)):
+        s, e = int(nbr_starts[i]), int(nbr_starts[i + 1])
+        slot = 0
+        for k in range(s, e):
+            n_idx = int(nbr_idx[k])
+            if n_idx >= 0 and water_mask[n_idx]:
+                mesh._water_nbrs[i, slot] = n_idx
+                slot += 1
+        mesh._water_nbr_count[i] = slot
+
+    for branch in ("Atmata", "Skirvyte", "Gilija"):
+        if branch not in reach_names:
+            continue
+        rid = reach_names.index(branch)
+        entry = _branch_entry_cell(mesh, rid)
+        assert entry >= 0, f"{branch}: no entry cell"
+
+        # First, NaN guard on the entry cell.
+        entry_dist = dist[entry]
+        assert np.isfinite(entry_dist), (
+            f"{branch}: entry cell {entry} has non-finite "
+            f"dist_from_sea ({entry_dist}); NC build is corrupt"
+        )
+
+        # Then, find a strictly-higher water neighbor.
+        s, e = int(nbr_starts[entry]), int(nbr_starts[entry + 1])
+        higher_neighbors = []
+        for k in range(s, e):
+            n = int(nbr_idx[k])
+            if n < 0 or not water_mask[n]:
+                continue
+            if dist[n] > entry_dist:
+                higher_neighbors.append(n)
+        assert higher_neighbors, (
+            f"{branch}: entry cell {entry} (dist={entry_dist:.1f}m) has "
+            "no strictly-higher water neighbor — a teleported strayer "
+            "would oscillate at the branch mouth instead of progressing "
+            "inland. Topology defect at the production mesh's branch "
+            "entry."
+        )
