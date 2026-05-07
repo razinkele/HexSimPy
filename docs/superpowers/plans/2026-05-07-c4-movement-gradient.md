@@ -1,6 +1,6 @@
 # C4 Movement Gradient Implementation Plan
 
-**Plan version:** v3 — pass-2 review-loop fixed two new issues v2 introduced. Pass-1 (3 parallel reviewers) found 21 issues including a CRITICAL signature mismatch (`execute_movement(pool, mesh, fields, ...)` not `landscape`); pass-2 caught that v2 fixed Tasks 7 but missed Task 10's Test 7b (same signature bug) and that Task 11's `--collect-only` cannot detect runtime `skipif` conditions. v3 closes both. Total review-loop findings on the plan: 23 (1 from pass 2 + 22 from pass 1; one pass-1 finding was actually correct → harmless).
+**Plan version:** ✅ v3 final — **3-pass plan-review-loop CONVERGED**. Pass-1 (3 parallel reviewers: code-reviewer, pr-test-analyzer, silent-failure-hunter) found 21 issues including a CRITICAL signature mismatch (`execute_movement(pool, mesh, fields, ...)` not `landscape`). Pass-2 caught two new issues v2 introduced (Test 7b signature, Step 1a `--collect-only` skipif blindness). Pass-3 verified all closures + flagged one optional NIT (`tail -20` for warning-line resilience) — applied. **Plan ready for execution.** Total findings across 3 plan-review passes: 24.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -1923,7 +1923,7 @@ collection time, so `--collect-only` cannot detect skips):
 micromamba run -n shiny python -m pytest \
     tests/test_movement_gradient.py \
     -k "production_mesh or post_c33_teleport or teleport_then or matches_saved" \
-    -v 2>&1 | tail -10
+    -v 2>&1 | tail -20
 ```
 Expected output: each of the 4 tests reports `PASSED`; none report
 `SKIPPED`. If any are SKIPPED, the production NC is missing or
