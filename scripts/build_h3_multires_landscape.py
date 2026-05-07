@@ -78,6 +78,8 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import heapq
+import math
 import sys
 from pathlib import Path
 
@@ -129,6 +131,117 @@ DEFAULT_RES = {
     "BalticCoast":     9,
     "OpenBaltic":      9,
 }
+
+
+def compute_dist_from_sea(mesh) -> np.ndarray:
+    """Multi-source edge-length-weighted Dijkstra from OpenBaltic
+    water cells. Returns float32[N_cells] distance-in-meters.
+
+    Pure: does NOT mutate the input mesh. The caller (this build
+    script) writes the returned array to the landscape NC as the
+    `dist_from_sea` variable; H3Environment.from_netcdf attaches
+    it to mesh.dist_from_sea post-construction (see
+    docs/superpowers/specs/2026-05-07-c4-movement-gradient-design.md
+    "Where it lives" → mesh-attribute post-hoc subsection).
+
+    Determinism: source set is np.sort()-ed before pushing to heap;
+    heap tuples are (distance, cell_index) so ties break by cell
+    index. See spec §Determinism.
+
+    Raises RuntimeError if any water cell has no path to the
+    OpenBaltic source set (disconnected sub-graph). Error message
+    includes the reach name(s) of unreachable cells so the build
+    operator can locate the topology defect.
+    """
+    # Imports are at module top per v2 reviewer feedback.
+    N = mesh.N_cells
+    # Identify OpenBaltic water cells (the source set).
+    if "OpenBaltic" not in mesh.reach_names:
+        raise RuntimeError(
+            "compute_dist_from_sea: 'OpenBaltic' not in mesh.reach_names "
+            f"({mesh.reach_names!r}); cannot compute distance-from-sea "
+            "without a sea reach."
+        )
+    open_baltic_id = mesh.reach_names.index("OpenBaltic")
+    sources = np.where(
+        (mesh.reach_id == open_baltic_id) & mesh.water_mask
+    )[0]
+    sources = np.sort(sources)  # determinism: source-set order
+    if len(sources) == 0:
+        raise RuntimeError(
+            "compute_dist_from_sea: no OpenBaltic water cells; mesh has "
+            "the reach but every cell is water_mask=False."
+        )
+
+    # Initialise distances. Land cells stay NaN (per spec data structure).
+    dist = np.full(N, np.inf, dtype=np.float64)
+    dist[sources] = 0.0
+
+    # Min-heap: (distance, cell_index). Cell_index is the deterministic
+    # tie-break per spec §Determinism.
+    heap: list[tuple[float, int]] = [(0.0, int(c)) for c in sources]
+    heapq.heapify(heap)
+
+    while heap:
+        d, c = heapq.heappop(heap)
+        if d > dist[c]:
+            continue  # stale entry
+        # Iterate water-mask neighbors via CSR neighbor table.
+        s, e = int(mesh.nbr_starts[c]), int(mesh.nbr_starts[c + 1])
+        for k in range(s, e):
+            n = int(mesh.nbr_idx[k])
+            if n < 0 or not mesh.water_mask[n]:
+                continue
+            # Edge weight = haversine in meters between centroids.
+            lat1, lon1 = mesh.centroids[c]
+            lat2, lon2 = mesh.centroids[n]
+            edge_m = _haversine_m(lat1, lon1, lat2, lon2)
+            nd = d + edge_m
+            if nd < dist[n]:
+                dist[n] = nd
+                heapq.heappush(heap, (nd, n))
+
+    # Validate: every water cell must be reachable.
+    unreachable = np.where(
+        mesh.water_mask & ~np.isfinite(dist)
+    )[0]
+    if len(unreachable) > 0:
+        # Group by reach for the error message.
+        unreached_reaches: dict[str, int] = {}
+        for c in unreachable:
+            rid = int(mesh.reach_id[c])
+            name = (
+                mesh.reach_names[rid]
+                if 0 <= rid < len(mesh.reach_names)
+                else f"rid_{rid}"
+            )
+            unreached_reaches[name] = unreached_reaches.get(name, 0) + 1
+        raise RuntimeError(
+            "compute_dist_from_sea: water cells unreachable from "
+            "OpenBaltic — disconnected mesh sub-graph. Per-reach cell "
+            f"counts: {sorted(unreached_reaches.items())!r}. Fix the "
+            "mesh's neighbor table or remove the orphan cluster."
+        )
+
+    # Land cells get NaN (spec data structure).
+    out = dist.astype(np.float32)
+    out[~mesh.water_mask] = np.nan
+    return out
+
+
+def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance between two (lat, lon) points in meters."""
+    R_EARTH_M = 6371000.0
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlam = math.radians(lon2 - lon1)
+    a = (
+        math.sin(dphi / 2.0) ** 2
+        + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2.0) ** 2
+    )
+    c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
+    return R_EARTH_M * c
 
 
 def sample_cmems(
