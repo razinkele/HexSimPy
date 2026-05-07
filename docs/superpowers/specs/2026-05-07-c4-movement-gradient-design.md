@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-07
 **Owner:** @razinkele
-**Status:** 📋 DRAFT v4 — pass-3 corrections (cross-tier interactions section added; lateral-degeneracy at iso-distance contours documented; C2 reactivation flagged; C3.2 sea-age coupling marked absent; calibration assertion added to Test 6).
+**Status:** 📋 DRAFT v5 — pass-4 corrections (Test 1 fixture layout pinned; post-teleport invariant promoted to Test 7; compute_dist_from_sea signature/contract made explicit).
 
 C4 fixes a **substrate-level correctness defect** that has been latent
 since the H3 multi-resolution mesh shipped (v1.5.0, 2026-03 cohort).
@@ -223,9 +223,16 @@ build time.
 ### Where it lives
 
 - `scripts/build_h3_multires_landscape.py` — add a
-  `compute_dist_from_sea(mesh)` step after the neighbor table is
-  built. Save as `float32` variable in the NC. Print per-reach
-  distribution to stdout for sanity-check during build.
+  `compute_dist_from_sea(mesh) -> np.ndarray` function that
+  returns a `float32[N_cells]` distance array (in meters from the
+  nearest OpenBaltic water cell). The function is **pure**: it
+  does NOT mutate `mesh`. The build script calls it after the
+  neighbor table is built, writes the returned array to NC as a
+  variable named `dist_from_sea`, and prints per-reach
+  distribution to stdout for sanity-check. The `mesh.dist_from_sea`
+  attribute is set later by `H3Environment.from_netcdf`
+  post-construction (see h3_env.py load sequence below), NOT by
+  the build script — keeping the build path side-effect-free.
 - **Mesh attribute (post-hoc):** `mesh.dist_from_sea` is set as
   a post-construction attribute, NOT via `H3MultiResMesh.__init__`.
   The class has no `__slots__`, so dynamic attribute assignment
@@ -334,8 +341,17 @@ which is the legacy behavior; documented as the broken state if
 ### Unit (new)
 
 **Test 1: linear-chain gradient.** Construct a synthetic 10-cell
-chain mesh with `dist_from_sea = [0, 100, 200, ..., 900]`. Place a
-single agent at cell 0 in UPSTREAM behavior. Pin
+chain mesh with:
+- `dist_from_sea = np.arange(10, dtype=np.float32) * 100.0`
+  (i.e., `[0, 100, 200, ..., 900]`)
+- `water_nbr_count = np.ones(10, dtype=np.int32)`
+  (one neighbor per cell — unidirectional chain)
+- `water_nbrs = np.full((10, 1), -1, dtype=np.int32);
+  water_nbrs[:9, 0] = np.arange(1, 10)`
+  (cell `i` has exactly one neighbor: cell `i+1`; cell 9 is a
+  dead-end with no neighbor)
+
+Place a single agent at cell 0 in UPSTREAM behavior. Pin
 `n_micro_steps_per_cell = np.ones(10, dtype=np.int32)` (one hop
 per cell — the directed kernel's even-step gradient + odd-step
 random pattern means with `n_micro=1` the only hop is even-indexed
@@ -379,6 +395,22 @@ The full chain order (OpenBaltic < BalticCoast < CuronianLagoon
 both the strait (close to sea) and the eastern shore (far from
 sea), so its per-reach mean is bimodal and doesn't fit a strict
 total order. Pure data assertion, runs fast.
+
+**Test 7: post-C3.3-teleport invariant.** Lives in
+`tests/test_movement_gradient.py` alongside the other unit tests.
+Load `data/curonian_h3_multires_landscape.nc` (production mesh,
+rebuilt with `dist_from_sea`). For each delta-branch reach
+(Atmata, Skirvyte, Gilija): compute the entry cell via
+`_branch_entry_cell(mesh, branch_rid)`; assert at least one of
+the entry cell's water neighbors has strictly higher
+`dist_from_sea` than the entry cell itself. This guarantees that
+a returning adult teleported by C3.3's stray dispatch can
+progress inland on the next UPSTREAM step rather than oscillate
+at the branch mouth. If the assertion fails on the production
+mesh, the test surfaces a topology-config defect (e.g., an entry
+cell positioned at a confluence where lagoon-side and inland-side
+neighbors have similar gradient values). Pure data assertion;
+runs in milliseconds.
 
 ### Regression (existing)
 
@@ -548,6 +580,8 @@ introduction (so C2/C3.1/C3.3 can dispatch by origin). C4 doesn't
 read `origin` directly — the gradient is origin-blind by design.
 But C4 unblocks the *observable* expression of the origin-aware
 behaviors layered on top.
+
+## Open questions
 
 All open questions from earlier drafts are RESOLVED in v3.
 
