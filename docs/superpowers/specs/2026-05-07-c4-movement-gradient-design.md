@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-07
 **Owner:** @razinkele
-**Status:** 📋 DRAFT v2 — pass-1 corrections (ascending-flag inversion fix; dispatch line range; n_micro_steps test pinning; test-suite count pinned to date; per-reach order assertion narrowed; Nemunas NC note; warning channel decided).
+**Status:** 📋 DRAFT v3 — pass-2 corrections (advance() overwrite trap fix; Nemunas NC deferred; mesh-attribute pattern clarified; OQ1+OQ2 resolved).
 
 C4 fixes a **substrate-level correctness defect** that has been latent
 since the H3 multi-resolution mesh shipped (v1.5.0, 2026-03 cohort).
@@ -158,6 +158,19 @@ gradient would still need a separate signal.
   multi-objective behavior dispatch). The existing
   `_step_directed_numba` / `_vec` architecture is sound; C4 is a
   data-source change, not an algorithmic one.
+- **Nemunas NC support** (`data/nemunas_h3_landscape.nc`).
+  Initially in scope but rejected at v3 review. The Nemunas
+  build script (`scripts/build_nemunas_h3_landscape.py`) is a
+  separate uniform-resolution pipeline that does NOT build a
+  CSR neighbour table — there is no `nbr_starts`/`nbr_idx` on
+  the Nemunas NC, so multi-source Dijkstra on the mesh's
+  neighbour graph cannot run. Adding `dist_from_sea` to the
+  Nemunas pipeline requires either (a) building an inline
+  H3 ring-1 neighbour table in that script, or (b) refactoring
+  to share `H3MultiResMesh` machinery. Neither is part of C4.
+  The Nemunas NC is a development/research asset, not the
+  production deploy (laguna.ku.lt loads the Curonian multi-res
+  NC); deferring this is low-impact for production. Future tier.
 
 ## Architecture
 
@@ -202,23 +215,53 @@ build time.
   `compute_dist_from_sea(mesh)` step after the neighbor table is
   built. Save as `float32` variable in the NC. Print per-reach
   distribution to stdout for sanity-check during build.
+- **Mesh attribute (post-hoc):** `mesh.dist_from_sea` is set as
+  a post-construction attribute, NOT via `H3MultiResMesh.__init__`.
+  The class has no `__slots__`, so dynamic attribute assignment
+  works at runtime. Intentional tradeoff for C4: avoiding a
+  constructor signature change keeps the mesh-build / mesh-load
+  paths unchanged for non-Baltic / legacy callers. A future tier
+  can promote `dist_from_sea` to a constructor parameter if the
+  mesh ever gains static-typing enforcement. The analogy with
+  `reach_id`/`water_mask` applies to the *runtime data shape*
+  (per-cell static array on the mesh), not to the constructor
+  contract (those fields ARE in `__init__`; `dist_from_sea` is
+  not).
 - `salmon_ibm/h3_env.py` — `H3Environment.from_netcdf` loads
   `dist_from_sea` (1D, `float32[N_cells]`, time-independent) if
-  present. **Storage choice:** attach as `mesh.dist_from_sea`
-  attribute (mirrors how `reach_id`, `water_mask`,
-  `_water_nbr_count` are already attached to the mesh as static
-  per-cell data) AND expose via `fields["dist_from_sea"]` so
-  movement.py's existing `fields["..."]` lookup pattern keeps
-  working. The `fields` entry is set once at env init and is
-  NOT touched by `advance()` (it's static — does not change per
-  step). The load step must run BEFORE the `n_time` inference at
-  the existing `h3_env.py:121-122` so `full_fields` ordering is
-  unaffected. If the variable is missing, emit a clear
-  `logging.warning` (matching the C3.3 convention at
-  `salmon_ibm.delta_routing` logger; not `warnings.warn` —
-  see Open Question 3) and zero-fill the `(N_cells,)` array as
-  fallback to preserve existing dormant-but-non-crashing
-  behavior.
+  present.
+
+  **Storage path — load order matters.** `dist_from_sea` MUST
+  NOT enter `full_fields` / `self._full_fields`. The existing
+  `advance()` (`h3_env.py:153`) iterates `self._full_fields.items()`
+  and does `np.copyto(self.fields[name], arr[self._time_idx])`.
+  If `dist_from_sea` (shape `(N,)`) entered `_full_fields`, then
+  `arr[self._time_idx]` would be a *scalar* (single float) and
+  `np.copyto` would broadcast-fill the whole `(N,)` field every
+  step — silently corrupting the gradient into a uniform value.
+  Additionally, the `n_time = full_fields[next(iter(...))].shape[0]`
+  inference at `h3_env.py:121-122` would mis-fire on a 1D entry.
+
+  **Correct load sequence in `from_netcdf`:**
+  1. Build `full_fields` from `_FIELD_RENAME` time-indexed vars
+     (existing logic — unchanged).
+  2. Run the existing `n_time` inference + ssh zero-fill
+     (existing logic — unchanged).
+  3. Construct: `env = cls(mesh=mesh, full_fields=full_fields,
+     time=ds["time"].values)`.
+  4. Load `dist_from_sea` if present in `ds.variables`. Inject
+     directly: `env.fields["dist_from_sea"] = arr` and
+     `mesh.dist_from_sea = arr`. (See Architecture §"Where it
+     lives" for the post-hoc-attribute rationale.)
+  5. If absent: emit `logging.getLogger("salmon_ibm.h3_env").warning(
+     "%s: dist_from_sea missing from NC ...", ERR_DIST_FROM_SEA_MISSING)`
+     and zero-fill: `env.fields["dist_from_sea"] = np.zeros(N,
+     dtype=np.float32)`; `mesh.dist_from_sea = ...` same.
+  6. Return env.
+
+  Because step 4/5 happens AFTER `cls(...)` and writes directly
+  to `env.fields`, `advance()` never touches the entry. The
+  `(N,)` shape stays intact across all timesteps.
 - `salmon_ibm/movement.py` — `_step_directed_numba` and
   `_step_directed_vec` UPSTREAM/DOWNSTREAM paths read
   `fields["dist_from_sea"]` instead of `fields["ssh"]`. The
@@ -273,8 +316,7 @@ which is the legacy behavior; documented as the broken state if
 | `tests/test_movement_gradient.py` (NEW)            | Create      | Synthetic 10-cell chain + gradient-following assertion       |
 | `tests/test_h3_env.py`                             | Modify      | Add load + missing-field warning test                        |
 | `tests/test_movement.py` or equivalent             | Modify      | Replace `ssh` references in test fixtures with `dist_from_sea`|
-| `data/curonian_h3_multires_landscape.nc`           | Rebuild     | Run the build script with the new step (separate from PR)    |
-| `data/nemunas_h3_landscape.nc`                     | Rebuild     | Built by the same `build_h3_multires_landscape.py` (or its sibling `build_nemunas_h3_landscape.py`) and uses the same reach-id taxonomy including OpenBaltic; both NCs need the new variable. |
+| `data/curonian_h3_multires_landscape.nc`           | Rebuild     | Run the build script with the new step (separate from PR). This is the NC the deployed app uses. |
 
 ## Tests
 
@@ -385,43 +427,45 @@ pipeline.
   `dist_from_sea` (and accepting the dormant movement), or
   (b) re-running the analysis with the C4-rebuilt NC.
 
-## Open questions for review
+## Open questions
 
-1. **Reach OpenBaltic boundary:** is the source set "all cells
-   where `reach_id == OpenBaltic AND water_mask`" the right
-   definition? Alternative: cells on the *outer boundary* of the
-   OpenBaltic polygon (closest to the open Atlantic). The current
-   choice gives a "distance to nearest open sea" which is locally
-   correct but might be biased toward whichever direction OpenBaltic
-   extends most.
-2. **Nemunas headwaters:** the gradient is monotone-increasing as
-   you go inland. The deployed mesh's Nemunas reach extends to the
-   eastern edge of the bbox at `21.90E`. Cells beyond the bbox are
-   not in the mesh; an upstream-swimming agent will accumulate
-   `dist_from_sea` until it hits the mesh edge, then have no
-   higher-gradient neighbor. What's the desired behavior at the
-   mesh edge? Spec proposes: continue with random walk (no higher
-   neighbor → directed kernel falls through to RANDOM-equivalent
-   semantics). This is biologically defensible (real salmon would
-   reach their natal tributary somewhere along the way and stop)
-   but should be explicit.
+All open questions from earlier drafts are RESOLVED in v3.
+
+1. **Source-set definition: RESOLVED.** Source set = all cells
+   where `reach_id == OpenBaltic AND water_mask == True`. Multi-
+   source Dijkstra computes "distance to the nearest OpenBaltic
+   water cell". An "outer-boundary-only" alternative was
+   considered (would give "distance to the open Atlantic"
+   semantically) but rejected because (a) the OpenBaltic polygon
+   on the deployed mesh already represents the seaward extent
+   (everything beyond is land or off-mesh), so the inner cells
+   already give a usable nearest-sea reference, and (b) outer-
+   boundary detection adds a polygon-geometry step that's not
+   warranted given the simpler choice works.
+
+2. **Mesh-edge fallback: RESOLVED.** When an upstream-swimming
+   agent reaches the bbox's eastern edge (where the mesh ends)
+   and has no neighbor with higher `dist_from_sea`, the directed
+   kernel's existing `cnt > 0` + best-not-found path applies:
+   the gradient comparison fails (no neighbor strictly higher),
+   so `best_nbr` defaults to `water_nbrs[c, 0]` (slot-0 neighbor)
+   on even micro-steps and a random neighbor on odd. The agent
+   degrades to a random walk in the mesh-edge region —
+   biologically defensible (real salmon reach their natal
+   tributary somewhere along the river and stop) and matches
+   the existing kernel semantics without a code change.
+
 3. **Backward-compat warning channel: RESOLVED in v2.** Use
    `logging.getLogger("salmon_ibm.h3_env").warning(...)` to match
-   C3.3's pattern (`salmon_ibm.delta_routing` logger emits the
-   `homing-hatchery-no-dispatch` warning via the same channel).
-   Stdlib `warnings.warn` is rejected because the project's
-   operational paths uniformly use `logging.warning`. An ERR_ID
-   constant `ERR_DIST_FROM_SEA_MISSING = "dist-from-sea-missing"`
-   should be defined alongside the warning, mirroring
-   `ERR_HOMING_HATCHERY_NO_DISPATCH` in `delta_routing.py:43`, so
-   operators can grep production logs.
-4. **Test 6's monotonicity ordering:** is the assumed reach order
-   (OpenBaltic < BalticCoast < CuronianLagoon < delta < Nemunas)
-   correct? The CuronianLagoon has both the strait (close to sea)
-   and the eastern shore (far from sea); per-reach mean might mask
-   bimodal distribution. The test should probably assert
-   "OpenBaltic mean < Nemunas mean" only — the strict total order
-   may not hold geographically. Tighten this during review.
+   C3.3's pattern. ERR_ID constant
+   `ERR_DIST_FROM_SEA_MISSING = "dist-from-sea-missing"` defined
+   in `h3_env.py` alongside the load step.
+
+4. **Test 6's monotonicity ordering: RESOLVED in v2.** Assert
+   only `mean(OpenBaltic) < mean(Nemunas)`,
+   `min(Nemunas) > mean(OpenBaltic)`, and `delta-cells >
+   mean(BalticCoast)`. Strict full-chain ordering dropped
+   because CuronianLagoon's per-reach mean is bimodal.
 
 ## References
 
