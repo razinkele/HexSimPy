@@ -72,7 +72,7 @@ def test_compute_dist_from_sea_raises_on_disconnected_component():
         compute_dist_from_sea(mesh)
 
 
-def _make_chain_mesh(n: int = 10, sea_at_zero: bool = True) -> _SyntheticMesh:
+def _make_chain_mesh(n: int = 10) -> _SyntheticMesh:
     """10-cell bidirectional chain. Cell 0 = OpenBaltic source.
     Cells 1..n-1 = Nemunas (river). Used by Tests 1, 2, 2b, 3, 5b."""
     # Bidirectional CSR: cell i has neighbors {i-1, i+1} where they exist.
@@ -148,3 +148,8 @@ def test_compute_dist_from_sea_y_junction_tie_break():
     # Cells 1, 2, 3 all reachable, finite, > 0.
     assert np.all(np.isfinite(out1[1:]))
     assert np.all(out1[1:] > 0)
+    # Cells 1 and 3 are placed at lat offsets +/- 0.0009 from cell 0
+    # with identical lon — haversine produces bit-identical distances
+    # for them. Cell 2 (lon-offset arm) is only approximately
+    # equidistant; the determinism check above already covers it.
+    assert out1[1] == out1[3]
