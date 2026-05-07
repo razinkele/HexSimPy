@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-07
 **Owner:** @razinkele
-**Status:** 📋 DRAFT v3 — pass-2 corrections (advance() overwrite trap fix; Nemunas NC deferred; mesh-attribute pattern clarified; OQ1+OQ2 resolved).
+**Status:** 📋 DRAFT v4 — pass-3 corrections (cross-tier interactions section added; lateral-degeneracy at iso-distance contours documented; C2 reactivation flagged; C3.2 sea-age coupling marked absent; calibration assertion added to Test 6).
 
 C4 fixes a **substrate-level correctness defect** that has been latent
 since the H3 multi-resolution mesh shipped (v1.5.0, 2026-03 cohort).
@@ -173,6 +173,17 @@ gradient would still need a separate signal.
   NC); deferring this is low-impact for production. Future tier.
 
 ## Architecture
+
+C4 is a **topology-only movement abstraction**. It does not encode
+olfaction, magnetic compass cues, hydroacoustic recognition, or any
+of the multi-modal cues real Atlantic salmon use during the homing
+phase of migration. The gradient is sufficient to deliver agents
+from open Baltic into the lagoon and through the delta-mouth funnel;
+once at the delta, **C3.3's branch-level dispatch handles the
+natal-vs-stray decision** (which is the cue C4 cannot encode at
+single-field granularity). A future per-natal-reach gradient tier
+could replace this single field with an N-field array if individual-
+fidelity homing becomes a research requirement; that's deferred.
 
 ### Data structure
 
@@ -386,9 +397,19 @@ After deploy, a Playwright run on https://laguna.ku.lt/HexSimPy/
 asserts ≥ 1 agent reaches a delta branch (Atmata/Skirvyte/Gilija)
 within 480 hours at default settings (50 agents, seed=42). Captured
 via `__deckgl_instances.map.lastLayers` inspection of the trips
-layer or by polling the agent state. This becomes the C4
-acceptance test and the ongoing smoke-test for the migration
-pipeline.
+layer or by polling the agent state. This is the C4 acceptance
+test and the ongoing smoke-test for the migration pipeline.
+
+**Calibration sanity assertion** (in addition to ≥ 1 arrival):
+median fraction of alive agents reaching at least 50% of the mesh's
+`max(dist_from_sea)` by hour 240 should exceed 30%. Free-swim
+calculation: ~30 km Baltic-to-delta path at ~1 m/s gives ~8 hours
+straight-line; real arrivals with diffusive overhead and odd-step
+random hops are expected at 100-300 hours. Catches the
+"barely-1-arrival" pathology where the gradient is technically
+non-zero but too weak to drive realistic timescales — a passing
+acceptance test under that pathology would still leave C3.3
+effectively dormant.
 
 ## Performance
 
@@ -427,7 +448,106 @@ pipeline.
   `dist_from_sea` (and accepting the dormant movement), or
   (b) re-running the analysis with the C4-rebuilt NC.
 
-## Open questions
+## Interactions with C1–C3.3
+
+C4 sits underneath the four-tier hatchery-vs-wild architecture. Each
+prior tier has at least one interaction worth documenting; some are
+*reactivations* of behavior that was dormant pre-C4, not new effects.
+
+### C3.3 (homing precision at delta entry) — primary interaction
+
+C3.3's stray dispatch teleports an agent to `_branch_entry_cell` of
+the chosen branch on first delta-branch entry. The teleport target
+is the lowest-index swimmable cell of the chosen branch (per the M1
+hotfix on branch `c3.3-teleport-water-check`). Under C4 this cell
+sits at the *low* end of the chosen branch's `dist_from_sea`
+gradient: the branch mouth, just inland of the lagoon. The agent's
+next UPSTREAM step climbs the gradient inland; biologically
+defensible.
+
+**Failure mode worth a test:** at a confluence/multi-branch node,
+the lagoon-side neighbor's `dist_from_sea` could be comparable to
+the inland-side neighbor's. The directed kernel's tie-breaking
+(slot-0 fallback when no strict-higher neighbor exists) could push
+a teleported strayer back toward the lagoon. Their `exit_branch_id`
+is now sticky-set, so they won't re-trigger C3.3 — they would
+oscillate near the branch mouth instead of progressing inland. C4's
+test suite should include a post-teleport invariant: "after a C3.3
+stray teleport, the agent has at least one strictly-higher
+`dist_from_sea` neighbor available." If this fails for any branch
+on the production mesh, the build script should warn (not error —
+the agent could still arrive eventually via odd-step random walks).
+
+### C3.3 (homing precision) — natal-homing degeneracy at iso-distance contours
+
+C3.3 only fires *at* delta-branch entry. Before that, an agent's
+choice of *which* branch to approach is governed entirely by C4's
+gradient. **The gradient does NOT encode branch identity.** Two
+delta-branch mouths at similar lagoon-shore positions have similar
+`dist_from_sea`; an agent in the lagoon already heading inland sees
+zero lateral signal distinguishing Atmata from Skirvyte from Gilija.
+This means **a wild fish whose natal branch is Gilija but who
+happens to drift toward the Skirvyte mouth will preferentially enter
+Skirvyte first** — at which point C3.3's homing dispatch fires and
+either (a) homes them to Skirvyte (treating them as a Skirvyte fish
+even though they're natal-Gilija), or (b) draws Gilija via the
+homing-precision probability and teleports them. The second path
+recovers the natal signal. The first path is a known limitation: a
+strict reading of C3.3's "first delta-branch entry" plus C4's
+identity-blind gradient produces an over-estimate of the
+"non-natal-branch first-touch" rate, even for wild fish.
+
+**This is documented as a known limitation, not a bug to fix in
+C4.** The proper fix is per-natal-reach gradient (one field per
+delta branch, agents look up `gradient_for_reach[natal_reach_id]`)
+— deferred to a future tier per the Out-of-scope section. C4's
+single global gradient is sufficient for the IBM's current
+research goal (population-level wild-vs-hatchery contrast) but not
+for individual-fidelity homing.
+
+### C2 (activity multiplier) — semantic reactivation
+
+C2 gives hatchery agents +25% activity multiplier on RANDOM and
+UPSTREAM behaviors. **Pre-C4, this multiplier translated to +25%
+diffusion rate** because UPSTREAM degenerated to an oscillating
+random walk under flat-zero SSH. **Post-C4, the same multiplier
+becomes +25% directed swim** — hatchery agents arrive at delta
+branches *earlier* than wild agents, by ~25% in expectation.
+
+This is a *reactivation* of existing C2 behavior, not a new effect.
+But the operational consequence shifts from "metabolic-cost-only"
+to "metabolic-cost + earlier-arrival timing". Downstream analyses
+that compare arrival-time distributions should expect a
+hatchery-vs-wild shift on the C4-deployed mesh that was absent on
+the pre-C4 mesh. Cite this in any results that compare the two
+deploys.
+
+### C3.1 (pre-spawn skip) — no direct C4 interaction
+
+C3.1 fires at the reproduction event (post-arrival). C4 affects
+*whether and when* an agent reaches the spawning ground; once
+there, C3.1's hatchery-skip-probability is unchanged. No spec
+update needed for C3.1.
+
+### C3.2 (sea-age) — coupling intentionally absent
+
+C3.2 sets `sea_age` at agent introduction. Real biology: 3SW > 2SW
+> 1SW body length → swim speed scales (weakly). The IBM uses
+`n_micro_steps_per_cell` from `simulation.py:251`, which depends on
+cell edge length, NOT on agent state. **C4 does not couple sea_age
+to swim speed** — all agents move identically regardless of
+sea_age. This matches the pre-C4 movement model (no behavior change
+under C4); coupling sea_age → swim speed is a future tier
+("body-size-dependent movement", not in the deferred Curonian-
+realism list as of 2026-05-07).
+
+### C1 (origin tag) — required infrastructure
+
+C4's correctness depends on C1's `origin` tag being set at
+introduction (so C2/C3.1/C3.3 can dispatch by origin). C4 doesn't
+read `origin` directly — the gradient is origin-blind by design.
+But C4 unblocks the *observable* expression of the origin-aware
+behaviors layered on top.
 
 All open questions from earlier drafts are RESOLVED in v3.
 
