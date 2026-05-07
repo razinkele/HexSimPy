@@ -1,6 +1,6 @@
 # C4 Movement Gradient Implementation Plan
 
-**Plan version:** v2 — pass-1 review-loop corrections applied. Three parallel reviewers (code-reviewer, pr-test-analyzer, silent-failure-hunter) found ~21 issues including a CRITICAL design flaw: `execute_movement(pool, mesh, fields, ...)` takes `fields` not `landscape`, so the dormancy check cannot be called from inside the kernel. v2 moves the check to `MovementEvent.execute` (events_builtin.py:25-48) which already has `landscape`. Other v2 corrections: Case B check (d) logic gap, `_FakeMesh.n_triangles` missing, fixture duplication, float32 cast in Test 5b, identity-assertion for shared array reference, reload cfg per-branch in Test 7b, explicit Behavior import grep, `_water_nbrs` build in Task 9 mesh shim, programmatic NC verify after rebuild.
+**Plan version:** v3 — pass-2 review-loop fixed two new issues v2 introduced. Pass-1 (3 parallel reviewers) found 21 issues including a CRITICAL signature mismatch (`execute_movement(pool, mesh, fields, ...)` not `landscape`); pass-2 caught that v2 fixed Tasks 7 but missed Task 10's Test 7b (same signature bug) and that Task 11's `--collect-only` cannot detect runtime `skipif` conditions. v3 closes both. Total review-loop findings on the plan: 23 (1 from pass 2 + 22 from pass 1; one pass-1 finding was actually correct → harmless).
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -1809,15 +1809,17 @@ def test_teleport_then_upstream_advances_inland():
             f"landed on rid={reach_id[post_teleport_cell]}"
         )
 
-        # Phase 2: one UPSTREAM step.
-        class _FakeEnv:
-            pass
-        env = _FakeEnv()
-        env.fields = landscape["fields"]
-        env._dormant_gradient_check_done = False
-        landscape["env"] = env
-
-        execute_movement(pool, mesh, landscape)
+        # Phase 2: one UPSTREAM step. Call execute_movement with the
+        # CORRECT signature: (pool, mesh, fields, seed=..., n_micro_...).
+        # The dormancy check fires at MovementEvent.execute layer in
+        # production; this test bypasses that layer (we're testing
+        # the kernel field-swap + post-teleport progress, not the
+        # dormancy guard).
+        execute_movement(
+            pool, mesh, landscape["fields"],
+            seed=12345,
+            n_micro_steps_per_cell=landscape["n_micro_steps_per_cell"],
+        )
         final_cell = int(pool.tri_idx[0])
         final_dist = float(dist[final_cell])
 
@@ -1912,17 +1914,21 @@ test -f data/curonian_h3_multires_landscape.nc || \
     { echo "FAIL: production NC missing"; exit 1; }
 ```
 
-Then verify the 4 production-dependent tests are collected and
-NOT skipped:
+Then **actually run** the 4 production-dependent tests (not
+`--collect-only` — `@pytest.mark.skipif` with a runtime condition
+like `not PRODUCTION_NC.exists()` is evaluated at *run* time, not
+collection time, so `--collect-only` cannot detect skips):
+
 ```bash
 micromamba run -n shiny python -m pytest \
     tests/test_movement_gradient.py \
     -k "production_mesh or post_c33_teleport or teleport_then or matches_saved" \
-    --collect-only -q
+    -v 2>&1 | tail -10
 ```
-Expected output: 4 tests collected, none with "skipped" in the
-summary. If any are skipped, the NC build is silently incomplete
-— STOP and re-run Task 8 Step 3.
+Expected output: each of the 4 tests reports `PASSED`; none report
+`SKIPPED`. If any are SKIPPED, the production NC is missing or
+incomplete despite Step 1a's `test -f` check (e.g., a zero-byte
+file from a crashed build) — STOP and re-run Task 8 Step 3.
 
 - [ ] **Step 1b: Run full pytest suite**
 
