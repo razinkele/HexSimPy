@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-07
 **Owner:** @razinkele
-**Status:** 📋 DRAFT v9 — pass-9 correction (err-id prefix on the sim-time `_check_dormant_gradient` RuntimeError message for grep-ability + consistency with the project's err-id discipline).
+**Status:** ✅ CONVERGED v9 — **10-pass review-loop complete, deeper than the C3.3 8-pass cycle**. Pass-10 verification found one residual prose-quoting NIT (Case B `getattr` argument missing string quotes); fixed inline as v9 final. Implementation-ready. Awaiting writing-plans.
 
 C4 fixes a **substrate-level correctness defect** that has been latent
 since the H3 multi-resolution mesh shipped (v1.5.0, 2026-03 cohort).
@@ -411,8 +411,8 @@ Case A steps 2-4):
 3. `env._dormant_gradient_check_done = False` — per-instance
    latch flag for the sim-time check. Same purpose and same
    default as Case A step 4. Both paths MUST initialize this
-   attribute so the sim-time helper's `getattr(...,
-   _dormant_gradient_check_done, True)` default-True branch is
+   attribute so the sim-time helper's `getattr(env,
+   "_dormant_gradient_check_done", True)` default-True branch is
    never reachable on a properly-initialized env.
 
 All err-id constants live in `salmon_ibm/h3_env.py` as module-
