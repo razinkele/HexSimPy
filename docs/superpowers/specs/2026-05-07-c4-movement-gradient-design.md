@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-07
 **Owner:** @razinkele
-**Status:** 📋 DRAFT v7 — pass-7 corrections (sim-init warn↔sim-time raise contradiction reconciled — structural failures now RAISE at sim init; latched flag moved from module-global to per-env-instance to avoid cross-test leak; OpenBaltic_id resolution path pinned; np.where ordering wording tightened; Test 5b switched to equal_nan=True; Test 6 NC-rebuilt precondition added).
+**Status:** 📋 DRAFT v8 — pass-8 corrections (Case A explicit flag init in step 5; Landscape TypedDict updated for `env` key; simulation.py added to implementation files; Test 1 fixture made bidirectional so Test 2 DOWNSTREAM is actually testable).
 
 C4 fixes a **substrate-level correctness defect** that has been latent
 since the H3 multi-resolution mesh shipped (v1.5.0, 2026-03 cohort).
@@ -349,17 +349,29 @@ or a stale/corrupt NC ships silently to production.
 **Case A — `dist_from_sea` variable absent from NC** (backward-
 compat with pre-C4 NCs):
 
-Emit `logging.getLogger("salmon_ibm.h3_env").warning(
-"%s: dist_from_sea missing from NC; movement gradient will be
-flat — agents will not migrate. Rebuild landscape with
-build_h3_multires_landscape.py.", ERR_DIST_FROM_SEA_MISSING)`.
-Zero-fill `(N_cells,)` as fallback. Sim continues; agents using
-UPSTREAM/DOWNSTREAM hit the sim-time latched raise (below).
+The 4-step Case A sequence (executed in `from_netcdf` AFTER the
+existing `cls(...)` construction; never as part of `full_fields`):
+
+1. Emit `logging.getLogger("salmon_ibm.h3_env").warning(
+   "%s: dist_from_sea missing from NC; movement gradient will be
+   flat — agents will not migrate. Rebuild landscape with
+   build_h3_multires_landscape.py.", ERR_DIST_FROM_SEA_MISSING)`.
+2. `env.fields["dist_from_sea"] = np.zeros(N_cells, dtype=np.float32)`.
+3. `mesh.dist_from_sea = env.fields["dist_from_sea"]` (same array,
+   not a copy — both references must stay in sync if the array is
+   later replaced by a hot-reload mechanism).
+4. **Initialize the per-env latch flag:**
+   `env._dormant_gradient_check_done = False`. Without this, the
+   sim-time `_check_dormant_gradient` helper (which reads
+   `getattr(env, "_dormant_gradient_check_done", True)`) will see
+   the missing attribute, default to `True`, and silently skip
+   the dormancy raise — defeating the entire backward-compat
+   safety net for Case A.
 
 This case is graceful by design: an old NC predating C4 should
 load and run — just with dormant movement, identical to its
-pre-C4 behavior. The sim-time raise will catch any dormant-and-
-directed-agents combination explicitly.
+pre-C4 behavior. The sim-time raise (gated by step 4's flag)
+will catch any dormant-and-directed-agents combination explicitly.
 
 **Case B — `dist_from_sea` variable present but structurally
 invalid** (corrupt build, schema regression, post-C4 NC defect):
@@ -389,10 +401,19 @@ non-Baltic mesh has nothing to validate against). Pin this
 lookup explicitly in the implementation; do NOT use a stale
 constant or a separate id-mapping dict.
 
-On all checks passing: inject `env.fields["dist_from_sea"] =
-arr.astype(np.float32)` and `mesh.dist_from_sea = arr.astype(
-np.float32)`. Also initialize `env._dormant_gradient_check_done
-= False` (per-instance latch flag for sim-time check, see below).
+On all checks passing, the Case B 3-step injection (mirroring
+Case A steps 2-4):
+
+1. `arr32 = arr.astype(np.float32)` (single cast; reused).
+2. `env.fields["dist_from_sea"] = arr32`;
+   `mesh.dist_from_sea = arr32` (same array reference, not
+   independent copies — see Case A rationale).
+3. `env._dormant_gradient_check_done = False` — per-instance
+   latch flag for the sim-time check. Same purpose and same
+   default as Case A step 4. Both paths MUST initialize this
+   attribute so the sim-time helper's `getattr(...,
+   _dormant_gradient_check_done, True)` default-True branch is
+   never reachable on a properly-initialized env.
 
 All err-id constants live in `salmon_ibm/h3_env.py` as module-
 level strings, mirroring `ERR_HOMING_HATCHERY_NO_DISPATCH` in
@@ -456,11 +477,24 @@ this flag.
 
 The check is **landscape-aware** via `landscape.get("env")` —
 the env reference must therefore be added to the landscape
-dict at sim-step time. Update `simulation.py:_step_landscape()`
-(or equivalent) to include `"env": self.env` in the landscape
-dict. If `env` is absent (e.g., a TriMesh / HexMesh fallback
-with no `H3Environment`), the check no-ops via the `env is None`
-guard — backward-compat with non-Baltic configs.
+dict at sim-step time. Two updates required in `simulation.py`,
+both per the CLAUDE.md convention "`Landscape` TypedDict in
+`simulation.py` defines the event context schema. Add new keys
+there when extending the landscape dict":
+
+1. **TypedDict definition** (current location around
+   `simulation.py:12-33`): add an `env: H3Environment | None`
+   field. Use `| None` because TriMesh / HexMesh fallback paths
+   construct the landscape without an `H3Environment`.
+2. **Landscape construction site** (current `step()` method,
+   around `simulation.py:602`): include
+   `"env": getattr(self, "env", None)` in the dict. Use
+   `getattr` defensively in case any sim path constructs the
+   landscape before `self.env` is bound.
+
+If `env` is absent (e.g., a TriMesh / HexMesh fallback with no
+`H3Environment`), the check no-ops via the `env is None` guard
+— backward-compat with non-Baltic configs.
 
 Why landscape-not-module: the C3.3 spec memory entry explicitly
 notes module-level state can leak across in-process landscape
@@ -472,8 +506,9 @@ check.
 | File                                               | Change type | Notes                                                        |
 |----------------------------------------------------|-------------|--------------------------------------------------------------|
 | `scripts/build_h3_multires_landscape.py`           | Modify      | Add `compute_dist_from_sea` step + sanity-output             |
-| `salmon_ibm/h3_env.py`                             | Modify      | Load `dist_from_sea`; warn + zero-fill if missing            |
-| `salmon_ibm/movement.py`                           | Modify      | UPSTREAM/DOWNSTREAM read `dist_from_sea` (2 identifier sites)|
+| `salmon_ibm/h3_env.py`                             | Modify      | Load `dist_from_sea` (Case A absent / Case B structural validation); err-id constants; per-env latch init |
+| `salmon_ibm/movement.py`                           | Modify      | UPSTREAM/DOWNSTREAM read `dist_from_sea` (2 identifier sites at lines 102, 120; ascending flag flips at 107, 125); add `_check_dormant_gradient(landscape, buckets)` helper called once before the dispatch block at line 94 |
+| `salmon_ibm/simulation.py`                         | Modify      | Add `"env": self.env` key to the landscape dict at the existing `step()` landscape construction site; add `env: H3Environment \| None` (or equivalent) to the `Landscape` TypedDict per the project convention "`Landscape` TypedDict in `simulation.py` defines the event context schema" (CLAUDE.md). |
 | `tests/test_movement_gradient.py` (NEW)            | Create      | Synthetic 10-cell chain + gradient-following assertion       |
 | `tests/test_h3_env.py`                             | Modify      | Add load + missing-field warning test                        |
 | `tests/test_movement.py` or equivalent             | Modify      | Replace `ssh` references in test fixtures with `dist_from_sea`|
@@ -484,15 +519,21 @@ check.
 ### Unit (new)
 
 **Test 1: linear-chain gradient.** Construct a synthetic 10-cell
-chain mesh with:
+**bidirectional** chain mesh with:
 - `dist_from_sea = np.arange(10, dtype=np.float32) * 100.0`
   (i.e., `[0, 100, 200, ..., 900]`)
-- `water_nbr_count = np.ones(10, dtype=np.int32)`
-  (one neighbor per cell — unidirectional chain)
-- `water_nbrs = np.full((10, 1), -1, dtype=np.int32);
-  water_nbrs[:9, 0] = np.arange(1, 10)`
-  (cell `i` has exactly one neighbor: cell `i+1`; cell 9 is a
-  dead-end with no neighbor)
+- `water_nbrs = np.full((10, 2), -1, dtype=np.int32)`;
+  `water_nbrs[i, 0] = i+1` for `i in 0..8`;
+  `water_nbrs[i, 1] = i-1` for `i in 1..9`. Cell 0 has only
+  one forward neighbor (slot 0); cell 9 has only one backward
+  neighbor (slot 1); interior cells have both.
+- `water_nbr_count = np.array([1, 2, 2, 2, 2, 2, 2, 2, 2, 1],
+  dtype=np.int32)`.
+
+The chain is bidirectional so Test 2's DOWNSTREAM agent at cell
+9 has a valid backward neighbor; Test 1's UPSTREAM agent at cell
+0 still picks the higher-gradient (forward) neighbor by gradient
+comparison.
 
 Place a single agent at cell 0 in UPSTREAM behavior. Pin
 `n_micro_steps_per_cell = np.ones(10, dtype=np.int32)` (one hop
@@ -502,9 +543,13 @@ and deterministic). Run 1 timestep. Assert the agent ends at cell
 1 (climbed one step). Run 5 timesteps. Assert the agent reaches
 cell ≥ 5 (climbed at least half the chain).
 
-**Test 2: gradient symmetry for DOWNSTREAM.** Same chain, same
+**Test 2: gradient symmetry for DOWNSTREAM.** Same bidirectional
+chain (same fixture as Test 1), same
 `n_micro_steps_per_cell = np.ones(10, dtype=np.int32)` pin, agent
-at cell 9, DOWNSTREAM behavior. Assert the agent ends at cell
+at cell 9, DOWNSTREAM behavior. The DOWNSTREAM dispatch picks the
+LOWER-gradient neighbor (`ascending=False`); cell 9's only
+neighbor is cell 8 (backward), which has a lower `dist_from_sea`
+value, so the agent steps to 8. Assert the agent ends at cell
 ≤ 4 after 5 timesteps.
 
 **Test 3: zero-gradient fallback.** Mesh with `dist_from_sea =
