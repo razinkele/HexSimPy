@@ -143,10 +143,19 @@ class HexSimEnvironment:
         self._temp_buf = np.zeros(n, dtype=np.float64)
         self._zero_buf = np.zeros(n, dtype=np.float64)
         self._zero_buf.flags.writeable = False
+        # C4: HexSim's "Gradient [upstream]" hxn already encodes
+        # higher-upstream values, which matches the C4 dist_from_sea
+        # convention (HIGHER upstream). Use _upstream directly so
+        # Columbia/HexSim UPSTREAM agents follow the static gradient
+        # via the new kernel. HexSimEnvironment has no
+        # _dormant_gradient_check_done attribute, so the dormancy
+        # raise in MovementEvent.execute is bypassed via the
+        # `getattr(env, ..., True)` guard in _check_dormant_gradient.
         self.fields: dict[str, np.ndarray] = {
             "temperature": self._temp_buf,
             "salinity": np.zeros(n, dtype=np.float64),
             "ssh": self._ssh_static,
+            "dist_from_sea": self._upstream,
             "u_current": np.zeros(n, dtype=np.float64),
             "v_current": np.zeros(n, dtype=np.float64),
         }

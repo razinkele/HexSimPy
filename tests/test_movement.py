@@ -15,7 +15,9 @@ def test_hold_does_not_move(mesh):
     start = water_ids[0]
     pool = AgentPool(n=5, start_tri=start)
     pool.behavior[:] = Behavior.HOLD
-    fields = {"ssh": np.zeros(mesh.n_triangles), "temperature": np.full(mesh.n_triangles, 15.0),
+    fields = {"ssh": np.zeros(mesh.n_triangles),
+              "dist_from_sea": np.zeros(mesh.n_triangles),
+              "temperature": np.full(mesh.n_triangles, 15.0),
               "u_current": np.zeros(mesh.n_triangles), "v_current": np.zeros(mesh.n_triangles)}
     execute_movement(pool, mesh, fields, seed=42)
     assert np.all(pool.tri_idx == start)
@@ -28,7 +30,9 @@ def test_random_moves_to_neighbor(mesh):
             break
     pool = AgentPool(n=20, start_tri=start)
     pool.behavior[:] = Behavior.RANDOM
-    fields = {"ssh": np.zeros(mesh.n_triangles), "temperature": np.full(mesh.n_triangles, 15.0),
+    fields = {"ssh": np.zeros(mesh.n_triangles),
+              "dist_from_sea": np.zeros(mesh.n_triangles),
+              "temperature": np.full(mesh.n_triangles, 15.0),
               "u_current": np.zeros(mesh.n_triangles), "v_current": np.zeros(mesh.n_triangles)}
     execute_movement(pool, mesh, fields, seed=42)
     moved = pool.tri_idx != start
@@ -39,12 +43,17 @@ def test_random_moves_to_neighbor(mesh):
 def test_upstream_follows_ssh_gradient(mesh):
     water_ids = np.where(mesh.water_mask)[0]
     ssh = mesh.centroids[:, 0].copy()
+    # C4: kernel reads dist_from_sea (HIGHER upstream); negate ssh so
+    # the kernel's UPSTREAM (ascending=True) climbs toward lower ssh,
+    # preserving this test's "lower SSH = upstream" semantic.
+    dist_from_sea = -ssh
     for start in water_ids:
         if len(mesh.water_neighbors(start)) > 0:
             break
     pool = AgentPool(n=10, start_tri=start)
     pool.behavior[:] = Behavior.UPSTREAM
-    fields = {"ssh": ssh, "temperature": np.full(mesh.n_triangles, 15.0),
+    fields = {"ssh": ssh, "dist_from_sea": dist_from_sea,
+              "temperature": np.full(mesh.n_triangles, 15.0),
               "u_current": np.zeros(mesh.n_triangles), "v_current": np.zeros(mesh.n_triangles)}
     execute_movement(pool, mesh, fields, seed=42)
     assert np.all(mesh.water_mask[pool.tri_idx])
@@ -61,7 +70,9 @@ def test_cwr_stops_at_threshold(mesh):
     pool.behavior[:] = Behavior.TO_CWR
     # Set all temperatures below CWR threshold — fish should not move
     temperature = np.full(mesh.n_triangles, 10.0)  # well below 16.0
-    fields = {"ssh": np.zeros(mesh.n_triangles), "temperature": temperature,
+    fields = {"ssh": np.zeros(mesh.n_triangles),
+              "dist_from_sea": np.zeros(mesh.n_triangles),
+              "temperature": temperature,
               "u_current": np.zeros(mesh.n_triangles), "v_current": np.zeros(mesh.n_triangles)}
     execute_movement(pool, mesh, fields, seed=42, cwr_threshold=16.0)
     assert np.all(pool.tri_idx == start), "Fish should stay put when already below CWR threshold"
@@ -72,6 +83,10 @@ def test_upstream_net_movement_follows_gradient(mesh):
     water_ids = np.where(mesh.water_mask)[0]
     # Create an SSH field that increases with latitude
     ssh = mesh.centroids[:, 0].copy()
+    # C4: kernel reads dist_from_sea (HIGHER upstream); set
+    # dist_from_sea = -ssh so UPSTREAM (ascending=True) drifts toward
+    # lower ssh, preserving this test's directional assertion.
+    dist_from_sea = -ssh
     for start in water_ids:
         if len(mesh.water_neighbors(start)) > 0:
             break
@@ -79,7 +94,8 @@ def test_upstream_net_movement_follows_gradient(mesh):
     pool.behavior[:] = Behavior.UPSTREAM
     pool.steps[:] = 10  # not first move
     initial_ssh = ssh[start]
-    fields = {"ssh": ssh, "temperature": np.full(mesh.n_triangles, 15.0),
+    fields = {"ssh": ssh, "dist_from_sea": dist_from_sea,
+              "temperature": np.full(mesh.n_triangles, 15.0),
               "u_current": np.zeros(mesh.n_triangles), "v_current": np.zeros(mesh.n_triangles)}
     execute_movement(pool, mesh, fields, seed=42)
     # Most agents should have moved to lower SSH
@@ -95,6 +111,11 @@ def test_downstream_follows_ascending_ssh(mesh):
     water_ids = np.where(mesh.water_mask)[0]
     # Use SSH that increases with the x-coordinate
     ssh = mesh.centroids[:, 0].copy()
+    # C4: DOWNSTREAM kernel uses ascending=False on dist_from_sea
+    # (HIGHER upstream). dist_from_sea = -ssh so the agent descends
+    # dist_from_sea ⇒ ascends ssh, preserving this test's
+    # "higher SSH = downstream" semantic.
+    dist_from_sea = -ssh
     # Pick a start cell near the median SSH so there is room to move higher
     water_ssh = ssh[water_ids]
     median_ssh = np.median(water_ssh)
@@ -108,7 +129,8 @@ def test_downstream_follows_ascending_ssh(mesh):
     pool.behavior[:] = Behavior.DOWNSTREAM
     pool.steps[:] = 10  # not first move
     initial_ssh = ssh[start]
-    fields = {"ssh": ssh, "temperature": np.full(mesh.n_triangles, 15.0),
+    fields = {"ssh": ssh, "dist_from_sea": dist_from_sea,
+              "temperature": np.full(mesh.n_triangles, 15.0),
               "u_current": np.zeros(mesh.n_triangles), "v_current": np.zeros(mesh.n_triangles)}
     execute_movement(pool, mesh, fields, seed=42)
     # Most agents should have moved to higher SSH (ascending)
@@ -127,7 +149,9 @@ def test_random_movement_vectorized_lands_on_water(mesh):
             break
     pool = AgentPool(n=50, start_tri=start)
     pool.behavior[:] = Behavior.RANDOM
-    fields = {"ssh": np.zeros(mesh.n_triangles), "temperature": np.full(mesh.n_triangles, 15.0),
+    fields = {"ssh": np.zeros(mesh.n_triangles),
+              "dist_from_sea": np.zeros(mesh.n_triangles),
+              "temperature": np.full(mesh.n_triangles, 15.0),
               "u_current": np.zeros(mesh.n_triangles), "v_current": np.zeros(mesh.n_triangles)}
     execute_movement(pool, mesh, fields, seed=99)
     assert np.all(mesh.water_mask[pool.tri_idx])
@@ -138,6 +162,9 @@ def test_directed_movement_vectorized_follows_gradient(mesh):
     """Vectorized UPSTREAM should move agents toward lower SSH values."""
     water_ids = np.where(mesh.water_mask)[0]
     ssh = mesh.centroids[:, 0].copy()
+    # C4: kernel reads dist_from_sea (HIGHER upstream); negate so
+    # UPSTREAM (ascending=True) drifts toward lower ssh.
+    dist_from_sea = -ssh
     water_ssh = ssh[water_ids]
     median_ssh = np.median(water_ssh)
     order = np.argsort(np.abs(water_ssh - median_ssh))
@@ -149,7 +176,8 @@ def test_directed_movement_vectorized_follows_gradient(mesh):
     pool.behavior[:] = Behavior.UPSTREAM
     pool.steps[:] = 10  # not first move
     initial_ssh = ssh[start]
-    fields = {"ssh": ssh, "temperature": np.full(mesh.n_triangles, 15.0),
+    fields = {"ssh": ssh, "dist_from_sea": dist_from_sea,
+              "temperature": np.full(mesh.n_triangles, 15.0),
               "u_current": np.zeros(mesh.n_triangles), "v_current": np.zeros(mesh.n_triangles)}
     execute_movement(pool, mesh, fields, seed=77)
     assert np.all(mesh.water_mask[pool.tri_idx])

@@ -61,6 +61,19 @@ class Environment:
             self._riv.close()
             self._riv = None
 
+        # C4: legacy non-Baltic env stub for the dist_from_sea gradient
+        # field. The TriMesh / curonian-minimal flow does not provide
+        # dist_from_sea (that is computed by build_h3_multires_landscape
+        # for the H3 Baltic flow only). Provide a flat-zero array so the
+        # movement kernel's UPSTREAM/DOWNSTREAM dispatch (which reads
+        # fields["dist_from_sea"]) does not KeyError. Legacy Environment
+        # has no _dormant_gradient_check_done attribute, so the dormancy
+        # raise in MovementEvent.execute is bypassed via the
+        # `getattr(env, ..., True)` guard in _check_dormant_gradient.
+        self.fields["dist_from_sea"] = np.zeros(
+            self.mesh.n_triangles, dtype=np.float32,
+        )
+
     def advance(self, t: int):
         self._prev_ssh = self.fields.get("ssh")
         self.current_t = t

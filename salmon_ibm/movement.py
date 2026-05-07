@@ -139,12 +139,12 @@ def execute_movement(
             tri_buf,
             water_nbrs,
             water_nbr_count,
-            fields["ssh"],
+            fields["dist_from_sea"],
             rng,
             max_steps,
             n_micro_steps_per_cell,
             fraction_remaining,
-            ascending=False,
+            ascending=True,
         )
         pool.tri_idx[idx] = tri_buf
 
@@ -157,12 +157,12 @@ def execute_movement(
             tri_buf,
             water_nbrs,
             water_nbr_count,
-            fields["ssh"],
+            fields["dist_from_sea"],
             rng,
             max_steps,
             n_micro_steps_per_cell,
             fraction_remaining,
-            ascending=True,
+            ascending=False,
         )
         pool.tri_idx[idx] = tri_buf
 

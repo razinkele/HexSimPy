@@ -295,3 +295,183 @@ def test_check_dormant_gradient_no_env_in_landscape_no_raise():
     }
     pool = _make_pool([int(Behavior.UPSTREAM)])
     _check_dormant_gradient(landscape, pool)  # must not raise
+
+
+# -----------------------------------------------------------------------------
+# Task 7 — Movement kernel UPSTREAM/DOWNSTREAM swap (Tests 1, 2, 2b, 3)
+# -----------------------------------------------------------------------------
+
+
+def _make_chain_mesh_fake(n: int = 10):
+    """Build a `_FakeMesh` for kernel-direct tests (Tests 1, 2, 2b, 3).
+
+    Bidirectional chain: cell `i` has neighbor i+1 and i-1 where they
+    exist. Endpoints (0 and n-1) have one neighbor. Valid neighbors
+    are packed into slots 0..count-1; slot order does not matter for
+    the kernel since it scans up to `water_nbr_count[c]`.
+
+    Returns a fresh mesh per call so tests don't share state.
+    """
+    water_nbrs = np.full((n, 2), -1, dtype=np.int32)
+    water_nbr_count = np.zeros(n, dtype=np.int32)
+    for i in range(n):
+        slot = 0
+        # Pack valid neighbors into slots 0..count-1 so the kernel
+        # (which scans `for k in range(cnt)`) only sees valid indices.
+        if i > 0:
+            water_nbrs[i, slot] = i - 1
+            slot += 1
+        if i < n - 1:
+            water_nbrs[i, slot] = i + 1
+            slot += 1
+        water_nbr_count[i] = slot
+
+    class _FakeMesh:
+        pass
+    mesh = _FakeMesh()
+    mesh._water_nbrs = water_nbrs
+    mesh._water_nbr_count = water_nbr_count
+    mesh.n_triangles = n  # required by execute_movement when
+                          # n_micro_steps_per_cell defaults to None
+    return mesh
+
+
+def _make_chain_fields(n: int = 10, *, gradient: bool = True):
+    """Returns the `fields` dict for the kernel: dist_from_sea +
+    sentinel ssh (for safety against accidental SSH coupling tests).
+
+    `gradient=True`: dist_from_sea[i] = i * 100.0 (monotonic).
+    `gradient=False`: all zeros (dormant state).
+    """
+    if gradient:
+        dist = np.arange(n, dtype=np.float32) * 100.0
+    else:
+        dist = np.zeros(n, dtype=np.float32)
+    return {"dist_from_sea": dist}
+
+
+def test_upstream_climbs_chain_one_step():
+    """C4 Test 1 part 1: UPSTREAM agent at cell 0 climbs to cell 1
+    after 1 timestep with n_micro=1."""
+    from salmon_ibm.movement import execute_movement
+    from salmon_ibm.agents import AgentPool, Behavior
+
+    n = 10
+    mesh = _make_chain_mesh_fake(n)
+    fields = _make_chain_fields(n, gradient=True)
+
+    # Silent-failure guard: assert ssh is NOT in fields, so a kernel
+    # that still reads ssh would KeyError instead of silently passing.
+    assert "ssh" not in fields
+
+    pool = AgentPool(n=1, start_tri=0, rng_seed=42)
+    pool.behavior[0] = int(Behavior.UPSTREAM)
+
+    execute_movement(
+        pool, mesh, fields,
+        seed=42,
+        n_micro_steps_per_cell=np.ones(n, dtype=np.int32),
+    )
+    assert pool.tri_idx[0] == 1  # climbed one step
+
+
+def test_upstream_reaches_far_cell_after_5_steps():
+    """C4 Test 1 part 2: 5 timesteps -> agent at cell >= 5."""
+    from salmon_ibm.movement import execute_movement
+    from salmon_ibm.agents import AgentPool, Behavior
+
+    n = 10
+    mesh = _make_chain_mesh_fake(n)
+    fields = _make_chain_fields(n, gradient=True)
+
+    pool = AgentPool(n=1, start_tri=0, rng_seed=42)
+    pool.behavior[0] = int(Behavior.UPSTREAM)
+
+    for _ in range(5):
+        execute_movement(
+            pool, mesh, fields,
+            seed=42,
+            n_micro_steps_per_cell=np.ones(n, dtype=np.int32),
+        )
+    assert pool.tri_idx[0] >= 5
+
+
+def test_downstream_descends_chain():
+    """C4 Test 2: DOWNSTREAM agent at cell 9 ends at cell <= 4 after
+    5 timesteps."""
+    from salmon_ibm.movement import execute_movement
+    from salmon_ibm.agents import AgentPool, Behavior
+
+    n = 10
+    mesh = _make_chain_mesh_fake(n)
+    fields = _make_chain_fields(n, gradient=True)
+
+    pool = AgentPool(n=1, start_tri=9, rng_seed=42)
+    pool.behavior[0] = int(Behavior.DOWNSTREAM)
+
+    for _ in range(5):
+        execute_movement(
+            pool, mesh, fields,
+            seed=42,
+            n_micro_steps_per_cell=np.ones(n, dtype=np.int32),
+        )
+    assert pool.tri_idx[0] <= 4
+
+
+def test_upstream_at_mesh_edge_does_not_crash():
+    """C4 Test 2b: UPSTREAM agent at cell 9 (mesh edge / max-gradient)
+    has no higher neighbor; falls back to slot-0 / random. Stays
+    within {8, 9} for 5 timesteps."""
+    from salmon_ibm.movement import execute_movement
+    from salmon_ibm.agents import AgentPool, Behavior
+
+    n = 10
+    mesh = _make_chain_mesh_fake(n)
+    fields = _make_chain_fields(n, gradient=True)
+
+    pool = AgentPool(n=1, start_tri=9, rng_seed=42)
+    pool.behavior[0] = int(Behavior.UPSTREAM)
+
+    for _ in range(5):
+        execute_movement(
+            pool, mesh, fields,
+            seed=42,
+            n_micro_steps_per_cell=np.ones(n, dtype=np.int32),
+        )
+    # Did not crash; oscillates near edge.
+    assert pool.tri_idx[0] in {8, 9}
+
+
+def test_zero_gradient_fallback_behavioral():
+    """C4 Test 3: zero gradient + UPSTREAM at cell 5. Calls
+    execute_movement directly (not via MovementEvent) so the dormancy
+    raise doesn't fire — this test is about the kernel's degenerate
+    behavior, not the dormancy check.
+
+    With ``n_micro_steps_per_cell=1`` the kernel runs only the even
+    (gradient) micro-step per timestep; the random-jitter (odd) step
+    never fires. On a flat field the gradient comparison ties on every
+    hop and ``argmax`` deterministically picks slot 0, so the agent
+    drifts monotonically rather than oscillating locally. The
+    behavioral guarantee here is the resilience contract: no crash,
+    no off-mesh teleport (``tri_idx == -1``), agent remains within
+    the chain ``[0, n-1]``.
+    """
+    from salmon_ibm.movement import execute_movement
+    from salmon_ibm.agents import AgentPool, Behavior
+
+    n = 10
+    mesh = _make_chain_mesh_fake(n)
+    fields = _make_chain_fields(n, gradient=False)  # all-zero gradient
+
+    pool = AgentPool(n=1, start_tri=5, rng_seed=42)
+    pool.behavior[0] = int(Behavior.UPSTREAM)
+
+    for _ in range(10):
+        execute_movement(
+            pool, mesh, fields,
+            seed=42,
+            n_micro_steps_per_cell=np.ones(n, dtype=np.int32),
+        )
+    # Resilience: agent stayed on the mesh (not -1, not out of range).
+    assert 0 <= int(pool.tri_idx[0]) < n
