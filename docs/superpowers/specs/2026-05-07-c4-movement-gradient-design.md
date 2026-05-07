@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-07
 **Owner:** @razinkele
-**Status:** 📋 DRAFT v5 — pass-4 corrections (Test 1 fixture layout pinned; post-teleport invariant promoted to Test 7; compute_dist_from_sea signature/contract made explicit).
+**Status:** ✅ CONVERGED v5 — 5-pass review-loop complete (pass-1 implementation details + ascending inversion; pass-2 advance() trap + Nemunas pipeline; pass-3 cross-tier interactions; pass-4 implementation-readiness; pass-5 verification — no new issues, all findings closed). Implementation-ready. Awaiting writing-plans.
 
 C4 fixes a **substrate-level correctness defect** that has been latent
 since the H3 multi-resolution mesh shipped (v1.5.0, 2026-03 cohort).
