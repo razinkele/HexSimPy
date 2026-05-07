@@ -486,6 +486,61 @@ def main() -> None:
     print(f"  neighbour table: {len(nbr_idx):,} edges, "
           f"avg {len(nbr_idx)/len(cells):.2f} per cell")
 
+    # C4: compute dist_from_sea (multi-source Dijkstra from OpenBaltic
+    # water cells) so directed-movement kernels have a real gradient
+    # field. See docs/superpowers/specs/2026-05-07-c4-movement-gradient-design.md.
+    print("Computing dist_from_sea (multi-source Dijkstra)...")
+    reach_names_list = list(reach_polygons.keys())
+    centroids_arr = np.column_stack([
+        np.asarray(lats, dtype=np.float64),
+        np.asarray(lons, dtype=np.float64),
+    ])
+
+    class _MeshShim:
+        """Adapter object exposing the attributes compute_dist_from_sea
+        reads (N_cells, reach_names, reach_id, water_mask, nbr_starts,
+        nbr_idx, centroids). Built ad-hoc here because the build script
+        operates on raw arrays — H3MultiResMesh is constructed later in
+        H3Environment.from_netcdf, post-NC-write."""
+        pass
+
+    mesh = _MeshShim()
+    mesh.N_cells = len(cells)
+    mesh.reach_names = reach_names_list
+    mesh.reach_id = reach_id_arr
+    mesh.water_mask = water_mask.astype(bool)
+    mesh.nbr_starts = nbr_starts
+    mesh.nbr_idx = nbr_idx
+    mesh.centroids = centroids_arr
+
+    dist_from_sea = compute_dist_from_sea(mesh)
+    print(f"  shape: {dist_from_sea.shape}, dtype: {dist_from_sea.dtype}")
+
+    # Per-reach sanity output.
+    print("  per-reach distribution:")
+    for rid, name in enumerate(mesh.reach_names):
+        cells_mask = (mesh.reach_id == rid) & mesh.water_mask
+        n_cells = int(cells_mask.sum())
+        if n_cells == 0:
+            continue
+        valid = dist_from_sea[cells_mask]
+        valid = valid[np.isfinite(valid)]
+        if len(valid) == 0:
+            continue
+        print(
+            f"    {name:<18} cells={n_cells:>6}  "
+            f"min={float(valid.min()):>10.0f}m  "
+            f"max={float(valid.max()):>10.0f}m  "
+            f"mean={float(valid.mean()):>10.0f}m"
+        )
+        # Pass-1 silent-failure finding: surface degenerate reaches
+        # explicitly rather than silently `continue` past them.
+        if len(valid) < n_cells:
+            print(
+                f"    WARNING: {name} has {n_cells - len(valid)} "
+                f"non-finite cells (out of {n_cells})"
+            )
+
     out_path = PROJECT / args.out
     out_path.parent.mkdir(parents=True, exist_ok=True)
     # Pre-existing in main() scope (v1.2.8 scaffold): cells, lats, lons,
@@ -502,6 +557,8 @@ def main() -> None:
             "reach_id":   (("cell",), reach_id_arr),
             "nbr_starts": (("cell_p1",), nbr_starts),
             "nbr_idx":    (("edge",), nbr_idx),
+            # C4: distance-from-sea field (float32, NaN on land cells).
+            "dist_from_sea": (("cell",), dist_from_sea),
             # Forcing per (time, cell) — added in this task.
             **{k: (("time", "cell"), v) for k, v in forcing.items()},
         },
