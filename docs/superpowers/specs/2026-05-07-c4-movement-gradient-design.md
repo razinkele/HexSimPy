@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-07
 **Owner:** @razinkele
-**Status:** 📋 DRAFT v8 — pass-8 corrections (Case A explicit flag init in step 5; Landscape TypedDict updated for `env` key; simulation.py added to implementation files; Test 1 fixture made bidirectional so Test 2 DOWNSTREAM is actually testable).
+**Status:** 📋 DRAFT v9 — pass-9 correction (err-id prefix on the sim-time `_check_dormant_gradient` RuntimeError message for grep-ability + consistency with the project's err-id discipline).
 
 C4 fixes a **substrate-level correctness defect** that has been latent
 since the H3 multi-resolution mesh shipped (v1.5.0, 2026-03 cohort).
@@ -454,11 +454,11 @@ def _check_dormant_gradient(landscape, buckets):
     if has_directed and not np.any(landscape["fields"]["dist_from_sea"]):
         env._dormant_gradient_check_done = True  # latch BEFORE raise to avoid loop
         raise RuntimeError(
-            "dist_from_sea is flat-zero AND agents are in "
-            "UPSTREAM/DOWNSTREAM behavior. Movement will not "
-            "progress (legacy SSH=0 dormant state). Rebuild the "
-            "landscape NC with build_h3_multires_landscape.py to "
-            "populate dist_from_sea."
+            f"{ERR_DIST_FROM_SEA_MISSING}: dist_from_sea is "
+            "flat-zero AND agents are in UPSTREAM/DOWNSTREAM "
+            "behavior. Movement will not progress (legacy SSH=0 "
+            "dormant state). Rebuild the landscape NC with "
+            "build_h3_multires_landscape.py to populate dist_from_sea."
         )
     env._dormant_gradient_check_done = True  # latch on happy path too
 ```
