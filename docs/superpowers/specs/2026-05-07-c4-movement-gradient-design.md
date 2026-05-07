@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-07
 **Owner:** @razinkele
-**Status:** 📋 DRAFT v1 — awaiting review-loop passes.
+**Status:** 📋 DRAFT v2 — pass-1 corrections (ascending-flag inversion fix; dispatch line range; n_micro_steps test pinning; test-suite count pinned to date; per-reach order assertion narrowed; Nemunas NC note; warning channel decided).
 
 C4 fixes a **substrate-level correctness defect** that has been latent
 since the H3 multi-resolution mesh shipped (v1.5.0, 2026-03 cohort).
@@ -90,8 +90,18 @@ gradient would still need a separate signal.
   present.
 - `_step_directed_numba` and `_step_directed_vec` UPSTREAM/DOWNSTREAM
   paths read `fields["dist_from_sea"]` instead of `fields["ssh"]`.
-  UPSTREAM uses `ascending=True` (further from sea is the goal);
-  DOWNSTREAM uses `ascending=False` (closer to sea).
+  **The `ascending` flag must flip from current values.** Current
+  code (`movement.py:107`, `:125`): UPSTREAM uses `ascending=False`,
+  DOWNSTREAM uses `ascending=True`. This was correct under the
+  legacy semantic where SSH was assumed to be lower upstream.
+  `dist_from_sea` is higher upstream by construction, so the
+  polarity reverses: **UPSTREAM must use `ascending=True`**
+  (climb toward higher `dist_from_sea`); **DOWNSTREAM must use
+  `ascending=False`** (descend toward lower). The kernel logic
+  itself is unchanged; the field swap forces the polarity flip.
+  An implementer who copies the existing `ascending=False` for
+  UPSTREAM unmodified will produce a silent regression where
+  upstream-behaving fish chase the open sea.
 - Backward-compat: NCs without `dist_from_sea` produce a clear
   `RuntimeWarning` at sim init; the field defaults to all-zeros so
   legacy behavior is preserved (broken, but unchanged).
@@ -107,7 +117,11 @@ gradient would still need a separate signal.
 - Integration test asserting `_step_directed_*` reads the new field
   name (mock landscape with `dist_from_sea` populated, agent moves
   toward higher values).
-- Existing 893-test suite continues to pass with no regressions.
+- Existing test suite (893 passing cases as of the 2026-05-06
+  full sweep on commit `b18ecaf`) continues to pass with no
+  regressions. Plain `def test_` count alone is lower (~420)
+  because pytest fixtures, classes, and parametrize multiply
+  case counts — use the sweep count as the canonical baseline.
 - Live-test contract: post-deploy Playwright run on laguna confirms
   ≥ 1 agent reaches a delta branch within 480 hours at default
   settings (50 agents, seed=42). This is the test that should have
@@ -189,16 +203,31 @@ build time.
   built. Save as `float32` variable in the NC. Print per-reach
   distribution to stdout for sanity-check during build.
 - `salmon_ibm/h3_env.py` — `H3Environment.from_netcdf` loads
-  `dist_from_sea` if present; emits a clear `RuntimeWarning` if
-  missing (backward-compat with older NCs); zero-fills as fallback
-  to preserve existing dormant-but-non-crashing behavior.
+  `dist_from_sea` (1D, `float32[N_cells]`, time-independent) if
+  present. **Storage choice:** attach as `mesh.dist_from_sea`
+  attribute (mirrors how `reach_id`, `water_mask`,
+  `_water_nbr_count` are already attached to the mesh as static
+  per-cell data) AND expose via `fields["dist_from_sea"]` so
+  movement.py's existing `fields["..."]` lookup pattern keeps
+  working. The `fields` entry is set once at env init and is
+  NOT touched by `advance()` (it's static — does not change per
+  step). The load step must run BEFORE the `n_time` inference at
+  the existing `h3_env.py:121-122` so `full_fields` ordering is
+  unaffected. If the variable is missing, emit a clear
+  `logging.warning` (matching the C3.3 convention at
+  `salmon_ibm.delta_routing` logger; not `warnings.warn` —
+  see Open Question 3) and zero-fill the `(N_cells,)` array as
+  fallback to preserve existing dormant-but-non-crashing
+  behavior.
 - `salmon_ibm/movement.py` — `_step_directed_numba` and
   `_step_directed_vec` UPSTREAM/DOWNSTREAM paths read
-  `fields["dist_from_sea"]` instead of `fields["ssh"]`. Two
-  identifier changes plus the accompanying field-key registration
-  in the kernel call sites at `movement.py:96-114` (the dispatch
-  block). The `ssh` field stays in the env (other code may still
-  reference it); not worth the cleanup churn in C4's scope.
+  `fields["dist_from_sea"]` instead of `fields["ssh"]`. The
+  dispatch block spans **lines 94-127** (UPSTREAM at 94-109,
+  DOWNSTREAM at 111-127); both call sites must be updated. Also
+  flip the `ascending` flag at lines 107 and 125 per the
+  Architecture-section note. The `ssh` field stays in the env
+  (other code may still reference it); not worth the cleanup
+  churn in C4's scope.
 
 ### Validation discipline
 
@@ -220,9 +249,12 @@ build time.
 **Sim-init** (in `H3Environment.from_netcdf`):
 
 1. If `dist_from_sea` variable is present, load it.
-2. If absent: emit `RuntimeWarning("dist_from_sea missing from NC;
-   movement gradient will be flat — agents will not migrate. Rebuild
-   landscape with build_h3_multires_landscape.py to populate it.")`.
+2. If absent: emit `logging.getLogger("salmon_ibm.h3_env").warning(
+   "%s: dist_from_sea missing from NC; movement gradient will be
+   flat — agents will not migrate. Rebuild landscape with
+   build_h3_multires_landscape.py to populate it.",
+   ERR_DIST_FROM_SEA_MISSING)` (using the err-id constant defined
+   in `h3_env.py` alongside the load step).
 3. Zero-fill as fallback (preserves the legacy SSH=0 behavior; no
    crash, just visible at sim init).
 
@@ -242,7 +274,7 @@ which is the legacy behavior; documented as the broken state if
 | `tests/test_h3_env.py`                             | Modify      | Add load + missing-field warning test                        |
 | `tests/test_movement.py` or equivalent             | Modify      | Replace `ssh` references in test fixtures with `dist_from_sea`|
 | `data/curonian_h3_multires_landscape.nc`           | Rebuild     | Run the build script with the new step (separate from PR)    |
-| `data/nemunas_h3_landscape.nc`                     | Rebuild     | Same                                                         |
+| `data/nemunas_h3_landscape.nc`                     | Rebuild     | Built by the same `build_h3_multires_landscape.py` (or its sibling `build_nemunas_h3_landscape.py`) and uses the same reach-id taxonomy including OpenBaltic; both NCs need the new variable. |
 
 ## Tests
 
@@ -250,14 +282,18 @@ which is the legacy behavior; documented as the broken state if
 
 **Test 1: linear-chain gradient.** Construct a synthetic 10-cell
 chain mesh with `dist_from_sea = [0, 100, 200, ..., 900]`. Place a
-single agent at cell 0 in UPSTREAM behavior. Run 1 timestep with
-`n_micro_steps_per_cell = 1`. Assert the agent ends at cell 1
-(climbed one step). Run 5 timesteps. Assert the agent reaches cell
-≥ 5 (climbed at least half the chain).
+single agent at cell 0 in UPSTREAM behavior. Pin
+`n_micro_steps_per_cell = np.ones(10, dtype=np.int32)` (one hop
+per cell — the directed kernel's even-step gradient + odd-step
+random pattern means with `n_micro=1` the only hop is even-indexed
+and deterministic). Run 1 timestep. Assert the agent ends at cell
+1 (climbed one step). Run 5 timesteps. Assert the agent reaches
+cell ≥ 5 (climbed at least half the chain).
 
-**Test 2: gradient symmetry for DOWNSTREAM.** Same chain, agent at
-cell 9, DOWNSTREAM behavior. Assert the agent ends at cell ≤ 4
-after 5 timesteps.
+**Test 2: gradient symmetry for DOWNSTREAM.** Same chain, same
+`n_micro_steps_per_cell = np.ones(10, dtype=np.int32)` pin, agent
+at cell 9, DOWNSTREAM behavior. Assert the agent ends at cell
+≤ 4 after 5 timesteps.
 
 **Test 3: zero-gradient fallback.** Mesh with `dist_from_sea =
 zeros(N)`. UPSTREAM agent. Assert it does NOT raise; movement
@@ -265,8 +301,9 @@ degenerates to slot-0 selection (legacy broken-but-not-crashing
 behavior). Document the expected dormancy.
 
 **Test 4: missing field warning.** `H3Environment.from_netcdf` on
-an NC without `dist_from_sea`. Assert exactly one
-`RuntimeWarning("dist_from_sea missing")`. Assert
+an NC without `dist_from_sea`. Use `caplog.set_level(
+logging.WARNING, logger="salmon_ibm.h3_env")`. Assert at least
+one record contains `dist-from-sea-missing`. Assert
 `fields["dist_from_sea"]` exists and is all-zeros.
 
 **Test 5: build-time disconnected-graph check.** Synthetic mesh
@@ -278,15 +315,22 @@ unreachable reach.
 
 **Test 6: end-to-end production-mesh gradient sanity.** Load
 `data/curonian_h3_multires_landscape.nc` (rebuilt with the new
-step). Assert the per-reach mean `dist_from_sea` is monotone in
-the expected order (OpenBaltic < BalticCoast < CuronianLagoon <
-{Atmata, Skirvyte, Gilija} < Nemunas). Pure data assertion, runs
-fast.
+step). Assert: (a) `mean(OpenBaltic) < mean(Nemunas)` — the
+sanity floor that the gradient points the right way overall;
+(b) `min(Nemunas) > mean(OpenBaltic)` — no Nemunas (river) cell
+is closer to sea than the typical OpenBaltic cell, catching gross
+inversions; (c) every delta-branch cell has `dist_from_sea >
+mean(BalticCoast)` — delta cells are inland of the coastal strip.
+The full chain order (OpenBaltic < BalticCoast < CuronianLagoon
+< delta < Nemunas) is NOT asserted because CuronianLagoon spans
+both the strait (close to sea) and the eastern shore (far from
+sea), so its per-reach mean is bimodal and doesn't fit a strict
+total order. Pure data assertion, runs fast.
 
 ### Regression (existing)
 
-The full 893-test suite must continue to pass. The two tests most
-likely to drift:
+The full test suite (893 cases at the 2026-05-06 baseline) must
+continue to pass. The two tests most likely to drift:
 
 - `tests/test_movement.py::*` — any test fixture mocking the
   landscape `fields` dict needs `dist_from_sea` added (or to
@@ -320,10 +364,11 @@ pipeline.
 
 ## Backward compatibility
 
-- **NCs without `dist_from_sea`:** loaded with a `RuntimeWarning`,
-  zero-filled. Movement degenerates to legacy SSH=0 behavior
-  (oscillation in place). The warning makes the dormancy visible
-  at sim init rather than silent.
+- **NCs without `dist_from_sea`:** loaded with a
+  `logging.warning` at the `salmon_ibm.h3_env` logger (err-id
+  `dist-from-sea-missing`), zero-filled. Movement degenerates to
+  legacy SSH=0 behavior (oscillation in place). The warning makes
+  the dormancy visible at sim init rather than silent.
 - **Code paths that reference `ssh`:** unchanged. The `ssh` field
   remains in the env, zero-filled by `H3Environment.from_netcdf`
   as before. C4 only changes which field UPSTREAM/DOWNSTREAM
@@ -360,12 +405,16 @@ pipeline.
    semantics). This is biologically defensible (real salmon would
    reach their natal tributary somewhere along the way and stop)
    but should be explicit.
-3. **Backward-compat warning severity:** is `RuntimeWarning` the
-   right severity? Alternative: `UserWarning` (more visible by
-   default), or `logging.warning` (matches C3.3's convention). The
-   spec proposes `RuntimeWarning` but this is a low-confidence
-   choice; propose to align with the project's most common pattern
-   during review.
+3. **Backward-compat warning channel: RESOLVED in v2.** Use
+   `logging.getLogger("salmon_ibm.h3_env").warning(...)` to match
+   C3.3's pattern (`salmon_ibm.delta_routing` logger emits the
+   `homing-hatchery-no-dispatch` warning via the same channel).
+   Stdlib `warnings.warn` is rejected because the project's
+   operational paths uniformly use `logging.warning`. An ERR_ID
+   constant `ERR_DIST_FROM_SEA_MISSING = "dist-from-sea-missing"`
+   should be defined alongside the warning, mirroring
+   `ERR_HOMING_HATCHERY_NO_DISPATCH` in `delta_routing.py:43`, so
+   operators can grep production logs.
 4. **Test 6's monotonicity ordering:** is the assumed reach order
    (OpenBaltic < BalticCoast < CuronianLagoon < delta < Nemunas)
    correct? The CuronianLagoon has both the strait (close to sea)
