@@ -22,6 +22,94 @@ PROJECT = Path(__file__).resolve().parent.parent
 LANDSCAPE = PROJECT / "data" / "nemunas_h3_landscape.nc"
 
 
+def _build_minimal_h3_nc(
+    path,
+    *,
+    include_dist_from_sea: bool = True,
+    dist_from_sea_arr: "np.ndarray | None" = None,
+) -> None:
+    """Construct a 4-cell synthetic H3 multires NC for env tests.
+
+    Cells: 0 (OpenBaltic, water), 1 (CuronianLagoon, water),
+           2 (Nemunas, water), 3 (Nemunas, land).
+    """
+    import xarray as xr
+    import numpy as np
+
+    n = 4
+    h3_id = np.arange(n, dtype=np.uint64)
+    resolution = np.full(n, 9, dtype=np.int8)
+    lat = np.array([55.0, 55.3, 55.5, 55.51], dtype=np.float64)
+    lon = np.array([21.0, 21.3, 21.5, 21.51], dtype=np.float64)
+    depth = np.array([10.0, 3.0, 2.0, 0.0], dtype=np.float32)
+    water_mask = np.array([True, True, True, False], dtype=bool)
+    reach_id = np.array([0, 1, 2, 2], dtype=np.int8)
+    # Bidirectional chain: 0-1-2; cell 3 is land (no neighbors).
+    nbr_starts = np.array([0, 1, 3, 4, 4], dtype=np.int32)
+    nbr_idx = np.array([1, 0, 2, 1], dtype=np.int32)
+    # Time-indexed forcing fields (1 timestep, 4 cells).
+    tos = np.full((1, n), 12.0, dtype=np.float32)
+    sos = np.full((1, n), 7.0, dtype=np.float32)
+    uo = np.zeros((1, n), dtype=np.float32)
+    vo = np.zeros((1, n), dtype=np.float32)
+    time = np.array(["2026-01-01"], dtype="datetime64[D]")
+
+    data_vars = {
+        "h3_id": ("cell", h3_id),
+        "resolution": ("cell", resolution),
+        "lat": ("cell", lat),
+        "lon": ("cell", lon),
+        "depth": ("cell", depth),
+        "water_mask": ("cell", water_mask),
+        "reach_id": ("cell", reach_id),
+        "nbr_starts": ("cell_p1", nbr_starts),
+        "nbr_idx": ("edge", nbr_idx),
+        "tos": (("time", "cell"), tos),
+        "sos": (("time", "cell"), sos),
+        "uo": (("time", "cell"), uo),
+        "vo": (("time", "cell"), vo),
+    }
+    if include_dist_from_sea:
+        if dist_from_sea_arr is None:
+            # Default valid: cell 0 source (0.0), distances increasing.
+            dist_from_sea_arr = np.array(
+                [0.0, 100.0, 200.0, np.nan], dtype=np.float32,
+            )
+        data_vars["dist_from_sea"] = ("cell", dist_from_sea_arr)
+
+    coords = {"time": time}
+    attrs = {
+        "reach_names": "OpenBaltic,CuronianLagoon,Nemunas",
+    }
+    ds = xr.Dataset(data_vars=data_vars, coords=coords, attrs=attrs)
+    ds.to_netcdf(path, engine="h5netcdf")
+
+
+def _build_mesh_from_nc(nc_path):
+    """Build an H3MultiResMesh from the test NC path."""
+    import xarray as xr
+    import numpy as np
+    from salmon_ibm.h3_multires import H3MultiResMesh
+
+    ds = xr.open_dataset(str(nc_path), engine="h5netcdf")
+    names_attr = ds.attrs.get("reach_names", "")
+    reach_names = names_attr.split(",") if names_attr else []
+    mesh = H3MultiResMesh(
+        h3_ids=ds["h3_id"].values.astype(np.uint64),
+        resolutions=ds["resolution"].values.astype(np.int8),
+        centroids=np.column_stack([ds["lat"].values, ds["lon"].values]),
+        nbr_starts=ds["nbr_starts"].values.astype(np.int32),
+        nbr_idx=ds["nbr_idx"].values.astype(np.int32),
+        water_mask=ds["water_mask"].values.astype(bool),
+        depth=ds["depth"].values.astype(np.float32),
+        areas=np.zeros(len(ds["h3_id"]), dtype=np.float32),
+        reach_id=ds["reach_id"].values.astype(np.int8),
+        reach_names=reach_names,
+    )
+    ds.close()
+    return mesh
+
+
 def _write_synthetic_landscape(tmp_path, cells, n_time=3):
     """Build a tiny landscape NetCDF mirroring the real builder's schema."""
     h3_ids = np.array([int(h3.str_to_int(c)) for c in cells], dtype=np.uint64)
@@ -63,6 +151,8 @@ def test_h3_env_loads_canonical_field_names(tmp_path):
     """Canonical keys: tos→temperature, sos→salinity, uo→u_current,
     vo→v_current, plus a zero-filled ``ssh`` (movement.py reads it
     for upstream/downstream behaviour, see h3_env.py docstring).
+    C4: ``dist_from_sea`` is also injected by from_netcdf — Case A
+    (variable absent from NC) zero-fills it.
 
     ``env.fields`` is the per-cell snapshot at the current timestep;
     the full time-series lives on ``env._full_fields``.
@@ -75,6 +165,7 @@ def test_h3_env_loads_canonical_field_names(tmp_path):
 
     assert set(env.fields.keys()) == {
         "temperature", "salinity", "u_current", "v_current", "ssh",
+        "dist_from_sea",
     }
     for arr in env.fields.values():
         assert arr.shape == (mesh.n_cells,)
@@ -210,3 +301,48 @@ def test_h3_env_real_nemunas_landscape_envelope():
         f"[{float(temps.min()):.2f}, {float(temps.max()):.2f}]"
     )
     assert 0.0 <= float(sal.min()) <= float(sal.max()) <= 10.0
+
+
+# ---------------------------------------------------------------------------
+# C4: dist_from_sea load — Case A (variable absent from NC)
+# ---------------------------------------------------------------------------
+
+
+def test_from_netcdf_case_a_dist_from_sea_missing(tmp_path, caplog):
+    """C4 Test 4: NC missing dist_from_sea variable triggers warn +
+    zero-fill + flag init."""
+    import logging
+    from salmon_ibm.h3_env import H3Environment, ERR_DIST_FROM_SEA_MISSING
+
+    # Build a minimal NC matching the existing schema MINUS dist_from_sea.
+    nc_path = tmp_path / "test_minimal.nc"
+    _build_minimal_h3_nc(nc_path, include_dist_from_sea=False)
+
+    # Build a minimal H3MultiResMesh via the same NC.
+    mesh = _build_mesh_from_nc(nc_path)
+
+    caplog.set_level(logging.WARNING, logger="salmon_ibm.h3_env")
+    env = H3Environment.from_netcdf(str(nc_path), mesh)
+
+    # (a) Warning emitted with the err-id.
+    matching = [
+        r for r in caplog.records
+        if r.name == "salmon_ibm.h3_env"
+        and ERR_DIST_FROM_SEA_MISSING in r.getMessage()
+    ]
+    assert matching, (
+        f"Expected warning with err-id {ERR_DIST_FROM_SEA_MISSING}; "
+        f"got {[(r.name, r.getMessage()) for r in caplog.records]!r}"
+    )
+
+    # (b) fields["dist_from_sea"] exists and is all-zeros.
+    assert "dist_from_sea" in env.fields
+    assert env.fields["dist_from_sea"].shape == (mesh.n_cells,)
+    assert np.all(env.fields["dist_from_sea"] == 0.0)
+    assert env.fields["dist_from_sea"].dtype == np.float32
+
+    # (c) Per-env latch flag initialised.
+    assert env._dormant_gradient_check_done is False
+
+    # (d) mesh.dist_from_sea attached (same array reference).
+    assert mesh.dist_from_sea is env.fields["dist_from_sea"]

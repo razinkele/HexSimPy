@@ -26,6 +26,14 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
+# C4: err-id constants for grep-able operational logging.
+# Mirrors ERR_HOMING_HATCHERY_NO_DISPATCH in delta_routing.py:43.
+ERR_DIST_FROM_SEA_MISSING = "dist-from-sea-missing"
+ERR_DIST_FROM_SEA_SHAPE_MISMATCH = "dist-from-sea-shape-mismatch"
+ERR_DIST_FROM_SEA_NAN_ON_WATER = "dist-from-sea-nan-on-water"
+ERR_DIST_FROM_SEA_ALL_ZERO = "dist-from-sea-all-zero"
+ERR_DIST_FROM_SEA_NO_SOURCES = "dist-from-sea-no-sources"
+
 # Map landscape-NetCDF variable names → canonical movement-event keys.
 # Diverging from these names silently no-ops the advection event because
 # `_apply_current_advection_vec` reads `fields["u_current"]`/`["v_current"]`.
@@ -124,7 +132,10 @@ class H3Environment:
             (n_time, len(mesh.h3_ids)), dtype=np.float32,
         )
 
-        return cls(mesh=mesh, full_fields=full_fields, time=ds["time"].values)
+        env = cls(mesh=mesh, full_fields=full_fields, time=ds["time"].values)
+        _load_dist_from_sea(env, ds, mesh)
+        ds.close()
+        return env
 
     # --- duck-typed, mirrors Environment / HexSimEnvironment --------
 
@@ -175,8 +186,47 @@ class H3Environment:
         CMEMS BALTICSEA reanalysis doesn't ship SSH at hourly cadence,
         so we synthesise a zero SSH field at construction time (see
         ``__init__``).  The seiche-pause estuarine override therefore
-        sees zero everywhere → no agents are paused, which matches the
+        sees zero everywhere -> no agents are paused, which matches the
         ecological expectation that mid-Baltic salmon don't experience
         the harbour-seiche dynamics that motivated the override.
         """
         return np.zeros(self.mesh.n_cells, dtype=np.float32)
+
+
+def _load_dist_from_sea(env, ds, mesh) -> None:
+    """C4: load ``dist_from_sea`` from NC into env.fields and mesh.
+
+    Two cases per spec section "Where it lives -> Validation discipline ->
+    Sim-init":
+
+    Case A -- variable absent: warn + zero-fill + flag init.
+    Case B -- variable present but structurally invalid: raise.
+
+    On all-checks-pass: inject env.fields["dist_from_sea"] +
+    mesh.dist_from_sea (same array reference) + flag init.
+    """
+    import logging
+
+    logger = logging.getLogger("salmon_ibm.h3_env")
+    n = mesh.N_cells if hasattr(mesh, "N_cells") else len(mesh.reach_id)
+
+    if "dist_from_sea" not in ds.variables:
+        # Case A: backward-compat for pre-C4 NCs.
+        logger.warning(
+            "%s: dist_from_sea missing from NC; movement gradient will "
+            "be flat -- agents will not migrate. Rebuild landscape with "
+            "build_h3_multires_landscape.py.",
+            ERR_DIST_FROM_SEA_MISSING,
+        )
+        zero = np.zeros(n, dtype=np.float32)
+        env.fields["dist_from_sea"] = zero
+        mesh.dist_from_sea = zero
+        env._dormant_gradient_check_done = False
+        return
+
+    # Case B placeholder (Task 4 fills this in).
+    arr = ds["dist_from_sea"].values
+    arr32 = arr.astype(np.float32)
+    env.fields["dist_from_sea"] = arr32
+    mesh.dist_from_sea = arr32
+    env._dormant_gradient_check_done = False
