@@ -224,8 +224,62 @@ def _load_dist_from_sea(env, ds, mesh) -> None:
         env._dormant_gradient_check_done = False
         return
 
-    # Case B placeholder (Task 4 fills this in).
+    # Case B: variable present — run 4 structural checks. Each
+    # failure raises RuntimeError with the matching err-id; no
+    # zero-fill, no graceful continuation.
     arr = ds["dist_from_sea"].values
+
+    # (a) Shape match.
+    if arr.shape != (n,):
+        raise RuntimeError(
+            f"{ERR_DIST_FROM_SEA_SHAPE_MISMATCH}: dist_from_sea shape "
+            f"{arr.shape} != expected ({n},). Stale NC built against a "
+            "different mesh? Rebuild with "
+            "build_h3_multires_landscape.py."
+        )
+
+    # (b) No NaN/Inf on water cells.
+    water_arr = arr[mesh.water_mask]
+    if not np.all(np.isfinite(water_arr)):
+        n_bad = int(np.sum(~np.isfinite(water_arr)))
+        raise RuntimeError(
+            f"{ERR_DIST_FROM_SEA_NAN_ON_WATER}: dist_from_sea has "
+            f"{n_bad} NaN/Inf value(s) on water cells. NC build is "
+            "corrupt; rebuild required."
+        )
+
+    # (c) max > 0 — catches all-zero from a build that crashed
+    # mid-Dijkstra but still wrote the file.
+    if float(arr.max()) <= 0.0:
+        raise RuntimeError(
+            f"{ERR_DIST_FROM_SEA_ALL_ZERO}: dist_from_sea has max "
+            f"{float(arr.max())}, expected > 0. NC was written but "
+            "Dijkstra didn't run; rebuild required."
+        )
+
+    # (d) Sources exist — at least one OpenBaltic water cell at
+    # distance 0. Skip the entire check if "OpenBaltic" not in
+    # reach_names (non-Baltic mesh — no validation possible).
+    if "OpenBaltic" in mesh.reach_names:
+        ob_id = mesh.reach_names.index("OpenBaltic")
+        ob_mask = (mesh.reach_id == ob_id) & mesh.water_mask
+        if not ob_mask.any():
+            # Mesh declares OpenBaltic reach but has zero water cells
+            # in it. Degenerate mesh — raise (not a silent skip, per
+            # pass-1 review-loop finding).
+            raise RuntimeError(
+                f"{ERR_DIST_FROM_SEA_NO_SOURCES}: mesh has reach "
+                "'OpenBaltic' but no water_mask=True cells in it. "
+                "Cannot validate sources; rebuild mesh."
+            )
+        if not np.any(arr[ob_mask] == 0.0):
+            raise RuntimeError(
+                f"{ERR_DIST_FROM_SEA_NO_SOURCES}: no OpenBaltic water "
+                "cell has dist_from_sea == 0; the source set is empty "
+                "or the build used a different source definition."
+            )
+
+    # All checks pass: inject (single cast, shared reference).
     arr32 = arr.astype(np.float32)
     env.fields["dist_from_sea"] = arr32
     mesh.dist_from_sea = arr32

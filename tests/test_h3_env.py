@@ -75,7 +75,11 @@ def _build_minimal_h3_nc(
             dist_from_sea_arr = np.array(
                 [0.0, 100.0, 200.0, np.nan], dtype=np.float32,
             )
-        data_vars["dist_from_sea"] = ("cell", dist_from_sea_arr)
+        # If the supplied array has a non-matching length (used by the
+        # shape-mismatch test), put it on a separate dimension so xarray
+        # accepts the dataset.
+        dfs_dim = "cell" if len(dist_from_sea_arr) == n else "cell_dfs"
+        data_vars["dist_from_sea"] = (dfs_dim, dist_from_sea_arr)
 
     coords = {"time": time}
     attrs = {
@@ -346,3 +350,92 @@ def test_from_netcdf_case_a_dist_from_sea_missing(tmp_path, caplog):
 
     # (d) mesh.dist_from_sea attached (same array reference).
     assert mesh.dist_from_sea is env.fields["dist_from_sea"]
+
+
+# ---------------------------------------------------------------------------
+# C4: dist_from_sea load — Case B (variable present, structural validation)
+# ---------------------------------------------------------------------------
+
+
+def test_from_netcdf_case_b_shape_mismatch_raises(tmp_path):
+    """C4 Test 4a: NC has dist_from_sea but wrong shape → raise."""
+    import numpy as np
+    from salmon_ibm.h3_env import H3Environment
+
+    nc_path = tmp_path / "shape_mismatch.nc"
+    # 4-cell mesh, but dist_from_sea has 9 elements.
+    bad = np.array([0, 1, 2, 3, 4, 5, 6, 7, 8], dtype=np.float32)
+    _build_minimal_h3_nc(nc_path, dist_from_sea_arr=bad)
+    mesh = _build_mesh_from_nc(nc_path)
+
+    with pytest.raises(RuntimeError, match=r"dist-from-sea-shape-mismatch"):
+        H3Environment.from_netcdf(str(nc_path), mesh)
+
+
+def test_from_netcdf_case_b_nan_on_water_raises(tmp_path):
+    """C4 Test 4b: dist_from_sea has NaN at a water cell → raise."""
+    import numpy as np
+    from salmon_ibm.h3_env import H3Environment
+
+    nc_path = tmp_path / "nan_on_water.nc"
+    # Cells 0,1,2 are water; cell 3 is land. Inject NaN at cell 1.
+    bad = np.array([0.0, np.nan, 200.0, np.nan], dtype=np.float32)
+    _build_minimal_h3_nc(nc_path, dist_from_sea_arr=bad)
+    mesh = _build_mesh_from_nc(nc_path)
+
+    with pytest.raises(RuntimeError, match=r"dist-from-sea-nan-on-water"):
+        H3Environment.from_netcdf(str(nc_path), mesh)
+
+
+def test_from_netcdf_case_b_nan_on_land_does_not_raise(tmp_path):
+    """C4 Test 4b sanity: NaN at land cell (water_mask=False) does
+    NOT trigger the water-NaN raise."""
+    import numpy as np
+    from salmon_ibm.h3_env import H3Environment
+
+    nc_path = tmp_path / "nan_on_land.nc"
+    # Land cell 3 has NaN; water cells 0,1,2 are valid.
+    ok = np.array([0.0, 100.0, 200.0, np.nan], dtype=np.float32)
+    _build_minimal_h3_nc(nc_path, dist_from_sea_arr=ok)
+    mesh = _build_mesh_from_nc(nc_path)
+
+    # No raise.
+    env = H3Environment.from_netcdf(str(nc_path), mesh)
+    assert np.isnan(env.fields["dist_from_sea"][3])  # land cell stays NaN
+    assert env.fields["dist_from_sea"][0] == 0.0
+    # Identity assertion: env.fields and mesh point to the SAME array
+    # (shared reference, not independent copies). Pass-1 silent-failure
+    # finding: a future refactor that copies via arr.copy() would create
+    # divergence invisible to the value-equality tests.
+    assert mesh.dist_from_sea is env.fields["dist_from_sea"]
+    # Per-env latch flag initialized on the Case B happy path.
+    assert env._dormant_gradient_check_done is False
+
+
+def test_from_netcdf_case_b_all_zero_raises(tmp_path):
+    """C4 Test 4c: dist_from_sea is all zeros → raise."""
+    import numpy as np
+    from salmon_ibm.h3_env import H3Environment
+
+    nc_path = tmp_path / "all_zero.nc"
+    bad = np.zeros(4, dtype=np.float32)
+    _build_minimal_h3_nc(nc_path, dist_from_sea_arr=bad)
+    mesh = _build_mesh_from_nc(nc_path)
+
+    with pytest.raises(RuntimeError, match=r"dist-from-sea-all-zero"):
+        H3Environment.from_netcdf(str(nc_path), mesh)
+
+
+def test_from_netcdf_case_b_no_sources_raises(tmp_path):
+    """C4 Test 4d: no OpenBaltic cell at distance 0 → raise."""
+    import numpy as np
+    from salmon_ibm.h3_env import H3Environment
+
+    nc_path = tmp_path / "no_sources.nc"
+    # All distances >= 1, even the OpenBaltic cell (cell 0).
+    bad = np.array([5.0, 100.0, 200.0, np.nan], dtype=np.float32)
+    _build_minimal_h3_nc(nc_path, dist_from_sea_arr=bad)
+    mesh = _build_mesh_from_nc(nc_path)
+
+    with pytest.raises(RuntimeError, match=r"dist-from-sea-no-sources"):
+        H3Environment.from_netcdf(str(nc_path), mesh)
