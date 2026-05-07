@@ -30,6 +30,7 @@ class Landscape(TypedDict, total=False):
     n_micro_steps_per_cell: np.ndarray  # NEW: per-cell hop budget
     hatchery_dispatch: "HatcheryDispatch | None"  # NEW (C2)
     species_config: "BalticSpeciesConfig | None"  # NEW (C3.2)
+    env: "H3Environment | Environment | HexSimEnvironment | None"  # NEW (C4)
 
 
 # Module-level constants for resolution-aware movement (Task 0.5).
@@ -612,6 +613,13 @@ class Simulation:
             "n_micro_steps_per_cell": self._n_micro_steps_per_cell,
             "hatchery_dispatch": self.hatchery_dispatch,  # NEW (C2)
             "species_config": getattr(self, "_species_config", None),  # NEW (C3.2)
+            "env": self.env,  # NEW (C4) — for the dormancy check in
+                              # MovementEvent.execute. self.env is set in
+                              # __init__ for ALL backends (H3 / TriMesh /
+                              # HexMesh / HexSim) — direct access, not
+                              # getattr, so a future refactor that renames
+                              # self.env fails LOUD instead of silently
+                              # leaving env=None.
         }
         self._sequencer.step(self.population, landscape, t)
         self.current_t += 1
