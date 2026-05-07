@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-07
 **Owner:** @razinkele
-**Status:** ✅ CONVERGED v9 — **10-pass review-loop complete, deeper than the C3.3 8-pass cycle**. Pass-10 verification found one residual prose-quoting NIT (Case B `getattr` argument missing string quotes); fixed inline as v9 final. Implementation-ready. Awaiting writing-plans.
+**Status:** 📋 DRAFT v10 — pass-11 (test-coverage angle) found 7 gaps that prior 10 passes (spec internal consistency) didn't surface; v10 adds 8 new tests (Case B raise paths × 4, per-env latch isolation, teleport-then-step integration, Y-junction tie-break determinism, mesh-edge fallback) + tightens Test 3's behavioral assertion + pins Test 5b CI wiring.
 
 C4 fixes a **substrate-level correctness defect** that has been latent
 since the H3 multi-resolution mesh shipped (v1.5.0, 2026-03 cohort).
@@ -552,16 +552,82 @@ neighbor is cell 8 (backward), which has a lower `dist_from_sea`
 value, so the agent steps to 8. Assert the agent ends at cell
 ≤ 4 after 5 timesteps.
 
-**Test 3: zero-gradient fallback.** Mesh with `dist_from_sea =
-zeros(N)`. UPSTREAM agent. Assert it does NOT raise; movement
-degenerates to slot-0 selection (legacy broken-but-not-crashing
-behavior). Document the expected dormancy.
+**Test 2b: mesh-edge fallback.** Same bidirectional chain. Place
+an UPSTREAM agent at cell 9 (the maximum-gradient cell — the
+mesh edge). Cell 9 has only one neighbor (cell 8) which has a
+LOWER `dist_from_sea`. The directed kernel's gradient comparison
+finds no strictly-higher neighbor, so it should fall back to the
+slot-0 / random selection per the Open-Question 2 RESOLVED
+behavior. Run 5 timesteps. Assert: (a) no exception raised;
+(b) the agent stayed within `{8, 9}` — confirming the
+documented oscillation-near-mesh-edge behavior. This pins the
+fallback semantics that the spec relies on at Open Question 2
+and at the Interactions section's "post-teleport" failure mode.
 
-**Test 4: missing field warning.** `H3Environment.from_netcdf` on
-an NC without `dist_from_sea`. Use `caplog.set_level(
-logging.WARNING, logger="salmon_ibm.h3_env")`. Assert at least
-one record contains `dist-from-sea-missing`. Assert
-`fields["dist_from_sea"]` exists and is all-zeros.
+**Test 3: zero-gradient fallback (behavioral).** Use the
+bidirectional 10-cell chain fixture from Test 1, but override
+`dist_from_sea = np.zeros(10, dtype=np.float32)`. Place an UPSTREAM
+agent at cell 5. Run 10 timesteps. Assert: (a) no exception is
+raised (the kernel handles zero gradient gracefully); (b) the
+agent's final cell is in `{4, 5, 6}` — i.e., it visited at most
+its immediate neighbors, confirming the dormant-state oscillation
+the spec documents. A weaker "does not raise" assertion would
+silently pass even if the kernel decided to teleport agents to
+arbitrary cells. Note: this test runs WITHOUT a populated `env`
+in the landscape (so `_check_dormant_gradient` no-ops via its
+`env is None` guard); a separate test (Test 4f below) covers the
+"env present + zero gradient + directed agent → raise" path.
+
+**Test 4: missing field warning (Case A).**
+`H3Environment.from_netcdf` on an NC without `dist_from_sea`. Use
+`caplog.set_level(logging.WARNING, logger="salmon_ibm.h3_env")`.
+Assert at least one record contains `dist-from-sea-missing`.
+Assert `fields["dist_from_sea"]` exists and is all-zeros. Assert
+`env._dormant_gradient_check_done is False` (Case A step 4 latch
+init fired).
+
+**Test 4a: Case B shape-mismatch raise.** Construct a synthetic NC
+with `dist_from_sea` shaped `(N+5,)` instead of `(N,)`. Assert
+`H3Environment.from_netcdf` raises `RuntimeError` whose message
+contains `dist-from-sea-shape-mismatch`.
+
+**Test 4b: Case B NaN-on-water raise.** Construct an NC with a
+correctly-shaped `dist_from_sea` array, but inject a `NaN` at a
+cell where `water_mask=True`. Assert `H3Environment.from_netcdf`
+raises `RuntimeError` whose message contains
+`dist-from-sea-nan-on-water`. Sanity-check: a NaN at a land cell
+(`water_mask=False`) does NOT trigger the raise.
+
+**Test 4c: Case B all-zero raise.** Construct an NC with a
+correctly-shaped `dist_from_sea` array but all values = 0.0
+(simulating a build that wrote the file but failed mid-Dijkstra).
+Assert `RuntimeError` containing `dist-from-sea-all-zero`.
+
+**Test 4d: Case B no-sources raise.** Construct an NC where no
+OpenBaltic water cell has `dist_from_sea == 0` (e.g., all
+distances ≥ 1). Assert `RuntimeError` containing
+`dist-from-sea-no-sources`.
+
+**Test 4e: per-env latch isolation.** Load env-A via the Case A
+path (NC missing `dist_from_sea`). Construct a `landscape` dict
+with `env=env_A`, an UPSTREAM agent's bucket, and zero-filled
+fields. Call `_check_dormant_gradient(landscape, buckets)`;
+assert `RuntimeError` with `dist-from-sea-missing` err-id. THEN
+load env-B independently (also Case A). Construct a fresh
+landscape with `env=env_B`. Assert env-B's
+`_dormant_gradient_check_done` is `False` (no leakage from env-A)
+AND that calling `_check_dormant_gradient` on env-B ALSO raises
+(env-B's check fires independently, not silenced by env-A's
+latch). This is the regression test for the pass-7 module-global
+→ per-env-instance refactor.
+
+**Test 4f: sim-time happy-path latch.** Load env-C via the Case B
+all-checks-pass path (synthetic NC with valid `dist_from_sea`).
+Construct a landscape with an UPSTREAM agent. Call
+`_check_dormant_gradient`; assert NO raise. Assert
+`env_C._dormant_gradient_check_done is True` (latched on the
+happy path so subsequent calls are no-ops). Call again; assert
+no raise and no work (the early-return-on-latch path).
 
 **Test 5: build-time disconnected-graph check.** Synthetic mesh
 with two disconnected components (one with sea, one without).
@@ -581,7 +647,32 @@ H3MultiResMesh constructor) and assert
 `np.array_equal(saved_nc, recomputed, equal_nan=True)` — pinning
 down "committed NC matches what the build script would produce
 now". If a future bathymetry / mesh edit changes any cell, this
-test fails and forces an explicit NC rebuild commit.
+test fails and forces an explicit NC rebuild commit. **CI wiring:
+this test runs UNCONDITIONALLY in the default `pytest tests/`
+collection** — not gated behind `@pytest.mark.slow` or
+`@pytest.mark.production_data`. If the production NC is missing
+locally, the test SKIPS with a clear `pytest.skip("production NC
+not available; run `python scripts/build_h3_multires_landscape.py`
+to generate it")`, NOT silently passes. Without unconditional CI
+wiring, drift between `compute_dist_from_sea` and the committed
+NC ships silently — defeating the purpose of the determinism
+contract.
+
+**Test 5c: Y-junction tie-break determinism.** Construct a 4-cell
+mesh: cell 0 (source, OpenBaltic) connected to cells 1, 2, 3 at
+identical haversine distance (synthetic — set centroids equally
+spaced from cell 0). All four cells should compute
+`dist_from_sea = [0, d, d, d]` with `d` exact. The interesting
+case: cells 1, 2, 3 each have ONE neighbor at the same gradient
+(each other, via a back-edge through cell 0). Run
+`compute_dist_from_sea` twice; assert byte-equal output. Then run
+the directed kernel: place an UPSTREAM agent at cell 0; assert
+the agent moves to a DETERMINISTIC neighbor (e.g., cell 1, the
+lowest-index — the slot-0 fallback when all gradients tie). This
+exercises the heap-tie-break determinism contract from the
+Architecture §Determinism subsection AND the kernel's neighbor-
+selection determinism, neither of which Test 1 (linear chain)
+exercises.
 
 ### Integration (new)
 
@@ -638,6 +729,35 @@ production mesh, the test surfaces a topology-config defect
 (e.g., an entry cell positioned at a confluence where lagoon-side
 and inland-side neighbors have similar gradient values). Pure
 data assertion; runs in milliseconds.
+
+**Test 7b: teleport-then-step end-to-end behavioral.** Test 7
+checks topology; Test 7b checks the actual multi-event sequence.
+Set up a Baltic-configured simulation with the production NC. For
+each delta branch (Atmata, Skirvyte, Gilija):
+1. Construct a hatchery agent with `natal_reach_id = <branch_rid>`
+   and place them on the lagoon side of a different branch's
+   entry cell. (E.g., natal=Atmata, agent at Skirvyte mouth — so
+   they're poised to "stray" upon delta entry per C3.3.)
+2. Run `_event_update_exit_branch` with a seeded RNG configured
+   to force the stray dispatch to choose the natal branch. The
+   teleport fires; agent's `tri_idx` jumps to natal-branch's
+   `_branch_entry_cell`.
+3. Record `dist_from_sea[pre_teleport_cell]` and
+   `dist_from_sea[post_teleport_cell]`.
+4. Run one `MovementEvent` step with the agent in UPSTREAM
+   behavior.
+5. Assert
+   `dist_from_sea[final_cell] > dist_from_sea[post_teleport_cell]`
+   — the agent advanced inland after teleport, did NOT regress
+   to the lagoon. This is the behavioral check that Test 7's
+   topology assertion is the prerequisite for; if Test 7 passes
+   but Test 7b fails, the kernel's slot-0 fallback won the
+   tie-break in a way the topology check didn't catch.
+
+Test 7b is `@pytest.mark.integration` because it composes
+`_event_update_exit_branch` + `MovementEvent` against the
+production NC. Allow it to be slow (1-2 seconds) — runs in the
+default suite.
 
 ### Regression (existing)
 
