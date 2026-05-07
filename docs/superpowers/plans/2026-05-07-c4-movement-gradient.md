@@ -1,5 +1,7 @@
 # C4 Movement Gradient Implementation Plan
 
+**Plan version:** v2 — pass-1 review-loop corrections applied. Three parallel reviewers (code-reviewer, pr-test-analyzer, silent-failure-hunter) found ~21 issues including a CRITICAL design flaw: `execute_movement(pool, mesh, fields, ...)` takes `fields` not `landscape`, so the dormancy check cannot be called from inside the kernel. v2 moves the check to `MovementEvent.execute` (events_builtin.py:25-48) which already has `landscape`. Other v2 corrections: Case B check (d) logic gap, `_FakeMesh.n_triangles` missing, fixture duplication, float32 cast in Test 5b, identity-assertion for shared array reference, reload cfg per-branch in Test 7b, explicit Behavior import grep, `_water_nbrs` build in Task 9 mesh shim, programmatic NC verify after rebuild.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the flat-zero `ssh` field that powers UPSTREAM/DOWNSTREAM movement with a `dist_from_sea` scalar (multi-source edge-length-weighted Dijkstra at landscape build), so directed-movement actually produces displacement and the four-tier hatchery-vs-wild architecture (C1-C3.3) becomes biologically active in production.
@@ -110,7 +112,15 @@ Expected: ImportError or "no module named build_h3_multires_landscape" — funct
 
 - [ ] **Step 3: Add `compute_dist_from_sea` to build script**
 
-In `scripts/build_h3_multires_landscape.py`, near the top of the module (after imports, before existing helpers), add:
+In `scripts/build_h3_multires_landscape.py`, ensure the following imports exist at module top (add any missing):
+
+```python
+import heapq
+import math
+import numpy as np
+```
+
+Then, near the top of the module (after imports, before existing helpers), add:
 
 ```python
 def compute_dist_from_sea(mesh) -> np.ndarray:
@@ -133,9 +143,7 @@ def compute_dist_from_sea(mesh) -> np.ndarray:
     includes the reach name(s) of unreachable cells so the build
     operator can locate the topology defect.
     """
-    import heapq
-    import math
-
+    # Imports are at module top per v2 reviewer feedback.
     N = mesh.N_cells
     # Identify OpenBaltic water cells (the source set).
     if "OpenBaltic" not in mesh.reach_names:
@@ -213,7 +221,6 @@ def compute_dist_from_sea(mesh) -> np.ndarray:
 
 def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Great-circle distance between two (lat, lon) points in meters."""
-    import math
     R_EARTH_M = 6371000.0
     phi1 = math.radians(lat1)
     phi2 = math.radians(lat2)
@@ -522,7 +529,7 @@ Then in `H3Environment.from_netcdf`, AFTER the existing `return cls(mesh=mesh, f
         return env
 ```
 
-(The existing `ds.close()` at the very end — if any — should now sit after `_load_dist_from_sea`. Verify line ordering: open → fields → ssh zero-fill → cls() → load_dist_from_sea → close → return.)
+**Important — `ds.close()` ordering and ownership.** `_load_dist_from_sea` MUST NOT close `ds` itself; it only reads from `ds`. The single `ds.close()` belongs in `from_netcdf` AFTER `_load_dist_from_sea` returns. Do NOT add a `ds.close()` inside the helper; if you do, the second close from `from_netcdf` will raise. Verify the existing `from_netcdf` body: locate the current `return cls(...)` (around `h3_env.py:127`), check whether there's any `ds.close()` already (there is not in v1.7.7); if absent, the new line you add IS the only close — do not add a second one. Verify line ordering: open → fields → ssh zero-fill → cls() → load_dist_from_sea(env, ds, mesh) → ds.close() → return env.
 
 Add the helper function at module level (after the H3Environment class):
 
@@ -643,6 +650,13 @@ def test_from_netcdf_case_b_nan_on_land_does_not_raise(tmp_path):
     env = H3Environment.from_netcdf(str(nc_path), mesh)
     assert np.isnan(env.fields["dist_from_sea"][3])  # land cell stays NaN
     assert env.fields["dist_from_sea"][0] == 0.0
+    # Identity assertion: env.fields and mesh point to the SAME array
+    # (shared reference, not independent copies). Pass-1 silent-failure
+    # finding: a future refactor that copies via arr.copy() would create
+    # divergence invisible to the value-equality tests.
+    assert mesh.dist_from_sea is env.fields["dist_from_sea"]
+    # Per-env latch flag initialized on the Case B happy path.
+    assert env._dormant_gradient_check_done is False
 
 
 def test_from_netcdf_case_b_all_zero_raises(tmp_path):
@@ -718,12 +732,21 @@ In `salmon_ibm/h3_env.py`, replace the Case B placeholder block (the section aft
         )
 
     # (d) Sources exist — at least one OpenBaltic water cell at
-    # distance 0. Skip if "OpenBaltic" not in reach_names (non-Baltic
-    # mesh — nothing to validate against; the load is best-effort).
+    # distance 0. Skip the entire check if "OpenBaltic" not in
+    # reach_names (non-Baltic mesh — no validation possible).
     if "OpenBaltic" in mesh.reach_names:
         ob_id = mesh.reach_names.index("OpenBaltic")
         ob_mask = (mesh.reach_id == ob_id) & mesh.water_mask
-        if ob_mask.any() and not np.any(arr[ob_mask] == 0.0):
+        if not ob_mask.any():
+            # Mesh declares OpenBaltic reach but has zero water cells
+            # in it. Degenerate mesh — raise (not a silent skip, per
+            # pass-1 review-loop finding).
+            raise RuntimeError(
+                f"{ERR_DIST_FROM_SEA_NO_SOURCES}: mesh has reach "
+                "'OpenBaltic' but no water_mask=True cells in it. "
+                "Cannot validate sources; rebuild mesh."
+            )
+        if not np.any(arr[ob_mask] == 0.0):
             raise RuntimeError(
                 f"{ERR_DIST_FROM_SEA_NO_SOURCES}: no OpenBaltic water "
                 "cell has dist_from_sea == 0; the source set is empty "
@@ -759,48 +782,69 @@ git commit -m "feat(c4): h3_env Case B structural validation + Tests 4a-4d"
 ## Task 5: `simulation.py` Landscape TypedDict + dict construction
 
 **Files:**
-- Modify: `salmon_ibm/simulation.py` — add `env` field to `Landscape` TypedDict at lines ~12-33; add `"env": getattr(self, "env", None)` to landscape dict construction at line ~602.
+- Modify: `salmon_ibm/simulation.py` — add `env` field to `Landscape` TypedDict; add `"env": ...` to landscape dict construction at the existing `step()` site.
 
-- [ ] **Step 1: Locate the existing Landscape TypedDict + landscape dict**
+- [ ] **Step 1: Locate the existing Landscape TypedDict + the landscape-dict construction**
 
 Run: `grep -n "Landscape\|class Landscape\|TypedDict" salmon_ibm/simulation.py | head -10`
-Expected: lines around 12-33 (TypedDict definition) + a usage site around line 600+.
+Run: `grep -n '"fields":\|"rng":\|"mesh":' salmon_ibm/simulation.py | head -10`
 
-- [ ] **Step 2: Update the TypedDict + the dict construction**
+Note the line numbers. The TypedDict definition is around `simulation.py:12-33`. The landscape construction site is the `step()` method's dict literal — find the line that builds the dict passed to `EventSequencer.step` or to events. Record the path: do NOT proceed until you can name both line ranges.
 
-In `salmon_ibm/simulation.py`, locate the `Landscape(TypedDict)` definition. Add:
+- [ ] **Step 2: Identify the env attribute on `Simulation`**
+
+Run: `grep -n "self.env\s*=\|self\.env\b" salmon_ibm/simulation.py | head -10`
+
+Expected: `self.env = H3Environment.from_netcdf(...)` is set in the H3-multires init branch (around `simulation.py:181`). For non-H3 paths (TriMesh, HexMesh, hexsim), `self.env` may be a different class (`Environment`, `HexSimEnvironment`). Confirm — the dormancy check only fires when `env` is an `H3Environment`-shaped object with `fields["dist_from_sea"]` and `_dormant_gradient_check_done`. For non-H3 envs, the check is a no-op.
+
+- [ ] **Step 3: Update the TypedDict**
+
+In `salmon_ibm/simulation.py`, locate the `Landscape(TypedDict)` definition. Add the new field. Match the existing convention (probably `total=False` since the dict has many optional keys):
 
 ```python
 class Landscape(TypedDict, total=False):
     # ... existing fields ...
-    env: "H3Environment | None"  # NEW (C4) — for movement.py's
-                                  # _check_dormant_gradient helper.
+    env: "H3Environment | Environment | HexSimEnvironment | None"  # NEW (C4)
 ```
 
-(Use `total=False` if the existing definition uses it. If `total=True`, use `NotRequired[H3Environment | None]` — match the existing convention.)
-
-Locate the landscape dict construction site (likely in `step()` near line 600 where the dict literal is built). Add:
+If the existing TypedDict uses string annotations, keep that style. If `H3Environment` isn't already imported at the top via `TYPE_CHECKING`, add:
 
 ```python
-landscape = {
-    # ... existing keys ...
-    "env": getattr(self, "env", None),  # NEW (C4)
-}
-```
-
-If the import of `H3Environment` isn't already at the top, add (with `TYPE_CHECKING` guard if used elsewhere):
-
-```python
+from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from salmon_ibm.h3_env import H3Environment
 ```
 
-- [ ] **Step 3: Smoke-test simulation**
+- [ ] **Step 4: Update the landscape dict construction**
+
+In `simulation.py`'s `step()` method, locate the dict literal. Add `"env": self.env` (direct attribute access, NOT `getattr(...)`):
+
+```python
+landscape: Landscape = {
+    # ... existing keys ...
+    "env": self.env,  # NEW (C4) — for the dormancy check in
+                      # MovementEvent.execute. self.env is set in
+                      # __init__ for ALL backends (H3 / TriMesh /
+                      # HexMesh / HexSim) — direct access, not
+                      # getattr, so a future refactor that renames
+                      # self.env fails LOUD instead of silently
+                      # leaving env=None.
+}
+```
+
+(Pass-1 silent-failure finding: `getattr(self, "env", None)` would silently mask a renamed-attribute regression. Direct access fails fast — preferred per the project's fail-fast convention.)
+
+- [ ] **Step 5: Smoke-test simulation**
 
 Run: `micromamba run -n shiny python -m pytest tests/test_simulation.py -q`
 Expected: All pass — the change is additive.
 
-- [ ] **Step 4: Commit**
+If a test breaks because its synthetic `landscape` dict lacks the `env` key, that's a fixture issue. Per the TypedDict's `total=False`, the key is optional — but tests that build a landscape and then look up `landscape["env"]` would KeyError. Fix in the test fixture.
+
+Run: `micromamba run -n shiny python -m pytest tests/test_movement.py tests/test_delta_routing.py -q`
+Expected: All pass — these tests don't touch `landscape["env"]` directly (the dormancy check is gated on the helper, which is added in Task 6).
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add salmon_ibm/simulation.py
@@ -811,20 +855,40 @@ git commit -m "feat(c4): simulation.py Landscape TypedDict + dict gain env key"
 
 ## Task 6: `_check_dormant_gradient` helper + Tests 4e, 4f
 
+**Architectural correction (v2):** Pass-1 review-loop confirmed
+`execute_movement(pool, mesh, fields, ...)` takes `fields` as the
+third positional arg, NOT a `landscape` dict. The dormancy check
+therefore CANNOT live inside `execute_movement` (which has no `env`
+or `pool.behavior` access through `fields`). The check belongs at
+the **`MovementEvent.execute` layer** in `salmon_ibm/events_builtin.py`
+(line 25-48), which already receives `landscape` and `population`.
+Helper signature: `_check_dormant_gradient(landscape, pool)` — the
+helper computes `has_directed` from `pool.behavior` directly (no
+buckets dependency).
+
 **Files:**
-- Modify: `salmon_ibm/movement.py` — add the helper at module top; call from `execute_movement` before behavior dispatch.
+- Modify: `salmon_ibm/movement.py` — add the helper at module level (still in movement.py for cohesion with the kernel it guards).
+- Modify: `salmon_ibm/events_builtin.py` — call the helper from `MovementEvent.execute` BEFORE `execute_movement`.
 - Test: `tests/test_movement_gradient.py`
 
 - [ ] **Step 1: Append failing tests for the latched check**
 
+Helper signature: `_check_dormant_gradient(landscape, pool)`. The helper
+reads `pool.behavior` to compute whether any agent is in
+UPSTREAM/DOWNSTREAM. No buckets parameter.
+
 Append to `tests/test_movement_gradient.py`:
 
 ```python
-def _make_landscape(env, fields_override=None, behavior=None):
-    """Helper: minimal landscape dict for movement-helper tests."""
-    fields = dict(env.fields)
-    if fields_override is not None:
-        fields.update(fields_override)
+def _make_landscape(env, dist_from_sea_arr=None):
+    """Helper: minimal landscape dict for dormancy-check tests.
+
+    `dist_from_sea_arr` overrides what the helper inspects; if None,
+    uses env.fields["dist_from_sea"] as-is.
+    """
+    fields = dict(env.fields) if hasattr(env, "fields") else {}
+    if dist_from_sea_arr is not None:
+        fields["dist_from_sea"] = dist_from_sea_arr
     return {
         "env": env,
         "fields": fields,
@@ -832,32 +896,37 @@ def _make_landscape(env, fields_override=None, behavior=None):
     }
 
 
+def _make_pool(behaviors):
+    """Helper: minimal pool stand-in with .behavior array."""
+    class _FakePool:
+        pass
+    pool = _FakePool()
+    pool.behavior = np.asarray(behaviors, dtype=np.int8)
+    return pool
+
+
 def test_check_dormant_gradient_raises_on_flat_zero_with_directed_agents():
-    """C4 Test 4e (per-env latch isolation, part 1): env-A loaded
-    via Case A path → flat-zero → directed agent → raise."""
-    import logging
+    """C4 Test 4e (part 1): env-A loaded via Case A path → flat-zero →
+    directed agent → raise containing the err-id."""
     from salmon_ibm.movement import _check_dormant_gradient
     from salmon_ibm.agents import Behavior
-    from salmon_ibm.h3_env import H3Environment, ERR_DIST_FROM_SEA_MISSING
+    from salmon_ibm.h3_env import ERR_DIST_FROM_SEA_MISSING
 
-    # Re-use Test 4 fixtures (or inline). Simplest: synthetic env with
-    # flat-zero fields["dist_from_sea"] + flag init False.
     class _FakeEnv:
         pass
     env_a = _FakeEnv()
     env_a.fields = {"dist_from_sea": np.zeros(10, dtype=np.float32)}
     env_a._dormant_gradient_check_done = False
 
-    # Buckets dict simulating "agents in UPSTREAM behavior".
-    buckets = {int(Behavior.UPSTREAM): np.array([0, 1, 2], dtype=np.intp)}
+    pool = _make_pool([int(Behavior.UPSTREAM), int(Behavior.HOLD)])
     landscape = _make_landscape(env_a)
 
     with pytest.raises(RuntimeError, match=ERR_DIST_FROM_SEA_MISSING):
-        _check_dormant_gradient(landscape, buckets)
+        _check_dormant_gradient(landscape, pool)
 
 
 def test_check_dormant_gradient_per_env_isolation():
-    """C4 Test 4e part 2: env-A's latch does NOT affect env-B's
+    """C4 Test 4e (part 2): env-A's latch does NOT affect env-B's
     independent check. Regression test for the pass-7 module-global
     → per-env-instance refactor."""
     from salmon_ibm.movement import _check_dormant_gradient
@@ -870,50 +939,48 @@ def test_check_dormant_gradient_per_env_isolation():
     env_a.fields = {"dist_from_sea": np.zeros(10, dtype=np.float32)}
     env_a._dormant_gradient_check_done = False
 
-    buckets = {int(Behavior.UPSTREAM): np.array([0, 1, 2], dtype=np.intp)}
+    pool = _make_pool([int(Behavior.UPSTREAM)])
 
-    # Trigger raise on env_a; flag latches True.
     with pytest.raises(RuntimeError):
-        _check_dormant_gradient(_make_landscape(env_a), buckets)
+        _check_dormant_gradient(_make_landscape(env_a), pool)
     assert env_a._dormant_gradient_check_done is True
 
-    # env_b is independent; flag is False; check fires raise too.
     env_b = _FakeEnv()
     env_b.fields = {"dist_from_sea": np.zeros(10, dtype=np.float32)}
     env_b._dormant_gradient_check_done = False
     with pytest.raises(RuntimeError):
-        _check_dormant_gradient(_make_landscape(env_b), buckets)
+        _check_dormant_gradient(_make_landscape(env_b), pool)
     assert env_b._dormant_gradient_check_done is True
 
 
-def test_check_dormant_gradient_happy_path_latches():
-    """C4 Test 4f: Case B all-checks-pass env (non-flat gradient) +
-    directed agent → no raise + flag latched."""
+def test_check_dormant_gradient_happy_path_latches(tmp_path, caplog):
+    """C4 Test 4f: load env via H3Environment.from_netcdf with a
+    valid Case-B NC; check fires no raise and latches True. Tests the
+    end-to-end Case-B init → helper-call sequence."""
     from salmon_ibm.movement import _check_dormant_gradient
+    from salmon_ibm.h3_env import H3Environment
     from salmon_ibm.agents import Behavior
 
-    class _FakeEnv:
-        pass
-    env = _FakeEnv()
-    env.fields = {
-        "dist_from_sea": np.arange(10, dtype=np.float32) * 100.0,
-    }
-    env._dormant_gradient_check_done = False
+    nc_path = tmp_path / "happy_path.nc"
+    valid = np.array([0.0, 100.0, 200.0, np.nan], dtype=np.float32)
+    _build_minimal_h3_nc(nc_path, dist_from_sea_arr=valid)
+    mesh = _build_mesh_from_nc(nc_path)
+    env = H3Environment.from_netcdf(str(nc_path), mesh)
+    assert env._dormant_gradient_check_done is False  # Case B init OK
 
-    buckets = {int(Behavior.UPSTREAM): np.array([0], dtype=np.intp)}
-    # No raise.
-    _check_dormant_gradient(_make_landscape(env), buckets)
+    pool = _make_pool([int(Behavior.UPSTREAM)])
+    # No raise — gradient has positive values.
+    _check_dormant_gradient(_make_landscape(env), pool)
     assert env._dormant_gradient_check_done is True
 
-    # Second call: latched, no work, no raise even if we reset gradient
-    # to all-zero (the latch protects against re-checking).
-    env.fields["dist_from_sea"] = np.zeros(10, dtype=np.float32)
-    _check_dormant_gradient(_make_landscape(env), buckets)
+    # Second call: latched. Even with the gradient now-zeroed, no raise.
+    env.fields["dist_from_sea"][:] = 0.0
+    _check_dormant_gradient(_make_landscape(env), pool)
 
 
 def test_check_dormant_gradient_no_directed_agents_no_raise():
-    """C4 sanity: flat-zero gradient + only HOLD/RANDOM agents → no
-    raise (the check is gated on UPSTREAM/DOWNSTREAM presence)."""
+    """C4 sanity: flat-zero gradient + only HOLD/RANDOM/TO_CWR agents
+    → no raise (the check is gated on UPSTREAM/DOWNSTREAM presence)."""
     from salmon_ibm.movement import _check_dormant_gradient
     from salmon_ibm.agents import Behavior
 
@@ -923,12 +990,12 @@ def test_check_dormant_gradient_no_directed_agents_no_raise():
     env.fields = {"dist_from_sea": np.zeros(10, dtype=np.float32)}
     env._dormant_gradient_check_done = False
 
-    buckets = {
-        int(Behavior.HOLD): np.array([0], dtype=np.intp),
-        int(Behavior.RANDOM): np.array([1], dtype=np.intp),
-    }
-    # No raise — no UPSTREAM/DOWNSTREAM agent.
-    _check_dormant_gradient(_make_landscape(env), buckets)
+    pool = _make_pool([
+        int(Behavior.HOLD),
+        int(Behavior.RANDOM),
+        int(Behavior.TO_CWR),
+    ])
+    _check_dormant_gradient(_make_landscape(env), pool)
     assert env._dormant_gradient_check_done is True
 
 
@@ -942,8 +1009,8 @@ def test_check_dormant_gradient_no_env_in_landscape_no_raise():
         "rng": np.random.default_rng(0),
         # NO "env" key.
     }
-    buckets = {int(Behavior.UPSTREAM): np.array([0], dtype=np.intp)}
-    _check_dormant_gradient(landscape, buckets)  # must not raise
+    pool = _make_pool([int(Behavior.UPSTREAM)])
+    _check_dormant_gradient(landscape, pool)  # must not raise
 ```
 
 - [ ] **Step 2: Run tests to verify failure**
@@ -951,33 +1018,48 @@ def test_check_dormant_gradient_no_env_in_landscape_no_raise():
 Run: `micromamba run -n shiny python -m pytest tests/test_movement_gradient.py -k check_dormant -v`
 Expected: ImportError on `_check_dormant_gradient`.
 
-- [ ] **Step 3: Add `_check_dormant_gradient` to `movement.py`**
+- [ ] **Step 3: Verify Behavior import in movement.py is at module level**
 
-In `salmon_ibm/movement.py`, add at module top (after existing imports, before any kernel):
+Run: `grep -n "from salmon_ibm.agents import Behavior\|^from salmon_ibm" salmon_ibm/movement.py`
+Expected: a top-level `from salmon_ibm.agents import Behavior` exists at line ~31.
+
+If the import is inside a function (lazy), promote it to module level — the helper added in Step 4 references `Behavior` at module scope and will fail otherwise.
+
+- [ ] **Step 4: Add `_check_dormant_gradient` to `movement.py`**
+
+In `salmon_ibm/movement.py`, add after the existing imports (after line 31's `from salmon_ibm.agents import Behavior`), before any kernel:
 
 ```python
 from salmon_ibm.h3_env import ERR_DIST_FROM_SEA_MISSING
 
 
-def _check_dormant_gradient(landscape, buckets) -> None:
+def _check_dormant_gradient(landscape, pool) -> None:
     """C4: raise once per env-instance if `dist_from_sea` is flat-zero
     AND any agent is in UPSTREAM/DOWNSTREAM behavior.
+
+    Signature: takes `landscape` (dict) + `pool` (AgentPool stand-in
+    with .behavior int8 array). Computes `has_directed` from
+    pool.behavior directly — does not depend on the kernel's bucket
+    construction. This decouples the dormancy check from
+    execute_movement's internals so the check can be called from
+    MovementEvent.execute (which does not have buckets).
 
     Latch is per-env-instance via `env._dormant_gradient_check_done`,
     NOT module-global — pass-7 review-loop pinned this to avoid
     cross-test landscape-swap leakage. Initialised to False by
     H3Environment.from_netcdf in both Case A and Case B paths.
 
-    No-op if landscape has no `env` key (legacy non-Baltic).
+    No-op if landscape has no `env` key (legacy non-Baltic) OR if
+    the env's flag is already True (latched after first call).
     """
     env = landscape.get("env")
     if env is None or getattr(env, "_dormant_gradient_check_done", True):
         return  # legacy env, or check already run
 
-    has_directed = (
-        buckets.get(int(Behavior.UPSTREAM)) is not None
-        or buckets.get(int(Behavior.DOWNSTREAM)) is not None
-    )
+    has_directed = bool(np.any(
+        (pool.behavior == int(Behavior.UPSTREAM))
+        | (pool.behavior == int(Behavior.DOWNSTREAM))
+    ))
     if has_directed and not np.any(landscape["fields"]["dist_from_sea"]):
         env._dormant_gradient_check_done = True  # latch BEFORE raise
         raise RuntimeError(
@@ -990,29 +1072,60 @@ def _check_dormant_gradient(landscape, buckets) -> None:
     env._dormant_gradient_check_done = True
 ```
 
-(Note: `Behavior` is already imported in movement.py via `from salmon_ibm.agents import Behavior` — verify.)
+- [ ] **Step 5: Wire the helper into `MovementEvent.execute`**
 
-Then, in `execute_movement`, AFTER the bucket-build pass at the existing line ~72-75, BEFORE the first dispatch block at line ~78, add:
+In `salmon_ibm/events_builtin.py`, modify `MovementEvent.execute`. The current body (lines 25-48) starts:
 
 ```python
-    _check_dormant_gradient(landscape, buckets)
+def execute(self, population, landscape, t, mask):
+    mesh = landscape["mesh"]
+    fields = landscape["fields"]
+    rng = landscape["rng"]
+    barrier_arrays = landscape.get("barrier_arrays")
+    n_micro = landscape.get("n_micro_steps_per_cell")
+    ...
 ```
 
-- [ ] **Step 4: Run focused tests to verify pass**
+Add the dormancy check at the top of the method body, immediately after the docstring (if any) but BEFORE the `landscape["mesh"]` access:
+
+```python
+def execute(self, population, landscape, t, mask):
+    # C4: latched dormancy check. No-ops on legacy non-Baltic landscapes
+    # (no "env" key) or after first successful call (latched).
+    from salmon_ibm.movement import _check_dormant_gradient
+    _check_dormant_gradient(landscape, population.pool)
+
+    mesh = landscape["mesh"]
+    ...
+```
+
+Local import (`from salmon_ibm.movement import ...` inside the method) avoids any circular-import risk if events_builtin is imported before movement during Python's module load — defensive.
+
+- [ ] **Step 6: Run focused tests to verify pass**
 
 Run: `micromamba run -n shiny python -m pytest tests/test_movement_gradient.py -k check_dormant -v`
 Expected: 5 PASS.
 
-- [ ] **Step 5: Smoke-test movement module**
+- [ ] **Step 7: Smoke-test movement + simulation suites**
 
-Run: `micromamba run -n shiny python -m pytest tests/test_movement.py tests/test_delta_routing.py tests/test_simulation.py -q`
-Expected: All pass — `_check_dormant_gradient` is a no-op when `env` is absent (legacy fixtures don't set it).
+Run: `micromamba run -n shiny python -m pytest tests/test_movement.py tests/test_delta_routing.py tests/test_simulation.py tests/test_h3_env.py -q`
+Expected: All pass. The MovementEvent.execute change adds one line at the top; on legacy fixtures (no "env" in landscape), `_check_dormant_gradient` no-ops.
 
-- [ ] **Step 6: Commit**
+If a test fails because its synthetic `population` doesn't have `.pool` (some legacy tests pass a bare `Pool`-shaped object), inspect: `population.pool` is the standard interface via `Population` wrapper. If the test passes `pool` directly as `population`, the helper line above access `population.pool` and AttributeErrors. Fix: make the helper resilient by trying `population.pool` first then `population` as fallback, OR fix the test fixture.
+
+```python
+# Defensive variant for the helper call site:
+pool = getattr(population, "pool", population)
+_check_dormant_gradient(landscape, pool)
+```
+
+Use the defensive variant — broadens compat without weakening the check.
+
+- [ ] **Step 8: Commit**
 
 ```bash
-git add salmon_ibm/movement.py tests/test_movement_gradient.py
-git commit -m "feat(c4): _check_dormant_gradient per-env latched helper + Tests 4e/4f"
+git add salmon_ibm/movement.py salmon_ibm/events_builtin.py tests/test_movement_gradient.py
+git commit -m "feat(c4): _check_dormant_gradient at MovementEvent.execute layer + Tests 4e/4f"
 ```
 
 ---
@@ -1023,98 +1136,118 @@ git commit -m "feat(c4): _check_dormant_gradient per-env latched helper + Tests 
 - Modify: `salmon_ibm/movement.py` — UPSTREAM/DOWNSTREAM dispatch (lines 94-127): `fields["ssh"]` → `fields["dist_from_sea"]`; flip `ascending` flag at lines 107 (False→True) and 125 (True→False).
 - Test: `tests/test_movement_gradient.py`
 
-- [ ] **Step 1: Append failing tests 1, 2, 2b, 3**
-
-Append to `tests/test_movement_gradient.py`:
+**Important — `execute_movement` signature.** The kernel takes
+`(pool, mesh, fields, seed=None, n_micro_steps_per_cell=None, ...)`.
+The third positional argument is `fields` (a `dict[str, np.ndarray]`),
+NOT a landscape dict. All Task 7 tests call:
 
 ```python
+execute_movement(
+    pool, mesh, fields,
+    seed=42,
+    n_micro_steps_per_cell=np.ones(n_cells, dtype=np.int32),
+)
+```
+
+The dormancy check happens at the `MovementEvent.execute` layer
+(Task 6), NOT inside `execute_movement` itself. Tests 1/2/2b/3 do
+NOT exercise the dormancy check; they exercise only the kernel
+field swap.
+
+`_FakeMesh` for these tests must include `n_triangles = N` because
+`execute_movement` line 53-54 reads `mesh.n_triangles` when
+`n_micro_steps_per_cell is None`. Pass `n_micro_steps_per_cell`
+explicitly to bypass that path, but also set `n_triangles` defensively.
+
+- [ ] **Step 1: Append failing tests 1, 2, 2b, 3 — with shared chain-mesh fixture**
+
+Append to `tests/test_movement_gradient.py`. First, the shared fixture:
+
+```python
+def _make_chain_mesh_fake(n: int = 10):
+    """Build a `_FakeMesh` for kernel-direct tests (Tests 1, 2, 2b, 3).
+
+    Bidirectional chain: cell `i` has neighbor i+1 (slot 0) and i-1
+    (slot 1) where they exist. Endpoints (0 and n-1) have one neighbor.
+
+    Returns a fresh mesh per call so tests don't share state.
+    """
+    water_nbrs = np.full((n, 2), -1, dtype=np.int32)
+    for i in range(n - 1):
+        water_nbrs[i, 0] = i + 1
+    for i in range(1, n):
+        water_nbrs[i, 1] = i - 1
+    water_nbr_count = np.array(
+        [1] + [2] * (n - 2) + [1], dtype=np.int32,
+    )
+
+    class _FakeMesh:
+        pass
+    mesh = _FakeMesh()
+    mesh._water_nbrs = water_nbrs
+    mesh._water_nbr_count = water_nbr_count
+    mesh.n_triangles = n  # required by execute_movement when
+                          # n_micro_steps_per_cell defaults to None
+    return mesh
+
+
+def _make_chain_fields(n: int = 10, *, gradient: bool = True):
+    """Returns the `fields` dict for the kernel: dist_from_sea +
+    sentinel ssh (for safety against accidental SSH coupling tests).
+
+    `gradient=True`: dist_from_sea[i] = i * 100.0 (monotonic).
+    `gradient=False`: all zeros (dormant state).
+    """
+    if gradient:
+        dist = np.arange(n, dtype=np.float32) * 100.0
+    else:
+        dist = np.zeros(n, dtype=np.float32)
+    return {"dist_from_sea": dist}
+
+
 def test_upstream_climbs_chain_one_step():
     """C4 Test 1 part 1: UPSTREAM agent at cell 0 climbs to cell 1
     after 1 timestep with n_micro=1."""
     from salmon_ibm.movement import execute_movement
     from salmon_ibm.agents import AgentPool, Behavior
 
-    # 10-cell bidirectional chain.
-    n_cells = 10
-    water_nbrs = np.full((n_cells, 2), -1, dtype=np.int32)
-    for i in range(n_cells - 1):
-        water_nbrs[i, 0] = i + 1
-    for i in range(1, n_cells):
-        water_nbrs[i, 1] = i - 1
-    water_nbr_count = np.array(
-        [1] + [2] * (n_cells - 2) + [1], dtype=np.int32,
-    )
-    dist_from_sea = np.arange(n_cells, dtype=np.float32) * 100.0
+    n = 10
+    mesh = _make_chain_mesh_fake(n)
+    fields = _make_chain_fields(n, gradient=True)
+
+    # Silent-failure guard: assert ssh is NOT in fields, so a kernel
+    # that still reads ssh would KeyError instead of silently passing.
+    assert "ssh" not in fields
 
     pool = AgentPool(n=1, start_tri=0, rng_seed=42)
     pool.behavior[0] = int(Behavior.UPSTREAM)
 
-    class _FakeMesh:
-        pass
-    mesh = _FakeMesh()
-    mesh._water_nbrs = water_nbrs
-    mesh._water_nbr_count = water_nbr_count
-
-    class _FakeEnv:
-        pass
-    env = _FakeEnv()
-    env.fields = {"dist_from_sea": dist_from_sea}
-    env._dormant_gradient_check_done = False
-
-    landscape = {
-        "env": env,
-        "fields": env.fields,
-        "rng": np.random.default_rng(0),
-        "n_micro_steps_per_cell": np.ones(n_cells, dtype=np.int32),
-    }
-
-    execute_movement(pool, mesh, landscape)
+    execute_movement(
+        pool, mesh, fields,
+        seed=42,
+        n_micro_steps_per_cell=np.ones(n, dtype=np.int32),
+    )
     assert pool.tri_idx[0] == 1  # climbed one step
 
 
 def test_upstream_reaches_far_cell_after_5_steps():
     """C4 Test 1 part 2: 5 timesteps → agent at cell ≥ 5."""
-    # Same setup as Test 1 part 1; loop 5 times.
-    # (Use the helper from the above test — parametrize or copy-paste
-    # the fixture builder. For brevity, copy fixture inline.)
     from salmon_ibm.movement import execute_movement
     from salmon_ibm.agents import AgentPool, Behavior
 
-    n_cells = 10
-    water_nbrs = np.full((n_cells, 2), -1, dtype=np.int32)
-    for i in range(n_cells - 1):
-        water_nbrs[i, 0] = i + 1
-    for i in range(1, n_cells):
-        water_nbrs[i, 1] = i - 1
-    water_nbr_count = np.array(
-        [1] + [2] * (n_cells - 2) + [1], dtype=np.int32,
-    )
-    dist_from_sea = np.arange(n_cells, dtype=np.float32) * 100.0
+    n = 10
+    mesh = _make_chain_mesh_fake(n)
+    fields = _make_chain_fields(n, gradient=True)
 
     pool = AgentPool(n=1, start_tri=0, rng_seed=42)
     pool.behavior[0] = int(Behavior.UPSTREAM)
 
-    class _FakeMesh:
-        pass
-    mesh = _FakeMesh()
-    mesh._water_nbrs = water_nbrs
-    mesh._water_nbr_count = water_nbr_count
-
-    class _FakeEnv:
-        pass
-    env = _FakeEnv()
-    env.fields = {"dist_from_sea": dist_from_sea}
-    env._dormant_gradient_check_done = False
-
-    landscape = {
-        "env": env,
-        "fields": env.fields,
-        "rng": np.random.default_rng(0),
-        "n_micro_steps_per_cell": np.ones(n_cells, dtype=np.int32),
-    }
-
     for _ in range(5):
-        execute_movement(pool, mesh, landscape)
+        execute_movement(
+            pool, mesh, fields,
+            seed=42,
+            n_micro_steps_per_cell=np.ones(n, dtype=np.int32),
+        )
     assert pool.tri_idx[0] >= 5
 
 
@@ -1124,41 +1257,19 @@ def test_downstream_descends_chain():
     from salmon_ibm.movement import execute_movement
     from salmon_ibm.agents import AgentPool, Behavior
 
-    n_cells = 10
-    water_nbrs = np.full((n_cells, 2), -1, dtype=np.int32)
-    for i in range(n_cells - 1):
-        water_nbrs[i, 0] = i + 1
-    for i in range(1, n_cells):
-        water_nbrs[i, 1] = i - 1
-    water_nbr_count = np.array(
-        [1] + [2] * (n_cells - 2) + [1], dtype=np.int32,
-    )
-    dist_from_sea = np.arange(n_cells, dtype=np.float32) * 100.0
+    n = 10
+    mesh = _make_chain_mesh_fake(n)
+    fields = _make_chain_fields(n, gradient=True)
 
     pool = AgentPool(n=1, start_tri=9, rng_seed=42)
     pool.behavior[0] = int(Behavior.DOWNSTREAM)
 
-    class _FakeMesh:
-        pass
-    mesh = _FakeMesh()
-    mesh._water_nbrs = water_nbrs
-    mesh._water_nbr_count = water_nbr_count
-
-    class _FakeEnv:
-        pass
-    env = _FakeEnv()
-    env.fields = {"dist_from_sea": dist_from_sea}
-    env._dormant_gradient_check_done = False
-
-    landscape = {
-        "env": env,
-        "fields": env.fields,
-        "rng": np.random.default_rng(0),
-        "n_micro_steps_per_cell": np.ones(n_cells, dtype=np.int32),
-    }
-
     for _ in range(5):
-        execute_movement(pool, mesh, landscape)
+        execute_movement(
+            pool, mesh, fields,
+            seed=42,
+            n_micro_steps_per_cell=np.ones(n, dtype=np.int32),
+        )
     assert pool.tri_idx[0] <= 4
 
 
@@ -1169,81 +1280,47 @@ def test_upstream_at_mesh_edge_does_not_crash():
     from salmon_ibm.movement import execute_movement
     from salmon_ibm.agents import AgentPool, Behavior
 
-    n_cells = 10
-    water_nbrs = np.full((n_cells, 2), -1, dtype=np.int32)
-    for i in range(n_cells - 1):
-        water_nbrs[i, 0] = i + 1
-    for i in range(1, n_cells):
-        water_nbrs[i, 1] = i - 1
-    water_nbr_count = np.array(
-        [1] + [2] * (n_cells - 2) + [1], dtype=np.int32,
-    )
-    dist_from_sea = np.arange(n_cells, dtype=np.float32) * 100.0
+    n = 10
+    mesh = _make_chain_mesh_fake(n)
+    fields = _make_chain_fields(n, gradient=True)
 
     pool = AgentPool(n=1, start_tri=9, rng_seed=42)
     pool.behavior[0] = int(Behavior.UPSTREAM)
 
-    class _FakeMesh:
-        pass
-    mesh = _FakeMesh()
-    mesh._water_nbrs = water_nbrs
-    mesh._water_nbr_count = water_nbr_count
-
-    class _FakeEnv:
-        pass
-    env = _FakeEnv()
-    env.fields = {"dist_from_sea": dist_from_sea}
-    env._dormant_gradient_check_done = False
-
-    landscape = {
-        "env": env,
-        "fields": env.fields,
-        "rng": np.random.default_rng(0),
-        "n_micro_steps_per_cell": np.ones(n_cells, dtype=np.int32),
-    }
-
     for _ in range(5):
-        execute_movement(pool, mesh, landscape)
+        execute_movement(
+            pool, mesh, fields,
+            seed=42,
+            n_micro_steps_per_cell=np.ones(n, dtype=np.int32),
+        )
     # Did not crash; oscillates near edge.
     assert pool.tri_idx[0] in {8, 9}
 
 
 def test_zero_gradient_fallback_behavioral():
-    """C4 Test 3: zero gradient + UPSTREAM at cell 5 + landscape WITHOUT
-    env (so the dormancy raise no-ops via env-is-None guard).
-    Agent oscillates within {4, 5, 6}."""
+    """C4 Test 3: zero gradient + UPSTREAM at cell 5. Calls
+    execute_movement directly (not via MovementEvent) so the dormancy
+    raise doesn't fire — this test is about the kernel's degenerate
+    behavior, not the dormancy check.
+
+    Agent oscillates within {4, 5, 6}.
+    """
     from salmon_ibm.movement import execute_movement
     from salmon_ibm.agents import AgentPool, Behavior
 
-    n_cells = 10
-    water_nbrs = np.full((n_cells, 2), -1, dtype=np.int32)
-    for i in range(n_cells - 1):
-        water_nbrs[i, 0] = i + 1
-    for i in range(1, n_cells):
-        water_nbrs[i, 1] = i - 1
-    water_nbr_count = np.array(
-        [1] + [2] * (n_cells - 2) + [1], dtype=np.int32,
-    )
-    dist_from_sea = np.zeros(n_cells, dtype=np.float32)
+    n = 10
+    mesh = _make_chain_mesh_fake(n)
+    fields = _make_chain_fields(n, gradient=False)  # all-zero gradient
 
     pool = AgentPool(n=1, start_tri=5, rng_seed=42)
     pool.behavior[0] = int(Behavior.UPSTREAM)
 
-    class _FakeMesh:
-        pass
-    mesh = _FakeMesh()
-    mesh._water_nbrs = water_nbrs
-    mesh._water_nbr_count = water_nbr_count
-
-    landscape = {
-        # No "env" key — _check_dormant_gradient no-ops.
-        "fields": {"dist_from_sea": dist_from_sea},
-        "rng": np.random.default_rng(0),
-        "n_micro_steps_per_cell": np.ones(n_cells, dtype=np.int32),
-    }
-
     for _ in range(10):
-        execute_movement(pool, mesh, landscape)
+        execute_movement(
+            pool, mesh, fields,
+            seed=42,
+            n_micro_steps_per_cell=np.ones(n, dtype=np.int32),
+        )
     # Stayed within immediate neighborhood (oscillation).
     assert pool.tri_idx[0] in {4, 5, 6}
 ```
@@ -1366,6 +1443,13 @@ In `scripts/build_h3_multires_landscape.py`, AFTER the H3MultiResMesh is constru
             f"max={float(valid.max()):>10.0f}m  "
             f"mean={float(valid.mean()):>10.0f}m"
         )
+        # Pass-1 silent-failure finding: surface degenerate reaches
+        # explicitly rather than silently `continue` past them.
+        if len(valid) < n_cells:
+            print(
+                f"    WARNING: {name} has {n_cells - len(valid)} "
+                f"non-finite cells (out of {n_cells})"
+            )
 ```
 
 Add `dist_from_sea` to the `Dataset` `data_vars` or the `to_netcdf` call:
@@ -1379,7 +1463,41 @@ Add `dist_from_sea` to the `Dataset` `data_vars` or the `to_netcdf` call:
 - [ ] **Step 3: Rebuild the production NC**
 
 Run: `micromamba run -n shiny python scripts/build_h3_multires_landscape.py`
-Expected: build completes; final output prints per-reach distribution; OpenBaltic mean < BalticCoast/CuronianLagoon mean < Atmata/Skirvyte/Gilija mean < Nemunas mean (roughly — CuronianLagoon may be bimodal).
+Expected: build completes (exit 0); final output prints per-reach distribution; OpenBaltic mean < BalticCoast/CuronianLagoon mean < Atmata/Skirvyte/Gilija mean < Nemunas mean (roughly — CuronianLagoon may be bimodal).
+
+If the script exits non-zero (e.g., raises mid-run), the NC may be partially-written. STOP and investigate before proceeding to Step 4.
+
+- [ ] **Step 3.5: Programmatic post-build verification**
+
+Run:
+```bash
+micromamba run -n shiny python -c "
+import xarray as xr
+import numpy as np
+ds = xr.open_dataset('data/curonian_h3_multires_landscape.nc', engine='h5netcdf')
+arr = ds['dist_from_sea'].values
+wm = ds['water_mask'].values
+print('shape:', arr.shape)
+print('dtype:', arr.dtype)
+print('water-cell finite:', bool(np.all(np.isfinite(arr[wm]))))
+print('max:', float(arr.max()))
+print('OpenBaltic-source-cells-at-zero:',
+      bool(np.any(arr[(ds['reach_id'].values == ds.attrs['reach_names'].split(',').index('OpenBaltic')) & wm] == 0)))
+ds.close()
+"
+```
+Expected output (all four lines):
+```
+shape: (185428,)
+dtype: float32
+water-cell finite: True
+max: <some positive value, expected > 10000>
+OpenBaltic-source-cells-at-zero: True
+```
+
+If any check fails, the NC is corrupt — re-run Step 3 after diagnosing.
+
+(Also implicitly verifies the per-reach print above didn't silently skip reaches via the `if len(valid) == 0: continue` path. If a reach was all-NaN, `water-cell finite` would be False here.)
 
 - [ ] **Step 4: Append failing test 6**
 
@@ -1509,16 +1627,30 @@ def test_post_c33_teleport_invariant():
     ds.close()
 
     # Build a minimal mesh that satisfies _branch_entry_cell's interface.
+    # Per pass-1 review: must build BOTH _water_nbrs AND _water_nbr_count
+    # (the C3.3 swimmable-cell preference reads _water_nbr_count, but
+    # other helpers in the dispatch chain may read _water_nbrs).
     class _MeshShim:
         pass
     mesh = _MeshShim()
     mesh.reach_id = reach_id
     mesh.reach_names = reach_names
-    mesh._water_nbr_count = np.array([
-        sum(1 for k in range(int(nbr_starts[i]), int(nbr_starts[i+1]))
-            if int(nbr_idx[k]) >= 0 and water_mask[int(nbr_idx[k])])
-        for i in range(len(reach_id))
-    ], dtype=np.int32)
+    mesh.water_mask = water_mask
+
+    max_deg = int(np.diff(nbr_starts).max())
+    mesh._water_nbrs = np.full(
+        (len(reach_id), max_deg), -1, dtype=np.int32,
+    )
+    mesh._water_nbr_count = np.zeros(len(reach_id), dtype=np.int32)
+    for i in range(len(reach_id)):
+        s, e = int(nbr_starts[i]), int(nbr_starts[i + 1])
+        slot = 0
+        for k in range(s, e):
+            n_idx = int(nbr_idx[k])
+            if n_idx >= 0 and water_mask[n_idx]:
+                mesh._water_nbrs[i, slot] = n_idx
+                slot += 1
+        mesh._water_nbr_count[i] = slot
 
     for branch in ("Atmata", "Skirvyte", "Gilija"):
         if branch not in reach_names:
@@ -1606,7 +1738,12 @@ def test_teleport_then_upstream_advances_inland():
     nbr_idx = ds["nbr_idx"].values
     ds.close()
 
+    # Reload cfg per-call to avoid state leak across iterations and
+    # across tests that share the same cached YAML. Pass-1 silent-
+    # failure finding: mutating cfg.hatchery.homing_precision in a
+    # test would leak to subsequent tests if cfg is module-cached.
     cfg = load_baltic_species_config("configs/baltic_salmon_species.yaml")
+    saved_homing = cfg.hatchery.homing_precision
     hd = HatcheryDispatch(
         params=cfg.hatchery,
         activity_lut=np.ones(5, dtype=np.float64),
@@ -1689,6 +1826,10 @@ def test_teleport_then_upstream_advances_inland():
             f"post-teleport={post_teleport_dist:.1f}m, "
             f"final={final_dist:.1f}m"
         )
+
+    # Restore cfg (defensive — even though we reload per-test, restore
+    # in case the module-level cache wraps this object).
+    cfg.hatchery.homing_precision = saved_homing
 ```
 
 - [ ] **Step 2: Append Test 5b production-mesh determinism**
@@ -1708,7 +1849,10 @@ def test_compute_dist_from_sea_matches_saved_nc():
     import xarray as xr
 
     ds = xr.open_dataset(str(PRODUCTION_NC), engine="h5netcdf")
-    saved = ds["dist_from_sea"].values
+    # Cast to float32 to match compute_dist_from_sea's return dtype.
+    # xarray may upcast NC float32 to float64 on read depending on
+    # engine — explicit cast normalizes for byte-equal comparison.
+    saved = ds["dist_from_sea"].values.astype(np.float32)
 
     # Build mesh from NC (same logic as simulation.py:130-180).
     names_attr = ds.attrs.get("reach_names", "")
@@ -1756,10 +1900,40 @@ git commit -m "test(c4): Test 7b teleport-then-step + Test 5b production-NC dete
 - Modify: `docs/superpowers/specs/2026-05-07-c4-movement-gradient-design.md` (status header)
 - Modify: `docs/superpowers/plans/2026-05-07-c4-movement-gradient.md` (EXECUTED note at top)
 
-- [ ] **Step 1: Run full pytest suite**
+- [ ] **Step 1a: Pre-flight — verify production NC exists AND production-dependent tests are collected**
+
+Skipped tests count as "passing" in pytest's summary, so a missing
+production NC could silently zero out C4's most important
+acceptance tests. Verify before the regression sweep:
+
+Run:
+```bash
+test -f data/curonian_h3_multires_landscape.nc || \
+    { echo "FAIL: production NC missing"; exit 1; }
+```
+
+Then verify the 4 production-dependent tests are collected and
+NOT skipped:
+```bash
+micromamba run -n shiny python -m pytest \
+    tests/test_movement_gradient.py \
+    -k "production_mesh or post_c33_teleport or teleport_then or matches_saved" \
+    --collect-only -q
+```
+Expected output: 4 tests collected, none with "skipped" in the
+summary. If any are skipped, the NC build is silently incomplete
+— STOP and re-run Task 8 Step 3.
+
+- [ ] **Step 1b: Run full pytest suite**
 
 Run: `micromamba run -n shiny python -m pytest tests/ --tb=short`
-Expected: pre-implementation baseline + 17 passing. (Record the exact pre-implementation count from the pre-flight; verify post-count = pre + 17.)
+Expected: 928 (pre-implementation baseline at v1.7.7 commit `b18ecaf`)
++ 19 (C4 new tests) = **947 collected; 945-946 passing** (depending
+on how skip-counts vs xfail interact with the report). Spec mandates
+17 numbered tests but the plan adds 2 sanity tests (Task 6's
+`test_check_dormant_gradient_no_directed_agents_no_raise` and
+`test_check_dormant_gradient_no_env_in_landscape_no_raise`) → 19
+test functions.
 
 If `tests/test_movement_metric.py::test_full_step_time_within_one_percent_of_baseline` flakes, retry it in isolation:
 Run: `micromamba run -n shiny python -m pytest tests/test_movement_metric.py::test_full_step_time_within_one_percent_of_baseline -v`
