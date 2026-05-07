@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-07
 **Owner:** @razinkele
-**Status:** 📋 DRAFT v10 — pass-11 (test-coverage angle) found 7 gaps that prior 10 passes (spec internal consistency) didn't surface; v10 adds 8 new tests (Case B raise paths × 4, per-env latch isolation, teleport-then-step integration, Y-junction tie-break determinism, mesh-edge fallback) + tightens Test 3's behavioral assertion + pins Test 5b CI wiring.
+**Status:** ✅ CONVERGED v11 — **12-pass review-loop complete; deeper than the C3.3 8-pass cycle.** v10 added 9 new tests addressing pass-11's test-coverage gaps; pass-12 verified closure + flagged 3 LOW polish items (Test 5c centroid construction detail, Test 7b RNG seeding mechanism, header test-count off-by-one) — fixed inline as v11 final. Implementation-ready. Awaiting writing-plans.
 
 C4 fixes a **substrate-level correctness defect** that has been latent
 since the H3 multi-resolution mesh shipped (v1.5.0, 2026-03 cohort).
@@ -660,8 +660,19 @@ contract.
 
 **Test 5c: Y-junction tie-break determinism.** Construct a 4-cell
 mesh: cell 0 (source, OpenBaltic) connected to cells 1, 2, 3 at
-identical haversine distance (synthetic — set centroids equally
-spaced from cell 0). All four cells should compute
+identical haversine distance. **Centroid construction:** place
+cell 0 at `(lat=55.0, lon=21.0)`; place cells 1, 2, 3 at
+identical latitude offset and longitude offsets that give
+bit-identical haversine output — easiest construction is to set
+all three at the same lat (`55.0 + δ` for small δ) and use
+longitudes computed as `21.0 + n*Δ` for `n in {-1, 0, 1}` and
+`Δ` chosen so adjusted lon falls on a great-circle equidistant
+from cell 0. A simpler fixture-friendly alternative: monkeypatch
+the haversine function in the test to return a fixed scalar `d`
+for any centroid pair — sidesteps floating-point geometry while
+still exercising the heap tie-break. Use whichever is simpler in
+implementation; the test's purpose is determinism, not geometry.
+All four cells should compute
 `dist_from_sea = [0, d, d, d]` with `d` exact. The interesting
 case: cells 1, 2, 3 each have ONE neighbor at the same gradient
 (each other, via a back-edge through cell 0). Run
@@ -739,9 +750,17 @@ each delta branch (Atmata, Skirvyte, Gilija):
    entry cell. (E.g., natal=Atmata, agent at Skirvyte mouth — so
    they're poised to "stray" upon delta entry per C3.3.)
 2. Run `_event_update_exit_branch` with a seeded RNG configured
-   to force the stray dispatch to choose the natal branch. The
-   teleport fires; agent's `tri_idx` jumps to natal-branch's
-   `_branch_entry_cell`.
+   to force the stray dispatch to choose the natal branch.
+   **Seeding mechanism:** override `landscape["rng"] =
+   np.random.default_rng(<seed>)` with a seed that produces the
+   intended branch choice for the agent's natal_reach_id under
+   the C3.3 dispatch's `rng.choice(...)` call. Find a working
+   seed via the existing C3.3 test harness pattern in
+   `tests/test_hatchery_c3_3_homing.py::test_hatchery_strays_at_p_zero`
+   (which uses `np.random.default_rng(12345)` and forces
+   `homing_precision = 0.0` via `monkeypatch`); the same idiom
+   transfers here. The teleport fires; agent's `tri_idx` jumps
+   to natal-branch's `_branch_entry_cell`.
 3. Record `dist_from_sea[pre_teleport_cell]` and
    `dist_from_sea[post_teleport_cell]`.
 4. Run one `MovementEvent` step with the agent in UPSTREAM
