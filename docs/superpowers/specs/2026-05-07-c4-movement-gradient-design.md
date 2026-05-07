@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-07
 **Owner:** @razinkele
-**Status:** ✅ CONVERGED v5 — 5-pass review-loop complete (pass-1 implementation details + ascending inversion; pass-2 advance() trap + Nemunas pipeline; pass-3 cross-tier interactions; pass-4 implementation-readiness; pass-5 verification — no new issues, all findings closed). Implementation-ready. Awaiting writing-plans.
+**Status:** 📋 DRAFT v6 — pass-6 corrections (silent-failure-hunter angle: NaN-poisoning guards in Tests 6/7; sim-init validation expanded beyond presence check; latched first-directed-call raise; determinism requirements for `compute_dist_from_sea`; per-branch inversion assertion; mesh-edge telemetry flagged; misleading wording fixed; compound-interaction caveat).
 
 C4 fixes a **substrate-level correctness defect** that has been latent
 since the H3 multi-resolution mesh shipped (v1.5.0, 2026-03 cohort).
@@ -220,6 +220,33 @@ Cost: O(E log V) ≈ a few seconds for the production mesh
 matching the NC's 1.09M `edge` dimension). Runs once at landscape
 build time.
 
+### Determinism
+
+`compute_dist_from_sea(mesh)` MUST produce bit-exact identical
+output across runs given identical input. This is required so a
+committed NC and an in-process recomputation agree exactly,
+preventing silent drift in seeded reproducibility tests. Two
+sources of non-determinism to neutralise:
+
+1. **Source set iteration order.** The source set is built from
+   `np.where(mesh.reach_id == OpenBaltic_id & mesh.water_mask)[0]`.
+   `np.where` returns sorted indices in CPython, but never rely on
+   that — explicitly `np.sort(...)` the source array before pushing
+   to the heap.
+2. **Heap tie-breaking.** Python's `heapq` orders tuples
+   lexicographically; ties in distance are broken by the next
+   tuple element. Push entries as `(distance, cell_index)` so
+   ties break by cell index (deterministic) rather than by
+   insertion order or pointer-comparison fallback. Never push
+   an entry containing a non-comparable object (e.g., a dict)
+   that would force fallback to id()-based comparison.
+
+The `_step_directed_*` kernel itself does not use `dist_from_sea`
+in any reduction-order-sensitive way (it reads scalar values per
+neighbor independently), so the kernel side is already
+deterministic. Determinism discipline is fully contained in
+`compute_dist_from_sea`.
+
 ### Where it lives
 
 - `scripts/build_h3_multires_landscape.py` — add a
@@ -309,20 +336,92 @@ build time.
 
 **Sim-init** (in `H3Environment.from_netcdf`):
 
-1. If `dist_from_sea` variable is present, load it.
-2. If absent: emit `logging.getLogger("salmon_ibm.h3_env").warning(
+The build-time validations only run when the build script is
+re-executed; the production NC is committed pre-built and CI
+does not rebuild it. Sim-init MUST therefore mirror the
+correctness checks against the *loaded* `dist_from_sea` array,
+or a stale/corrupt NC ships silently to production.
+
+1. If `dist_from_sea` variable is absent: emit
+   `logging.getLogger("salmon_ibm.h3_env").warning(
    "%s: dist_from_sea missing from NC; movement gradient will be
    flat — agents will not migrate. Rebuild landscape with
-   build_h3_multires_landscape.py to populate it.",
-   ERR_DIST_FROM_SEA_MISSING)` (using the err-id constant defined
-   in `h3_env.py` alongside the load step).
-3. Zero-fill as fallback (preserves the legacy SSH=0 behavior; no
-   crash, just visible at sim init).
+   build_h3_multires_landscape.py.", ERR_DIST_FROM_SEA_MISSING)`.
+   Zero-fill `(N_cells,)` as fallback. Skip the remaining checks.
+2. If present, load and run **structural validation** (each
+   failure: warn with the named err-id, zero-fill, return — no
+   raise; sim continues with dormant gradient):
+   a. `arr.shape == (mesh.N_cells,)` — catches a stale NC built
+      against a different mesh. Err-id `dist-from-sea-shape-mismatch`.
+   b. `np.all(np.isfinite(arr[mesh.water_mask]))` — no NaN/Inf
+      on water cells. Err-id `dist-from-sea-nan-on-water`. (NaN
+      land cells are expected per the spec data structure and do
+      NOT trigger this.)
+   c. `arr.max() > 0` — catches all-zero from a build that ran
+      but failed mid-Dijkstra. Err-id `dist-from-sea-all-zero`.
+   d. `np.any(arr[mesh.reach_id == OpenBaltic_id] == 0)` —
+      sources exist (at least one OpenBaltic water cell at
+      distance 0). Err-id `dist-from-sea-no-sources`.
+3. Inject `env.fields["dist_from_sea"] = arr.astype(np.float32)`
+   and `mesh.dist_from_sea = arr.astype(np.float32)`.
 
-**Sim-time:** no new validation. The directed kernel already handles
-zero-gradient gracefully (degenerates to slot-0 neighbor selection,
-which is the legacy behavior; documented as the broken state if
-`dist_from_sea` is missing).
+All err-id constants live in `salmon_ibm/h3_env.py` as module-
+level strings, mirroring `ERR_HOMING_HATCHERY_NO_DISPATCH` in
+`delta_routing.py:43`:
+
+```python
+ERR_DIST_FROM_SEA_MISSING = "dist-from-sea-missing"
+ERR_DIST_FROM_SEA_SHAPE_MISMATCH = "dist-from-sea-shape-mismatch"
+ERR_DIST_FROM_SEA_NAN_ON_WATER = "dist-from-sea-nan-on-water"
+ERR_DIST_FROM_SEA_ALL_ZERO = "dist-from-sea-all-zero"
+ERR_DIST_FROM_SEA_NO_SOURCES = "dist-from-sea-no-sources"
+```
+
+Choosing "warn-and-zero-fill" over "raise" is deliberate: matches
+the missing-field fallback (graceful degradation; sim runs but
+agents oscillate) AND keeps the failure mode visible in production
+logs. A "raise" would block sim initialization, appropriate at
+build time but disruptive at sim time on a deployed app.
+
+**Sim-time:** at the **first** `_step_directed_*` call where
+`fields["dist_from_sea"]` is detected as all-zero AND any agent is
+in UPSTREAM or DOWNSTREAM behavior, raise once via a module-level
+latched flag in `salmon_ibm/movement.py`:
+
+```python
+_dormant_gradient_warned = False  # module-level
+
+# inside execute_movement, after building behavior buckets:
+if not _dormant_gradient_warned:
+    has_directed = (
+        buckets.get(int(Behavior.UPSTREAM)) is not None
+        or buckets.get(int(Behavior.DOWNSTREAM)) is not None
+    )
+    if has_directed and not np.any(fields["dist_from_sea"]):
+        raise RuntimeError(
+            "dist_from_sea is flat-zero AND agents are in "
+            "UPSTREAM/DOWNSTREAM behavior. Movement will not "
+            "progress (legacy SSH=0 dormant state). Rebuild the "
+            "landscape NC with build_h3_multires_landscape.py to "
+            "populate dist_from_sea."
+        )
+    _dormant_gradient_warned = True  # latch even on success
+```
+
+This is louder than the sim-init warning: a deployed app with
+suppressed logging would hit the raise and surface visibly to the
+operator, rather than oscillating silently. The latch ensures it
+fires at most once per process. Reasoning: the sim-init warning
+might be missed (filtered, log rotation, test caplog level too
+high); a runtime raise on the first directed-movement call is
+unmissable.
+
+The legacy SSH-based dormant state was silent because the kernel
+read SSH but never inspected its values. C4 inherits the same
+fields-dict pattern but ADDS the latched check, so any future
+deploy that drops `dist_from_sea` (e.g., schema regression) is
+caught at first directed-movement call rather than inferred from
+"agents don't migrate."
 
 ## Implementation files
 
@@ -380,37 +479,65 @@ with two disconnected components (one with sea, one without).
 `compute_dist_from_sea` raises `RuntimeError` naming the
 unreachable reach.
 
+**Test 5b: determinism.** Same synthetic mesh. Run
+`compute_dist_from_sea` twice and assert byte-exact equality:
+`np.array_equal(out1.tobytes(), out2.tobytes())`. With at least
+one tied-distance pair (two cells equidistant from a single
+source), this catches non-deterministic heap-ordering or
+source-set iteration regressions. Also run on the production NC's
+mesh (via the H3MultiResMesh constructor) and assert byte-exact
+equality between the saved NC's `dist_from_sea` and a fresh
+recompute — pinning down "committed NC matches what the build
+script would produce now".
+
 ### Integration (new)
 
 **Test 6: end-to-end production-mesh gradient sanity.** Load
 `data/curonian_h3_multires_landscape.nc` (rebuilt with the new
-step). Assert: (a) `mean(OpenBaltic) < mean(Nemunas)` — the
-sanity floor that the gradient points the right way overall;
-(b) `min(Nemunas) > mean(OpenBaltic)` — no Nemunas (river) cell
-is closer to sea than the typical OpenBaltic cell, catching gross
-inversions; (c) every delta-branch cell has `dist_from_sea >
-mean(BalticCoast)` — delta cells are inland of the coastal strip.
-The full chain order (OpenBaltic < BalticCoast < CuronianLagoon
-< delta < Nemunas) is NOT asserted because CuronianLagoon spans
-both the strait (close to sea) and the eastern shore (far from
-sea), so its per-reach mean is bimodal and doesn't fit a strict
-total order. Pure data assertion, runs fast.
+step). **First**, assert `np.all(np.isfinite(dist_from_sea[
+mesh.water_mask]))` — no NaN/Inf on water cells. A single NaN
+poisons `mean()` and produces confusing "nan < nan = False"
+failures downstream that look like topology bugs but are really
+NC-corruption bugs; the explicit isfinite check up-front gives a
+distinct error message. Then assert: (a) `mean(OpenBaltic) <
+mean(Nemunas)` — the sanity floor that the gradient points the
+right way overall; (b) `min(Nemunas) > mean(OpenBaltic)` — no
+Nemunas (river) cell is closer to sea than the typical OpenBaltic
+cell, catching gross inversions; (c) every delta-branch cell has
+`dist_from_sea > mean(BalticCoast)` — delta cells are inland of
+the coastal strip; (d) **per-delta-branch inversion check:** for
+each branch in {Atmata, Skirvyte, Gilija}, `min(dist_from_sea[
+reach == branch]) > mean(dist_from_sea[reach == OpenBaltic])`.
+Catches single-branch inversion (e.g., a polygon-overlay bug
+that gives Skirvyte cells 5m while Atmata cells get 5km) which
+the reach-aggregate assertions (a)-(c) would miss. The full
+chain order (OpenBaltic < BalticCoast < CuronianLagoon < delta <
+Nemunas) is NOT asserted because CuronianLagoon spans both the
+strait (close to sea) and the eastern shore (far from sea), so
+its per-reach mean is bimodal and doesn't fit a strict total
+order. Pure data assertion, runs fast.
 
 **Test 7: post-C3.3-teleport invariant.** Lives in
 `tests/test_movement_gradient.py` alongside the other unit tests.
 Load `data/curonian_h3_multires_landscape.nc` (production mesh,
 rebuilt with `dist_from_sea`). For each delta-branch reach
 (Atmata, Skirvyte, Gilija): compute the entry cell via
-`_branch_entry_cell(mesh, branch_rid)`; assert at least one of
+`_branch_entry_cell(mesh, branch_rid)`. **First** assert
+`np.isfinite(dist_from_sea[entry])` with a distinct error message
+("entry cell N for branch X has non-finite dist_from_sea — NC is
+corrupt") — without this guard, a NaN entry cell would produce
+"no neighbor has higher dist_from_sea" (since `nbr > nan` is
+False) and the failure would read as a topology-degeneracy bug
+when really it's an NC-build bug. Then assert at least one of
 the entry cell's water neighbors has strictly higher
 `dist_from_sea` than the entry cell itself. This guarantees that
 a returning adult teleported by C3.3's stray dispatch can
 progress inland on the next UPSTREAM step rather than oscillate
-at the branch mouth. If the assertion fails on the production
-mesh, the test surfaces a topology-config defect (e.g., an entry
-cell positioned at a confluence where lagoon-side and inland-side
-neighbors have similar gradient values). Pure data assertion;
-runs in milliseconds.
+at the branch mouth. If the topology assertion fails on the
+production mesh, the test surfaces a topology-config defect
+(e.g., an entry cell positioned at a confluence where lagoon-side
+and inland-side neighbors have similar gradient values). Pure
+data assertion; runs in milliseconds.
 
 ### Regression (existing)
 
@@ -443,6 +570,23 @@ non-zero but too weak to drive realistic timescales — a passing
 acceptance test under that pathology would still leave C3.3
 effectively dormant.
 
+**Known limitation: mesh-edge oscillation indistinguishable from
+arrival-and-hold.** An agent stuck oscillating in a high-
+`dist_from_sea` mesh-edge cell registers as "reached 50% of
+max(dist_from_sea)" identically to an agent that successfully
+migrated and is holding at its natal reach. The calibration
+assertion above does NOT distinguish these two states. Detecting
+the oscillation requires per-agent telemetry like
+`unique_cells_visited / total_steps` (oscillation: ratio ≪ 1;
+real migration: ratio ≈ 1). This telemetry is **deferred** to a
+future hardening tier: it requires adding a per-agent counter
+field to `AgentPool.ARRAY_FIELDS`, a per-step `unique_cells_seen`
+update, and a sim-end summary log. C4 ships without it; the live-
+test acceptance criterion is "at least one arrival" plus the
+calibration sanity, both of which a well-functioning gradient
+satisfies. Oscillation-detection telemetry is tracked in the
+follow-up notes (see "Related deferred items").
+
 ## Performance
 
 - **Build-time:** Dijkstra on 185k cells × ~6 average degree =
@@ -461,9 +605,19 @@ effectively dormant.
 
 - **NCs without `dist_from_sea`:** loaded with a
   `logging.warning` at the `salmon_ibm.h3_env` logger (err-id
-  `dist-from-sea-missing`), zero-filled. Movement degenerates to
-  legacy SSH=0 behavior (oscillation in place). The warning makes
-  the dormancy visible at sim init rather than silent.
+  `dist-from-sea-missing`), zero-filled. Movement produces a flat
+  gradient that the directed kernel handles identically to the
+  pre-C4 SSH=0 dormant state. **Note:** post-C4 the legacy `ssh`
+  field is no longer read by `_step_directed_*` (movement reads
+  `dist_from_sea` instead); the `ssh` field remains in the env
+  for non-movement consumers but is dead code from movement's
+  perspective. Any future contributor who re-introduces an `ssh`
+  reader will silently get a zero-filled array with no test
+  coverage — flag this in code review. The sim-init warning makes
+  the dormancy visible; the sim-time latched raise (see
+  Validation discipline → Sim-time) makes a deployed-with-
+  suppressed-logging dormancy unmissable on the first directed
+  movement call.
 - **Code paths that reference `ssh`:** unchanged. The `ssh` field
   remains in the env, zero-filled by `H3Environment.from_netcdf`
   as before. C4 only changes which field UPSTREAM/DOWNSTREAM
@@ -581,6 +735,22 @@ read `origin` directly — the gradient is origin-blind by design.
 But C4 unblocks the *observable* expression of the origin-aware
 behaviors layered on top.
 
+### Compound (3+ tier) interactions
+
+The Interactions enumeration above covers *pairwise* C4↔Cn
+interactions. Compound interactions involving three or more tiers
+are NOT enumerated — the combinatorial space is too large for
+exhaustive analysis (e.g., C2 +25% activity × C3.2 3SW body size
+× C4 directed gradient × thermal-stress timing windows × seasonal
+discharge → arrival distribution shift). The integrative check is
+the post-deploy live-test arrival distribution. **If hatchery-
+vs-wild arrival KDEs diverge unexpectedly post-deploy** (e.g.,
+hatchery 2σ earlier than the pairwise C2-only model would
+predict), audit the compound stack — typically by toggling
+individual tiers off in scenario configs and re-running. C4
+itself does not introduce compound-interaction safeguards beyond
+the integrative check.
+
 ## Open questions
 
 All open questions from earlier drafts are RESOLVED in v3.
@@ -656,3 +826,13 @@ Playwright observation. Adjacent items that may compose with C4:
   production mesh produces non-physical values. C4 sidesteps this
   by computing `dist_from_sea` from topology, but the underlying
   bathymetry issue should be flagged as its own follow-up.
+- **Movement oscillation telemetry** (NOT in the deferred list,
+  surfaced by C4's pass-6 silent-failure-hunter review) — adds a
+  per-agent counter (`unique_cells_visited`, `total_steps`) so the
+  ratio distinguishes "successfully migrated and holding" from
+  "stuck oscillating at mesh edge or barrier-blocked cell". C4
+  ships without it; the calibration sanity assertion in the live
+  test cannot tell the two states apart. Adding the telemetry
+  requires `AgentPool.ARRAY_FIELDS` extensions and a sim-end log
+  step. Future hardening tier; low scope but touches the SoA
+  agent state.
