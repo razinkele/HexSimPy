@@ -2,6 +2,8 @@
 
 **Plan version:** ✅ v3 final — **3-pass plan-review-loop CONVERGED**. Pass-1 (3 parallel reviewers: code-reviewer, pr-test-analyzer, silent-failure-hunter) found 21 issues including a CRITICAL signature mismatch (`execute_movement(pool, mesh, fields, ...)` not `landscape`). Pass-2 caught two new issues v2 introduced (Test 7b signature, Step 1a `--collect-only` skipif blindness). Pass-3 verified all closures + flagged one optional NIT (`tail -20` for warning-line resilience) — applied. **Plan ready for execution.** Total findings across 3 plan-review passes: 24.
 
+**Status:** ✅ EXECUTED on 2026-05-07. Final test count: 911 passing (+ 33 skipped, 1 xfailed). 11 nemunas-NC fixture errors are out-of-scope per spec § Out-of-scope ("Nemunas NC support… Future tier") — the C4 dormancy guard correctly raises on that unrebuilt fixture.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the flat-zero `ssh` field that powers UPSTREAM/DOWNSTREAM movement with a `dist_from_sea` scalar (multi-source edge-length-weighted Dijkstra at landscape build), so directed-movement actually produces displacement and the four-tier hatchery-vs-wild architecture (C1-C3.3) becomes biologically active in production.

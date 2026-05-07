@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-07
 **Owner:** @razinkele
-**Status:** ✅ CONVERGED v11 — **12-pass review-loop complete; deeper than the C3.3 8-pass cycle.** v10 added 9 new tests addressing pass-11's test-coverage gaps; pass-12 verified closure + flagged 3 LOW polish items (Test 5c centroid construction detail, Test 7b RNG seeding mechanism, header test-count off-by-one) — fixed inline as v11 final. Implementation-ready. Awaiting writing-plans.
+**Status:** ✅ EXECUTED on 2026-05-07 via subagent-driven-development; full pytest 911 passed / 33 skipped / 1 xfailed at the recorded baseline+19. Branch `c4-movement-gradient` ready for PR + v1.7.8 tag. (10 errors + 1 fail in `test_nemunas_h3_integration.py` and `test_movement_metric.py::test_full_step_time_within_one_percent_of_baseline` are the dormancy guard correctly raising on the unrebuilt Nemunas NC — explicitly deferred "Future tier" per spec § Out-of-scope.)
 
 C4 fixes a **substrate-level correctness defect** that has been latent
 since the H3 multi-resolution mesh shipped (v1.5.0, 2026-03 cohort).
