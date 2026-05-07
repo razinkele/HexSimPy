@@ -1,0 +1,411 @@
+# C4 — Movement Gradient (substrate fix)
+
+**Date:** 2026-05-07
+**Owner:** @razinkele
+**Status:** 📋 DRAFT v1 — awaiting review-loop passes.
+
+C4 fixes a **substrate-level correctness defect** that has been latent
+since the H3 multi-resolution mesh shipped (v1.5.0, 2026-03 cohort).
+Returning adults' UPSTREAM movement degenerates to an
+approximately-zero-net-displacement oscillation because the directed-
+movement kernel reads a flat (all-zero) `ssh` field. The four-tier
+hatchery-vs-wild architecture (C1+C2+C3.1+C3.2+C3.3, all shipped
+through v1.7.7) is structurally correct but **biologically dormant in
+production** — agents do not reach delta branches, so C3.3's homing-
+precision dispatch never fires for any agent in a real run.
+
+C4 sits *underneath* the hatchery tiers as a substrate concern. The
+numbering "C4" preserves the C-tier naming convention from the
+hatchery-vs-wild work, but architecturally C4 is closer to a movement-
+layer prerequisite than a behavioral-divergence tier.
+
+## Why now
+
+A code review of the post-C3.3 movement layer + a Playwright live-test
+on the deployed app (https://laguna.ku.lt/HexSimPy/, v1.7.7) on
+2026-05-06 surfaced that:
+
+- Default 50-agent / 480-hour run produced **0/50 arrivals**.
+- The 3 surviving agents wandered in lon×lat boxes of only ~80m × 70m
+  over 480 hours — observed displacement ~2 m/hour.
+- Atlantic salmon adults swim 0.5-1 body-lengths/sec ≈ 1.5-3 m/s.
+  Observed speed is **~1000× too slow**.
+- The BEHAVIOR chart showed agents in active UPSTREAM mode — they
+  were trying to move, not in HOLD or barrier-blocked states.
+
+A subsequent code-explorer agent traced the rate-limiting factor to
+`salmon_ibm/h3_env.py:113-125`, where `H3Environment.from_netcdf()`
+explicitly zero-fills the `ssh` field with the comment *"gradient-
+following degenerates to first-neighbour selection."* CMEMS Baltic
+reanalysis does not include sea-surface height; the build pipeline
+ships a flat-zero array. With all field values = 0.0, the directed-
+movement kernel `_step_directed_numba` (`movement.py:208-228`) falls
+back to `water_nbrs[c, 0]` (slot-0 neighbor, deterministic) on even
+micro-steps and a random neighbor on odd. Slot-0 directions vary
+arbitrarily across cells, so net displacement of "directed" hops
+approximately cancels. The agent oscillates in a small neighborhood
+instead of progressing upstream.
+
+## Why bathymetry-elev was rejected
+
+A natural first instinct is to use bathymetric elevation
+(`elev = -depth`) as an upstream-distance proxy: deeper sea cells
+should be "downstream", shallower delta cells "upstream". An empirical
+diagnostic on the production Curonian H3 mesh (commit `b18ecaf`,
+2026-05-06) rejected this:
+
+| Reach            | Cells   | Mean depth | Expected real-world |
+|------------------|---------|------------|---------------------|
+| Nemunas (river)  | 10,061  | 4.77 m     | 1-3 m               |
+| CuronianLagoon   | 121,666 | **46.63 m** | **3.8 m mean**     |
+| OpenBaltic       | 31,493  | **12.81 m** | **50-200 m**       |
+| Atmata           | 1,252   | 1.47 m     | ~1 m                |
+| Skirvyte         | 1,580   | 1.59 m     | ~1 m                |
+| Gilija           | 4,546   | 2.70 m     | ~2 m                |
+
+The lagoon reports ~12× deeper than reality, and OpenBaltic — which
+should be ~10× deeper than the lagoon — reports *shallower*. Greedy
+ascent from an OpenBaltic cell on `elev = -depth` hit a local maximum
+at step 1 (a sandbar artifact at depth 0.43 m, surrounded by
+descending neighbors). The bathymetry data on the deployed mesh is
+not a usable upstream gradient.
+
+The data is degenerate either because EMODnet sampling failed and
+filled with defaults, or because the build script's polygon-overlay
+logic mis-attributes depth. Investigating the bathymetry build is out
+of scope for C4 — even with corrected EMODnet sampling, river depth
+isn't EMODnet's domain (rivers aren't coastal); the river-side of the
+gradient would still need a separate signal.
+
+## Scope
+
+### In
+
+- New scalar field `dist_from_sea`: per-cell distance (in meters)
+  from the nearest open-Baltic boundary cell, computed by
+  multi-source edge-length-weighted Dijkstra on the mesh's
+  neighbor graph.
+- `dist_from_sea` saved as a `float32` variable in the landscape NC
+  by the build script; loaded by `H3Environment.from_netcdf` if
+  present.
+- `_step_directed_numba` and `_step_directed_vec` UPSTREAM/DOWNSTREAM
+  paths read `fields["dist_from_sea"]` instead of `fields["ssh"]`.
+  UPSTREAM uses `ascending=True` (further from sea is the goal);
+  DOWNSTREAM uses `ascending=False` (closer to sea).
+- Backward-compat: NCs without `dist_from_sea` produce a clear
+  `RuntimeWarning` at sim init; the field defaults to all-zeros so
+  legacy behavior is preserved (broken, but unchanged).
+- Build-time validation: every water cell must have a finite
+  `dist_from_sea`. Disconnected sub-graphs cause Dijkstra to leave
+  `inf`; the build script asserts on this and reports the
+  unreachable cells with their reach names.
+- Build-time sanity output: per-reach `dist_from_sea` distribution
+  printed (min / max / mean) so anomalies surface during the build.
+- Unit test in `tests/test_movement_gradient.py` (NEW): synthetic
+  10-cell linear chain mesh with a known gradient; assert a
+  directed-UPSTREAM agent climbs 5 cells in ≤ 5 timesteps.
+- Integration test asserting `_step_directed_*` reads the new field
+  name (mock landscape with `dist_from_sea` populated, agent moves
+  toward higher values).
+- Existing 893-test suite continues to pass with no regressions.
+- Live-test contract: post-deploy Playwright run on laguna confirms
+  ≥ 1 agent reaches a delta branch within 480 hours at default
+  settings (50 agents, seed=42). This is the test that should have
+  existed all along; C4 lands it.
+
+### Out (deferred)
+
+- **Per-tributary granularity** (Žeimena/Merkys/Dubysa). The
+  deployed mesh's reach taxonomy ends at delta-branch level
+  (Atmata/Skirvyte/Gilija/Nemunas/etc.); per-tributary homing
+  requires a mesh upgrade with finer reach polygons. Future tier.
+- **Per-natal-reach gradient.** C3.3's branch-level dispatch
+  handles natal-vs-stray decisions at delta entry. A single global
+  gradient is sufficient given the current data model. Per-natal-
+  reach fields would be O(N_branches × N_cells) memory for marginal
+  biological gain.
+- **Per-agent goal-cell pathfinding.** Most flexible (each agent
+  has its own gradient toward its specific natal cell), but
+  requires a kernel-signature change and per-agent state. Out of
+  scope for the substrate fix.
+- **Real hydrodynamic SSH** from a Baltic Sea model (e.g., NEMO
+  output). Replaces the synthetic gradient with measured sea-surface
+  height; requires data-pipeline changes. If/when it lands later,
+  it can drop in via the same field name without movement-layer
+  changes.
+- **Bathymetry data correction.** The diagnostic showed broken
+  depth values on the production mesh; fixing the EMODnet build
+  pipeline is its own concern, not bundled with C4. C4 sidesteps
+  the broken bathymetry by computing `dist_from_sea` purely from
+  graph topology, not from depth.
+- **TO_CWR behavior.** Already uses `temperature` field, not
+  affected by the SSH=0 issue. Unchanged.
+- **Movement-kernel refactor** (e.g., A*-style pathfinding,
+  multi-objective behavior dispatch). The existing
+  `_step_directed_numba` / `_vec` architecture is sound; C4 is a
+  data-source change, not an algorithmic one.
+
+## Architecture
+
+### Data structure
+
+A single new variable in the H3-multires landscape NC:
+
+```
+dist_from_sea: float32, shape=(N_cells,), units=meters
+```
+
+Semantics: distance (in meters) from each cell's centroid to the
+nearest cell where `reach_id == OpenBaltic AND water_mask == True`,
+along the mesh's neighbor graph, using great-circle edge weights.
+Cells that are themselves OpenBaltic water cells get distance 0.
+Land cells (water_mask=False) get distance NaN; they are not
+reachable in the graph and never used by movement.
+
+### Computation algorithm
+
+Multi-source Dijkstra on the mesh's neighbor graph:
+
+1. **Source set:** `S = {c : reach_id[c] == OpenBaltic AND water_mask[c]}`.
+2. **Edge weights:** for each ordered neighbor pair `(c, n)`,
+   `w(c, n) = haversine(centroid[c], centroid[n])` in meters.
+   Distance is symmetric on the H3 graph, so we compute one
+   direction and reuse.
+3. **Dijkstra:** initialize `dist[S] = 0`, push all sources to a
+   min-heap, expand greedy. Only traverse edges where both
+   endpoints have `water_mask=True`.
+4. **Output:** `dist_from_sea = float32(dist)`. Land cells remain
+   NaN.
+
+Cost: O(E log V) ≈ a few seconds for the production mesh
+(N_cells ≈ 185k, average degree ≈ 6, so E ≈ 1.1M edges per direction,
+matching the NC's 1.09M `edge` dimension). Runs once at landscape
+build time.
+
+### Where it lives
+
+- `scripts/build_h3_multires_landscape.py` — add a
+  `compute_dist_from_sea(mesh)` step after the neighbor table is
+  built. Save as `float32` variable in the NC. Print per-reach
+  distribution to stdout for sanity-check during build.
+- `salmon_ibm/h3_env.py` — `H3Environment.from_netcdf` loads
+  `dist_from_sea` if present; emits a clear `RuntimeWarning` if
+  missing (backward-compat with older NCs); zero-fills as fallback
+  to preserve existing dormant-but-non-crashing behavior.
+- `salmon_ibm/movement.py` — `_step_directed_numba` and
+  `_step_directed_vec` UPSTREAM/DOWNSTREAM paths read
+  `fields["dist_from_sea"]` instead of `fields["ssh"]`. Two
+  identifier changes plus the accompanying field-key registration
+  in the kernel call sites at `movement.py:96-114` (the dispatch
+  block). The `ssh` field stays in the env (other code may still
+  reference it); not worth the cleanup churn in C4's scope.
+
+### Validation discipline
+
+**Build-time** (in `build_h3_multires_landscape.py`):
+
+1. Assert `len(S) > 0` (mesh has at least one OpenBaltic water cell).
+2. Run Dijkstra.
+3. Assert every water cell has a finite `dist_from_sea`. If not:
+   collect unreachable cells, group by reach, raise a
+   `RuntimeError` listing reach name + cell count. This catches
+   disconnected sub-graphs (e.g., a river cluster with no neighbor
+   path to the sea) at build time rather than at sim time.
+4. Print per-reach distribution: `f"{reach}: min={...:.0f}m
+   max={...:.0f}m mean={...:.0f}m"`. The expected pattern is
+   `OpenBaltic ≪ BalticCoast ≪ CuronianLagoon ≪ delta branches ≪
+   Nemunas`. A reach that doesn't fit the order signals a
+   topology problem.
+
+**Sim-init** (in `H3Environment.from_netcdf`):
+
+1. If `dist_from_sea` variable is present, load it.
+2. If absent: emit `RuntimeWarning("dist_from_sea missing from NC;
+   movement gradient will be flat — agents will not migrate. Rebuild
+   landscape with build_h3_multires_landscape.py to populate it.")`.
+3. Zero-fill as fallback (preserves the legacy SSH=0 behavior; no
+   crash, just visible at sim init).
+
+**Sim-time:** no new validation. The directed kernel already handles
+zero-gradient gracefully (degenerates to slot-0 neighbor selection,
+which is the legacy behavior; documented as the broken state if
+`dist_from_sea` is missing).
+
+## Implementation files
+
+| File                                               | Change type | Notes                                                        |
+|----------------------------------------------------|-------------|--------------------------------------------------------------|
+| `scripts/build_h3_multires_landscape.py`           | Modify      | Add `compute_dist_from_sea` step + sanity-output             |
+| `salmon_ibm/h3_env.py`                             | Modify      | Load `dist_from_sea`; warn + zero-fill if missing            |
+| `salmon_ibm/movement.py`                           | Modify      | UPSTREAM/DOWNSTREAM read `dist_from_sea` (2 identifier sites)|
+| `tests/test_movement_gradient.py` (NEW)            | Create      | Synthetic 10-cell chain + gradient-following assertion       |
+| `tests/test_h3_env.py`                             | Modify      | Add load + missing-field warning test                        |
+| `tests/test_movement.py` or equivalent             | Modify      | Replace `ssh` references in test fixtures with `dist_from_sea`|
+| `data/curonian_h3_multires_landscape.nc`           | Rebuild     | Run the build script with the new step (separate from PR)    |
+| `data/nemunas_h3_landscape.nc`                     | Rebuild     | Same                                                         |
+
+## Tests
+
+### Unit (new)
+
+**Test 1: linear-chain gradient.** Construct a synthetic 10-cell
+chain mesh with `dist_from_sea = [0, 100, 200, ..., 900]`. Place a
+single agent at cell 0 in UPSTREAM behavior. Run 1 timestep with
+`n_micro_steps_per_cell = 1`. Assert the agent ends at cell 1
+(climbed one step). Run 5 timesteps. Assert the agent reaches cell
+≥ 5 (climbed at least half the chain).
+
+**Test 2: gradient symmetry for DOWNSTREAM.** Same chain, agent at
+cell 9, DOWNSTREAM behavior. Assert the agent ends at cell ≤ 4
+after 5 timesteps.
+
+**Test 3: zero-gradient fallback.** Mesh with `dist_from_sea =
+zeros(N)`. UPSTREAM agent. Assert it does NOT raise; movement
+degenerates to slot-0 selection (legacy broken-but-not-crashing
+behavior). Document the expected dormancy.
+
+**Test 4: missing field warning.** `H3Environment.from_netcdf` on
+an NC without `dist_from_sea`. Assert exactly one
+`RuntimeWarning("dist_from_sea missing")`. Assert
+`fields["dist_from_sea"]` exists and is all-zeros.
+
+**Test 5: build-time disconnected-graph check.** Synthetic mesh
+with two disconnected components (one with sea, one without).
+`compute_dist_from_sea` raises `RuntimeError` naming the
+unreachable reach.
+
+### Integration (new)
+
+**Test 6: end-to-end production-mesh gradient sanity.** Load
+`data/curonian_h3_multires_landscape.nc` (rebuilt with the new
+step). Assert the per-reach mean `dist_from_sea` is monotone in
+the expected order (OpenBaltic < BalticCoast < CuronianLagoon <
+{Atmata, Skirvyte, Gilija} < Nemunas). Pure data assertion, runs
+fast.
+
+### Regression (existing)
+
+The full 893-test suite must continue to pass. The two tests most
+likely to drift:
+
+- `tests/test_movement.py::*` — any test fixture mocking the
+  landscape `fields` dict needs `dist_from_sea` added (or to
+  remain on the SSH-based legacy path explicitly).
+- `tests/test_h3_env.py::*` — load tests need to either skip the
+  new variable or include it in the test NC.
+
+### Live test (post-deploy)
+
+After deploy, a Playwright run on https://laguna.ku.lt/HexSimPy/
+asserts ≥ 1 agent reaches a delta branch (Atmata/Skirvyte/Gilija)
+within 480 hours at default settings (50 agents, seed=42). Captured
+via `__deckgl_instances.map.lastLayers` inspection of the trips
+layer or by polling the agent state. This becomes the C4
+acceptance test and the ongoing smoke-test for the migration
+pipeline.
+
+## Performance
+
+- **Build-time:** Dijkstra on 185k cells × ~6 average degree =
+  ~1.1M edges. With a binary heap, expected ~3-5 seconds. Runs
+  once per landscape rebuild; landscapes are rebuilt rarely
+  (per-NC build is already minutes-scale). Negligible.
+- **Sim-init:** Loading one float32[N] variable from NetCDF.
+  ~750 KB for the production mesh. Negligible.
+- **Sim-step:** identical to the current SSH read path. No new
+  per-step cost. The kernel reads a different field; the field
+  has the same shape and dtype.
+- **Memory:** float32[185k] = 750 KB additional in `fields` dict.
+  Negligible.
+
+## Backward compatibility
+
+- **NCs without `dist_from_sea`:** loaded with a `RuntimeWarning`,
+  zero-filled. Movement degenerates to legacy SSH=0 behavior
+  (oscillation in place). The warning makes the dormancy visible
+  at sim init rather than silent.
+- **Code paths that reference `ssh`:** unchanged. The `ssh` field
+  remains in the env, zero-filled by `H3Environment.from_netcdf`
+  as before. C4 only changes which field UPSTREAM/DOWNSTREAM
+  *reads*; it does not remove `ssh` from the env.
+- **Test fixtures that build a synthetic landscape:** if they
+  populate `fields["ssh"]` and then run UPSTREAM/DOWNSTREAM
+  movement, they need to populate `fields["dist_from_sea"]`
+  instead (or in addition). Single search-and-replace pass during
+  implementation.
+- **External reproducibility:** seeded runs on the same NC produce
+  the same trajectories before and after C4 *only if the NC has
+  `dist_from_sea` already*. Replicating a pre-C4 published run
+  requires either (a) using the legacy NC without
+  `dist_from_sea` (and accepting the dormant movement), or
+  (b) re-running the analysis with the C4-rebuilt NC.
+
+## Open questions for review
+
+1. **Reach OpenBaltic boundary:** is the source set "all cells
+   where `reach_id == OpenBaltic AND water_mask`" the right
+   definition? Alternative: cells on the *outer boundary* of the
+   OpenBaltic polygon (closest to the open Atlantic). The current
+   choice gives a "distance to nearest open sea" which is locally
+   correct but might be biased toward whichever direction OpenBaltic
+   extends most.
+2. **Nemunas headwaters:** the gradient is monotone-increasing as
+   you go inland. The deployed mesh's Nemunas reach extends to the
+   eastern edge of the bbox at `21.90E`. Cells beyond the bbox are
+   not in the mesh; an upstream-swimming agent will accumulate
+   `dist_from_sea` until it hits the mesh edge, then have no
+   higher-gradient neighbor. What's the desired behavior at the
+   mesh edge? Spec proposes: continue with random walk (no higher
+   neighbor → directed kernel falls through to RANDOM-equivalent
+   semantics). This is biologically defensible (real salmon would
+   reach their natal tributary somewhere along the way and stop)
+   but should be explicit.
+3. **Backward-compat warning severity:** is `RuntimeWarning` the
+   right severity? Alternative: `UserWarning` (more visible by
+   default), or `logging.warning` (matches C3.3's convention). The
+   spec proposes `RuntimeWarning` but this is a low-confidence
+   choice; propose to align with the project's most common pattern
+   during review.
+4. **Test 6's monotonicity ordering:** is the assumed reach order
+   (OpenBaltic < BalticCoast < CuronianLagoon < delta < Nemunas)
+   correct? The CuronianLagoon has both the strait (close to sea)
+   and the eastern shore (far from sea); per-reach mean might mask
+   bimodal distribution. The test should probably assert
+   "OpenBaltic mean < Nemunas mean" only — the strict total order
+   may not hold geographically. Tighten this during review.
+
+## References
+
+- C1+C2+C3.1+C3.2+C3.3 specs and plans in
+  `docs/superpowers/specs/` and `docs/superpowers/plans/`,
+  particularly `2026-05-03-hatchery-c3.3-homing-design.md` for
+  the layer C4 unblocks.
+- `docs/scientific-foundations-hatchery-wild.md` §7 — describes
+  C3.3's expected wild-vs-hatchery branch distribution divergence
+  (Vasemägi 2005, doi:10.1038/sj.hdy.6800693). C4 is the
+  prerequisite for this divergence to be observable in production.
+- Movement plan from the v1.5 cohort:
+  `docs/superpowers/plans/2026-03-19-movement-animation.md`.
+- Diagnostic outputs from 2026-05-06: bathymetry-elev rejection
+  (this spec, "Why bathymetry-elev was rejected" section);
+  WebSocket payload sizes from Playwright (informational, not
+  load-bearing for C4).
+
+## Related deferred items
+
+C4 is one of the 9 Curonian-realism items deferred in
+`docs/superpowers/plans/2026-04-24-curonian-realism-upgrades.md`,
+though it surfaced not from that plan but from post-C3.3
+Playwright observation. Adjacent items that may compose with C4:
+
+- **Real Nemunas EPA discharge** (deferred item #5) — would feed
+  current advection magnitudes; combines with C4's directed
+  gradient to give the full force balance on a swimming agent.
+- **Reach-level habitat attributes** (deferred item #1) — per-cell
+  shelter / drift_conc; orthogonal to C4 but part of the same
+  movement-realism cluster.
+- **Bathymetry data correction** (NOT in the deferred list,
+  surfaced by C4's diagnostic) — the EMODnet sampling on the
+  production mesh produces non-physical values. C4 sidesteps this
+  by computing `dist_from_sea` from topology, but the underlying
+  bathymetry issue should be flagged as its own follow-up.
