@@ -646,3 +646,177 @@ def test_post_c33_teleport_invariant():
             "inland. Topology defect at the production mesh's branch "
             "entry."
         )
+
+
+@pytest.mark.skipif(
+    not PRODUCTION_NC.exists(),
+    reason="production NC missing",
+)
+def test_teleport_then_upstream_advances_inland():
+    """C4 Test 7b: composes _event_update_exit_branch (C3.3 stray
+    teleport) + MovementEvent (UPSTREAM step). Asserts post-teleport
+    UPSTREAM advances inland, not back to the lagoon."""
+    import xarray as xr
+    from salmon_ibm.delta_routing import (
+        _branch_entry_cell,
+        update_exit_branch_id,
+    )
+    from salmon_ibm.movement import execute_movement
+    from salmon_ibm.agents import AgentPool, Behavior
+    from salmon_ibm.origin import ORIGIN_HATCHERY
+    from salmon_ibm.baltic_params import (
+        load_baltic_species_config,
+        HatcheryDispatch,
+    )
+
+    ds = xr.open_dataset(str(PRODUCTION_NC), engine="h5netcdf")
+    dist = ds["dist_from_sea"].values
+    water_mask = ds["water_mask"].values
+    reach_id = ds["reach_id"].values
+    reach_names = ds.attrs.get("reach_names", "").split(",")
+    nbr_starts = ds["nbr_starts"].values
+    nbr_idx = ds["nbr_idx"].values
+    ds.close()
+
+    # Reload cfg per-call to avoid state leak across iterations and
+    # across tests that share the same cached YAML. Pass-1 silent-
+    # failure finding: mutating cfg.hatchery.homing_precision in a
+    # test would leak to subsequent tests if cfg is module-cached.
+    cfg = load_baltic_species_config("configs/baltic_salmon_species.yaml")
+    saved_homing = cfg.hatchery.homing_precision
+    hd = HatcheryDispatch(
+        params=cfg.hatchery,
+        activity_lut=np.ones(5, dtype=np.float64),
+    )
+
+    class _MeshShim:
+        pass
+    mesh = _MeshShim()
+    mesh.reach_id = reach_id
+    mesh.reach_names = reach_names
+    mesh.water_mask = water_mask
+    mesh._water_nbrs = np.full(
+        (len(reach_id), int(np.diff(nbr_starts).max())), -1, dtype=np.int32,
+    )
+    mesh._water_nbr_count = np.zeros(len(reach_id), dtype=np.int32)
+    for i in range(len(reach_id)):
+        s, e = int(nbr_starts[i]), int(nbr_starts[i + 1])
+        slot = 0
+        for k in range(s, e):
+            n = int(nbr_idx[k])
+            if n >= 0 and water_mask[n]:
+                mesh._water_nbrs[i, slot] = n
+                slot += 1
+        mesh._water_nbr_count[i] = slot
+    mesh.reach_id = reach_id
+
+    # For each branch: place a hatchery agent on a different branch,
+    # configure C3.3 to home them (homing_precision=1.0 forces the
+    # natal branch). Then step UPSTREAM and assert progress.
+    for natal_branch in ("Atmata", "Skirvyte", "Gilija"):
+        natal_rid = reach_names.index(natal_branch)
+        # Place agent on a different branch's lagoon side. Pick the
+        # first branch that's not natal.
+        other_branches = [b for b in ("Atmata", "Skirvyte", "Gilija")
+                          if b != natal_branch]
+        other_rid = reach_names.index(other_branches[0])
+        other_cells = np.where((reach_id == other_rid) & water_mask)[0]
+        start_cell = int(other_cells[0])
+
+        pool = AgentPool(n=1, start_tri=start_cell, rng_seed=12345)
+        pool.behavior[0] = int(Behavior.UPSTREAM)
+        pool.natal_reach_id[0] = natal_rid
+        pool.origin[0] = ORIGIN_HATCHERY
+        pool.exit_branch_id[0] = -1
+
+        # Force homing to natal: monkeypatch homing_precision to 1.0.
+        cfg.hatchery.homing_precision = 1.0
+
+        landscape = {
+            "rng": np.random.default_rng(12345),
+            "species_config": cfg,
+            "hatchery_dispatch": hd,
+            "fields": {"dist_from_sea": dist},
+            "n_micro_steps_per_cell": np.full(len(reach_id), 5, dtype=np.int32),
+        }
+
+        # Phase 1: trigger C3.3 teleport.
+        update_exit_branch_id(pool, mesh, landscape=landscape)
+        post_teleport_cell = int(pool.tri_idx[0])
+        post_teleport_dist = float(dist[post_teleport_cell])
+        assert reach_id[post_teleport_cell] == natal_rid, (
+            f"{natal_branch}: agent did not teleport to natal branch; "
+            f"landed on rid={reach_id[post_teleport_cell]}"
+        )
+
+        # Phase 2: one UPSTREAM step. Call execute_movement with the
+        # CORRECT signature: (pool, mesh, fields, seed=..., n_micro_...).
+        # The dormancy check fires at MovementEvent.execute layer in
+        # production; this test bypasses that layer (we're testing
+        # the kernel field-swap + post-teleport progress, not the
+        # dormancy guard).
+        execute_movement(
+            pool, mesh, landscape["fields"],
+            seed=12345,
+            n_micro_steps_per_cell=landscape["n_micro_steps_per_cell"],
+        )
+        final_cell = int(pool.tri_idx[0])
+        final_dist = float(dist[final_cell])
+
+        assert final_dist > post_teleport_dist, (
+            f"{natal_branch}: UPSTREAM step did not advance inland. "
+            f"post-teleport={post_teleport_dist:.1f}m, "
+            f"final={final_dist:.1f}m"
+        )
+
+    # Restore cfg (defensive — even though we reload per-test, restore
+    # in case the module-level cache wraps this object).
+    cfg.hatchery.homing_precision = saved_homing
+
+
+@pytest.mark.skipif(
+    not PRODUCTION_NC.exists(),
+    reason="production NC missing",
+)
+def test_compute_dist_from_sea_matches_saved_nc():
+    """C4 Test 5b (production part): the saved NC's dist_from_sea
+    must equal a fresh recompute via compute_dist_from_sea(mesh).
+    Pins down 'committed NC == current build script'."""
+    from build_h3_multires_landscape import compute_dist_from_sea
+    import xarray as xr
+
+    ds = xr.open_dataset(str(PRODUCTION_NC), engine="h5netcdf")
+    # Cast to float32 to match compute_dist_from_sea's return dtype.
+    # xarray may upcast NC float32 to float64 on read depending on
+    # engine — explicit cast normalizes for byte-equal comparison.
+    saved = ds["dist_from_sea"].values.astype(np.float32)
+
+    # Build a mesh-shim from NC arrays. compute_dist_from_sea reads
+    # N_cells, reach_names, reach_id, water_mask, nbr_starts, nbr_idx,
+    # centroids — the same attribute set the build script's _MeshShim
+    # exposes (build_h3_multires_landscape.py:499-514). H3MultiResMesh
+    # uses lowercase `n_cells`, so we mirror the build-script shim
+    # rather than constructing H3MultiResMesh directly.
+    names_attr = ds.attrs.get("reach_names", "")
+    reach_names = names_attr.split(",")
+
+    class _MeshShim:
+        pass
+    mesh = _MeshShim()
+    mesh.N_cells = len(ds["h3_id"])
+    mesh.reach_names = reach_names
+    mesh.reach_id = ds["reach_id"].values.astype(np.int8)
+    mesh.water_mask = ds["water_mask"].values.astype(bool)
+    mesh.nbr_starts = ds["nbr_starts"].values.astype(np.int32)
+    mesh.nbr_idx = ds["nbr_idx"].values.astype(np.int32)
+    mesh.centroids = np.column_stack(
+        [ds["lat"].values, ds["lon"].values]
+    )
+    ds.close()
+
+    recomputed = compute_dist_from_sea(mesh)
+    assert np.array_equal(saved, recomputed, equal_nan=True), (
+        "saved NC's dist_from_sea differs from fresh recompute. "
+        "Either the build script changed without rebuilding the NC, "
+        "or compute_dist_from_sea is non-deterministic."
+    )
