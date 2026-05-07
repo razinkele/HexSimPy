@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-07
 **Owner:** @razinkele
-**Status:** 📋 DRAFT v6 — pass-6 corrections (silent-failure-hunter angle: NaN-poisoning guards in Tests 6/7; sim-init validation expanded beyond presence check; latched first-directed-call raise; determinism requirements for `compute_dist_from_sea`; per-branch inversion assertion; mesh-edge telemetry flagged; misleading wording fixed; compound-interaction caveat).
+**Status:** 📋 DRAFT v7 — pass-7 corrections (sim-init warn↔sim-time raise contradiction reconciled — structural failures now RAISE at sim init; latched flag moved from module-global to per-env-instance to avoid cross-test leak; OpenBaltic_id resolution path pinned; np.where ordering wording tightened; Test 5b switched to equal_nan=True; Test 6 NC-rebuilt precondition added).
 
 C4 fixes a **substrate-level correctness defect** that has been latent
 since the H3 multi-resolution mesh shipped (v1.5.0, 2026-03 cohort).
@@ -229,10 +229,12 @@ preventing silent drift in seeded reproducibility tests. Two
 sources of non-determinism to neutralise:
 
 1. **Source set iteration order.** The source set is built from
-   `np.where(mesh.reach_id == OpenBaltic_id & mesh.water_mask)[0]`.
-   `np.where` returns sorted indices in CPython, but never rely on
-   that — explicitly `np.sort(...)` the source array before pushing
-   to the heap.
+   `np.where((mesh.reach_id == OpenBaltic_id) & mesh.water_mask)[0]`.
+   Always `np.sort(...)` the resulting array before pushing to
+   the heap — do NOT rely on any implicit ordering from `np.where`.
+   NumPy's API does not guarantee a specific iteration order
+   across versions or array shapes; explicit sort by cell index
+   pins it deterministically.
 2. **Heap tie-breaking.** Python's `heapq` orders tuples
    lexicographically; ties in distance are broken by the next
    tuple element. Push entries as `(distance, cell_index)` so
@@ -342,28 +344,55 @@ does not rebuild it. Sim-init MUST therefore mirror the
 correctness checks against the *loaded* `dist_from_sea` array,
 or a stale/corrupt NC ships silently to production.
 
-1. If `dist_from_sea` variable is absent: emit
-   `logging.getLogger("salmon_ibm.h3_env").warning(
-   "%s: dist_from_sea missing from NC; movement gradient will be
-   flat — agents will not migrate. Rebuild landscape with
-   build_h3_multires_landscape.py.", ERR_DIST_FROM_SEA_MISSING)`.
-   Zero-fill `(N_cells,)` as fallback. Skip the remaining checks.
-2. If present, load and run **structural validation** (each
-   failure: warn with the named err-id, zero-fill, return — no
-   raise; sim continues with dormant gradient):
-   a. `arr.shape == (mesh.N_cells,)` — catches a stale NC built
-      against a different mesh. Err-id `dist-from-sea-shape-mismatch`.
-   b. `np.all(np.isfinite(arr[mesh.water_mask]))` — no NaN/Inf
-      on water cells. Err-id `dist-from-sea-nan-on-water`. (NaN
-      land cells are expected per the spec data structure and do
-      NOT trigger this.)
-   c. `arr.max() > 0` — catches all-zero from a build that ran
-      but failed mid-Dijkstra. Err-id `dist-from-sea-all-zero`.
-   d. `np.any(arr[mesh.reach_id == OpenBaltic_id] == 0)` —
-      sources exist (at least one OpenBaltic water cell at
-      distance 0). Err-id `dist-from-sea-no-sources`.
-3. Inject `env.fields["dist_from_sea"] = arr.astype(np.float32)`
-   and `mesh.dist_from_sea = arr.astype(np.float32)`.
+**Two distinct cases, deliberately handled differently:**
+
+**Case A — `dist_from_sea` variable absent from NC** (backward-
+compat with pre-C4 NCs):
+
+Emit `logging.getLogger("salmon_ibm.h3_env").warning(
+"%s: dist_from_sea missing from NC; movement gradient will be
+flat — agents will not migrate. Rebuild landscape with
+build_h3_multires_landscape.py.", ERR_DIST_FROM_SEA_MISSING)`.
+Zero-fill `(N_cells,)` as fallback. Sim continues; agents using
+UPSTREAM/DOWNSTREAM hit the sim-time latched raise (below).
+
+This case is graceful by design: an old NC predating C4 should
+load and run — just with dormant movement, identical to its
+pre-C4 behavior. The sim-time raise will catch any dormant-and-
+directed-agents combination explicitly.
+
+**Case B — `dist_from_sea` variable present but structurally
+invalid** (corrupt build, schema regression, post-C4 NC defect):
+
+Each failed check **RAISES** `RuntimeError(<err-id>: <details>)`
+at sim init. No zero-fill, no graceful continuation — a
+post-C4 NC that fails any structural check indicates a build
+defect that won't self-heal during the sim. Fail fast at init:
+
+a. `arr.shape == (mesh.N_cells,)` else raise
+   `ERR_DIST_FROM_SEA_SHAPE_MISMATCH` — stale NC built against
+   different mesh.
+b. `np.all(np.isfinite(arr[mesh.water_mask]))` else raise
+   `ERR_DIST_FROM_SEA_NAN_ON_WATER` — NaN/Inf on water cells.
+   (NaN land cells are expected per the spec data structure
+   and do NOT trigger this.)
+c. `arr.max() > 0` else raise `ERR_DIST_FROM_SEA_ALL_ZERO` —
+   build ran but failed mid-Dijkstra.
+d. `np.any(arr[mesh.reach_id == OpenBaltic_id] == 0)` else raise
+   `ERR_DIST_FROM_SEA_NO_SOURCES` — no source cells.
+
+Where `OpenBaltic_id = mesh.reach_names.index("OpenBaltic")`
+(direct list lookup; raises `ValueError` if "OpenBaltic" isn't
+in `reach_names`, which itself indicates a non-Baltic mesh and
+should skip the entire `dist_from_sea` validation block — a
+non-Baltic mesh has nothing to validate against). Pin this
+lookup explicitly in the implementation; do NOT use a stale
+constant or a separate id-mapping dict.
+
+On all checks passing: inject `env.fields["dist_from_sea"] =
+arr.astype(np.float32)` and `mesh.dist_from_sea = arr.astype(
+np.float32)`. Also initialize `env._dormant_gradient_check_done
+= False` (per-instance latch flag for sim-time check, see below).
 
 All err-id constants live in `salmon_ibm/h3_env.py` as module-
 level strings, mirroring `ERR_HOMING_HATCHERY_NO_DISPATCH` in
@@ -377,27 +406,32 @@ ERR_DIST_FROM_SEA_ALL_ZERO = "dist-from-sea-all-zero"
 ERR_DIST_FROM_SEA_NO_SOURCES = "dist-from-sea-no-sources"
 ```
 
-Choosing "warn-and-zero-fill" over "raise" is deliberate: matches
-the missing-field fallback (graceful degradation; sim runs but
-agents oscillate) AND keeps the failure mode visible in production
-logs. A "raise" would block sim initialization, appropriate at
-build time but disruptive at sim time on a deployed app.
+**Reconciliation rationale:** Case A (missing variable) is a
+*backward-compat* path — an old NC that predates C4. Sim should
+run with degraded movement so legacy scenarios still execute.
+Case B (present-but-invalid) is a *correctness defect* — a
+post-C4 build that produced bad data. No legacy reason to
+tolerate it; raise at init and force a rebuild. The two cases
+look superficially similar but have opposite remediation paths.
 
-**Sim-time:** at the **first** `_step_directed_*` call where
-`fields["dist_from_sea"]` is detected as all-zero AND any agent is
-in UPSTREAM or DOWNSTREAM behavior, raise once via a module-level
-latched flag in `salmon_ibm/movement.py`:
+**Sim-time:** the sim-init Case A path leaves `dist_from_sea`
+as flat-zeros. To avoid a deployed app oscillating silently
+when sim-init logging is suppressed, add a per-env latched check
+in `salmon_ibm/movement.py`:
 
 ```python
-_dormant_gradient_warned = False  # module-level
-
-# inside execute_movement, after building behavior buckets:
-if not _dormant_gradient_warned:
+def _check_dormant_gradient(landscape, buckets):
+    """Raise once per env-instance if dist_from_sea is flat-zero
+    AND any agent is in directed (UPSTREAM/DOWNSTREAM) behavior."""
+    env = landscape.get("env")  # H3Environment instance
+    if env is None or getattr(env, "_dormant_gradient_check_done", True):
+        return  # legacy non-Baltic env, or check already run
     has_directed = (
         buckets.get(int(Behavior.UPSTREAM)) is not None
         or buckets.get(int(Behavior.DOWNSTREAM)) is not None
     )
-    if has_directed and not np.any(fields["dist_from_sea"]):
+    if has_directed and not np.any(landscape["fields"]["dist_from_sea"]):
+        env._dormant_gradient_check_done = True  # latch BEFORE raise to avoid loop
         raise RuntimeError(
             "dist_from_sea is flat-zero AND agents are in "
             "UPSTREAM/DOWNSTREAM behavior. Movement will not "
@@ -405,23 +439,33 @@ if not _dormant_gradient_warned:
             "landscape NC with build_h3_multires_landscape.py to "
             "populate dist_from_sea."
         )
-    _dormant_gradient_warned = True  # latch even on success
+    env._dormant_gradient_check_done = True  # latch on happy path too
 ```
 
-This is louder than the sim-init warning: a deployed app with
-suppressed logging would hit the raise and surface visibly to the
-operator, rather than oscillating silently. The latch ensures it
-fires at most once per process. Reasoning: the sim-init warning
-might be missed (filtered, log rotation, test caplog level too
-high); a runtime raise on the first directed-movement call is
-unmissable.
+Called once per `execute_movement` invocation, before the
+behavior dispatch. The latch is **per-env-instance**
+(`env._dormant_gradient_check_done`), NOT module-global. This
+prevents cross-test leakage: a test that loads a degraded env,
+then a healthy env, will check each independently. The
+`_dormant_gradient_check_done` attribute is initialized to
+`False` in `from_netcdf` after a successful load (Case B all-
+checks-pass) AND in the Case A fallback path (after the warn +
+zero-fill). It is never set elsewhere; future code that injects
+a new `dist_from_sea` array onto an existing env should reset
+this flag.
 
-The legacy SSH-based dormant state was silent because the kernel
-read SSH but never inspected its values. C4 inherits the same
-fields-dict pattern but ADDS the latched check, so any future
-deploy that drops `dist_from_sea` (e.g., schema regression) is
-caught at first directed-movement call rather than inferred from
-"agents don't migrate."
+The check is **landscape-aware** via `landscape.get("env")` —
+the env reference must therefore be added to the landscape
+dict at sim-step time. Update `simulation.py:_step_landscape()`
+(or equivalent) to include `"env": self.env` in the landscape
+dict. If `env` is absent (e.g., a TriMesh / HexMesh fallback
+with no `H3Environment`), the check no-ops via the `env is None`
+guard — backward-compat with non-Baltic configs.
+
+Why landscape-not-module: the C3.3 spec memory entry explicitly
+notes module-level state can leak across in-process landscape
+swaps; per-env state is the safer default for any latch-style
+check.
 
 ## Implementation files
 
@@ -480,26 +524,37 @@ with two disconnected components (one with sea, one without).
 unreachable reach.
 
 **Test 5b: determinism.** Same synthetic mesh. Run
-`compute_dist_from_sea` twice and assert byte-exact equality:
-`np.array_equal(out1.tobytes(), out2.tobytes())`. With at least
-one tied-distance pair (two cells equidistant from a single
-source), this catches non-deterministic heap-ordering or
-source-set iteration regressions. Also run on the production NC's
-mesh (via the H3MultiResMesh constructor) and assert byte-exact
-equality between the saved NC's `dist_from_sea` and a fresh
-recompute — pinning down "committed NC matches what the build
-script would produce now".
+`compute_dist_from_sea` twice and assert
+`np.array_equal(out1, out2, equal_nan=True)` — NaN-aware (land
+cells carry NaN by spec; `tobytes()` would require byte-identical
+NaN payloads which NumPy does not guarantee across runs even when
+the *value* is consistent). With at least one tied-distance pair
+(two cells equidistant from a single source), this catches
+non-deterministic heap-ordering or source-set iteration
+regressions. Also run on the production NC's mesh (via the
+H3MultiResMesh constructor) and assert
+`np.array_equal(saved_nc, recomputed, equal_nan=True)` — pinning
+down "committed NC matches what the build script would produce
+now". If a future bathymetry / mesh edit changes any cell, this
+test fails and forces an explicit NC rebuild commit.
 
 ### Integration (new)
 
 **Test 6: end-to-end production-mesh gradient sanity.** Load
 `data/curonian_h3_multires_landscape.nc` (rebuilt with the new
-step). **First**, assert `np.all(np.isfinite(dist_from_sea[
-mesh.water_mask]))` — no NaN/Inf on water cells. A single NaN
-poisons `mean()` and produces confusing "nan < nan = False"
-failures downstream that look like topology bugs but are really
-NC-corruption bugs; the explicit isfinite check up-front gives a
-distinct error message. Then assert: (a) `mean(OpenBaltic) <
+step). **First**, assert two NC-rebuilt preconditions:
+(i) `dist_from_sea` variable exists in the NC (`"dist_from_sea"
+in ds.variables`); without this, the test was run before the
+rebuild and should fail with a clear "rebuild the NC first"
+error rather than a misleading downstream gradient assertion.
+(ii) `dist_from_sea.max() > 0` — distinguishes "rebuilt with
+working compute" from "rebuilt with broken compute that wrote
+all-zeros". Then assert
+`np.all(np.isfinite(dist_from_sea[mesh.water_mask]))` — no
+NaN/Inf on water cells. A single NaN poisons `mean()` and
+produces confusing "nan < nan = False" failures downstream that
+look like topology bugs but are really NC-corruption bugs; the
+explicit isfinite check gives a distinct error message. Then assert: (a) `mean(OpenBaltic) <
 mean(Nemunas)` — the sanity floor that the gradient points the
 right way overall; (b) `min(Nemunas) > mean(OpenBaltic)` — no
 Nemunas (river) cell is closer to sea than the typical OpenBaltic
