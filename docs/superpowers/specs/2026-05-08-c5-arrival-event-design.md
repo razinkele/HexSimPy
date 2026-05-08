@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-08
 **Owner:** @razinkele
-**Status:** 📋 DRAFT v1 — awaiting review-loop passes.
+**Status:** 📋 DRAFT v2 — pass-1 corrections (int8 overflow cast, landscape["sim"] fail-loud consistency, double-negative guard rewritten, missing-arrival-event init-time warning, event-ordering validator, NaN-reach logging, water_mask explicit, Test 6 fully specified, PatchIntroduction contract, sticky-flag enforcement, default-sequence clarification).
 
 C5 ships an `ArrivalEvent` that tags an agent as **arrived** when it
 settles in the upstream portion of its natal reach. Until C5,
@@ -167,23 +167,56 @@ In `Simulation.__init__`, after C4's `assert_branch_topology` call
 and `dist_from_sea` is on the env/mesh:
 
 ```python
-def _compute_arrival_thresholds(self):
+def _compute_arrival_thresholds(self) -> dict[int, float]:
     """C5: per-natal-reach 75th-percentile dist_from_sea threshold.
 
     Computed once at sim init from mesh.dist_from_sea. Maps each
-    reach_id with at least one cell to its top-quartile threshold;
-    arrived = (tri_idx in this reach AND dist_from_sea >= threshold).
+    reach_id with at least one finite-dist water cell to its
+    top-quartile threshold; arrived = (tri_idx in this reach AND
+    dist_from_sea >= threshold).
+
+    Logs every reach skipped (no finite cells) at WARNING level so
+    the operator sees which reaches won't produce arrivals; agents
+    natal-tagged to a skipped reach silently never arrive otherwise.
+
+    Returns empty dict if mesh.dist_from_sea is missing (legacy
+    non-Baltic backend) — ArrivalEvent then no-ops at execute time.
     """
-    if not getattr(self.mesh, "dist_from_sea", None) is not None:
+    import logging
+    logger = logging.getLogger("salmon_ibm.simulation")
+
+    dist = getattr(self.mesh, "dist_from_sea", None)
+    if dist is None:
         return {}  # legacy non-Baltic mesh; ArrivalEvent no-ops
-    dist = self.mesh.dist_from_sea
+
     rid_arr = self.mesh.reach_id
-    water = self.mesh.water_mask
+    # water_mask is part of the C4 contract: any mesh that exposes
+    # dist_from_sea also exposes water_mask (set in tandem in
+    # H3MultiResMesh and the legacy env stubs from C4 Task 7).
+    # Defensive fallback if a future mesh decouples them.
+    water = getattr(
+        self.mesh, "water_mask", np.ones(len(dist), dtype=bool),
+    )
+
     thresholds: dict[int, float] = {}
     for rid in np.unique(rid_arr):
         rid_int = int(rid)
+        if rid_int < 0:
+            continue  # sentinel reach_id; not a real reach
         mask = (rid_arr == rid_int) & water & np.isfinite(dist)
-        if not mask.any():
+        n_cells = int(mask.sum())
+        if n_cells == 0:
+            name = (
+                self.mesh.reach_names[rid_int]
+                if rid_int < len(getattr(self.mesh, "reach_names", []))
+                else f"rid_{rid_int}"
+            )
+            logger.warning(
+                "c5-arrival-skipped-reach: reach %s (rid=%d) has no "
+                "finite-dist water cells; agents natal-tagged to it "
+                "will never arrive. Investigate mesh build.",
+                name, rid_int,
+            )
             continue
         thresholds[rid_int] = float(
             np.percentile(dist[mask], 75)
@@ -204,54 +237,71 @@ class ArrivalEvent(Event):
 
     Vectorised. Runs after MovementEvent (sees post-step cell).
     Sticky: pool.arrived is set True once and never reset.
+
+    Reads `landscape["sim"]` directly (no getattr default) per C4's
+    fail-loud convention. If the scenario landscape doesn't have a
+    "sim" key, KeyError propagates — surfaces the misconfiguration
+    rather than silently no-opping.
+
+    No-ops gracefully when:
+    - sim has no _arrival_threshold_by_natal_rid attribute (pre-C5
+      Simulation), via getattr fallback.
+    - thresholds dict is empty (legacy non-Baltic mesh; sim init
+      already returned {} from _compute_arrival_thresholds).
+    - mesh.dist_from_sea is None (legacy mesh).
     """
 
     def execute(self, population, landscape, t, mask):
         pool = population.pool
-        sim = landscape.get("sim")
-        thresholds = (
-            sim._arrival_threshold_by_natal_rid
-            if sim is not None
-            else None
+        # Direct subscript per fail-loud convention — KeyError if
+        # "sim" missing tells the operator their landscape dict
+        # construction is wrong.
+        sim = landscape["sim"]
+        thresholds = getattr(
+            sim, "_arrival_threshold_by_natal_rid", {},
         )
         if not thresholds:
-            return  # legacy non-Baltic landscape — no-op
+            return  # pre-C5 sim or legacy non-Baltic mesh — no-op
 
         mesh = landscape["mesh"]
         dist = getattr(mesh, "dist_from_sea", None)
         if dist is None:
-            return  # legacy mesh — no-op
+            return  # legacy mesh — no-op (defensive; should not
+                    # be reachable when thresholds is non-empty)
 
-        # Vectorised mask: alive AND not arrived AND in natal reach
-        # AND at-or-above threshold.
+        # CAST natal_reach_id from int8 to int32 BEFORE any indexing.
+        # Pool.natal_reach_id is dtype=np.int8 (agents.py:78), which
+        # overflows at 128 → -128. The threshold lookup below indexes
+        # thr_arr; without the cast, an int8-wrapped negative value
+        # would either incorrectly match the sentinel guard or wrap
+        # to an out-of-bound index.
+        natal_rid = pool.natal_reach_id.astype(np.int32)
+
+        # Vectorised mask: alive AND not arrived AND on mesh.
         active = pool.alive & ~pool.arrived
         on_mesh = pool.tri_idx >= 0
-        cur_reach = mesh.reach_id[np.where(on_mesh, pool.tri_idx, 0)]
-        in_natal = cur_reach == pool.natal_reach_id
+        safe_tri = np.where(on_mesh, pool.tri_idx, 0)
+        cur_reach = mesh.reach_id[safe_tri].astype(np.int32)
+        in_natal = cur_reach == natal_rid
 
-        # Per-agent threshold lookup. The agent's threshold depends
-        # on its natal_reach_id; a vectorised lookup uses np.take.
-        # Build a flat threshold array indexed by reach_id.
-        n_reaches = max(thresholds.keys()) + 1 if thresholds else 0
+        # Per-agent threshold lookup. Build a flat threshold array
+        # indexed by reach_id; out-of-range agents get inf.
+        n_reaches = max(thresholds.keys()) + 1
         thr_arr = np.full(n_reaches, np.inf, dtype=np.float32)
         for rid, val in thresholds.items():
             thr_arr[rid] = val
 
-        # Agents whose natal_reach_id is out of the threshold array
-        # range (e.g., -1 sentinel for pre-tagging agents) get inf
-        # threshold → never arrive.
-        natal_safe = np.where(
-            (pool.natal_reach_id >= 0)
-            & (pool.natal_reach_id < n_reaches),
-            pool.natal_reach_id,
-            0,
+        # Atomic in-range lookup: clamp out-of-range natal_rid to 0
+        # for safe indexing, then overwrite with inf via np.where.
+        # Combining clamp + overwrite into one np.where avoids the
+        # two-step pattern that a future refactor could break.
+        in_range = (natal_rid >= 0) & (natal_rid < n_reaches)
+        natal_safe = np.where(in_range, natal_rid, 0)
+        per_agent_threshold = np.where(
+            in_range, thr_arr[natal_safe], np.inf,
         )
-        per_agent_threshold = thr_arr[natal_safe]
-        per_agent_threshold[
-            (pool.natal_reach_id < 0) | (pool.natal_reach_id >= n_reaches)
-        ] = np.inf
 
-        agent_dist = dist[np.where(on_mesh, pool.tri_idx, 0)]
+        agent_dist = dist[safe_tri]
         above_threshold = agent_dist >= per_agent_threshold
 
         arrived_now = active & on_mesh & in_natal & above_threshold
@@ -259,10 +309,13 @@ class ArrivalEvent(Event):
             pool.arrived[arrived_now] = True
 ```
 
-The `landscape["sim"]` accessor: `Simulation.step()` already has
-self-reference patterns; add `"sim": self` to the landscape dict,
-mirroring C4's `"env": self.env` addition. Direct attribute access
-(NOT `getattr` with default) — fail-loud per the C4 convention.
+The `landscape["sim"]` accessor: `Simulation.step()` adds
+`"sim": self` to the landscape dict and the `Landscape` TypedDict
+gains a `sim: "Simulation"` field — mirroring C4's `"env": self.env`
+addition. Direct subscript (NOT `getattr` with default) is the
+fail-loud convention: a misconfigured event sequence raises
+KeyError at the first ArrivalEvent.execute call, NOT silently
+no-ops forever.
 
 ### Event ordering
 
@@ -306,20 +359,84 @@ arrival level is therefore narrower than at the delta-entry level
 
 ### Validation discipline
 
-**Sim-init:** if `mesh.dist_from_sea` is present and any reach has
-finite `dist_from_sea` cells, `_arrival_threshold_by_natal_rid` is
-populated. If absent (legacy non-Baltic mesh), the dict is empty
-and ArrivalEvent no-ops.
+**Sim-init structural validation.** After `_compute_arrival_thresholds`
+runs, `Simulation.__init__` must validate the scenario configuration
+to prevent the silent-failure class C5 was built to eliminate
+(scenario forgets to include `arrival` in its event list →
+`pool.arrived = 0` forever, indistinguishable from "agents
+legitimately not reaching upper river"). Three validation steps:
 
-**Sim-time:** ArrivalEvent.execute checks `len(thresholds) > 0`
+1. **Missing-arrival-event detector.** If
+   `_arrival_threshold_by_natal_rid` is non-empty (mesh supports
+   arrival semantics) AND the constructed event sequence
+   includes a `MovementEvent` (movement-driven scenario) AND does
+   NOT include an `ArrivalEvent`, emit a clear warning at
+   `logging.getLogger("salmon_ibm.simulation")`:
+
+   ```python
+   logger.warning(
+       "%s: scenario has movement events on a mesh that supports "
+       "arrival tagging (dist_from_sea present, %d natal reaches) "
+       "but no ArrivalEvent in the event sequence — pool.arrived "
+       "will stay False for the entire run. Add `- type: arrival` "
+       "to the YAML event list (typically between movement and "
+       "mortality events).",
+       ERR_C5_MISSING_ARRIVAL_EVENT,
+       len(self._arrival_threshold_by_natal_rid),
+   )
+   ```
+
+   With err-id constant `ERR_C5_MISSING_ARRIVAL_EVENT =
+   "c5-arrival-event-missing"` defined alongside the C4 err-ids
+   in `salmon_ibm/h3_env.py` (the err-id home for the project's
+   operational logging convention).
+
+   This is a warning, not a raise — the scenario MAY legitimately
+   want movement without arrival tagging (e.g., outmigration-only
+   scenarios). The warning makes the omission visible in production
+   logs without blocking sim init.
+
+2. **Event-ordering invariant.** If `ArrivalEvent` IS in the
+   sequence, validate its position: must run AFTER the last
+   `MovementEvent` AND BEFORE the first event whose name matches
+   `*Mortality` or `Predation` or `Survival`. If misordered, emit
+   a warning with err-id
+   `ERR_C5_ARRIVAL_EVENT_MISORDERED = "c5-arrival-event-misordered"`.
+   Misorder is biologically suspect (an arrival tag computed from
+   pre-movement state, or applied after this-step mortality, would
+   produce the wrong settlement semantics) but technically runnable
+   — warn-and-continue.
+
+3. **`natal_reach_id` precondition contract.** Document explicitly
+   in the spec: any introduction event (IntroductionEvent,
+   PatchIntroductionEvent) emitting agents with a `natal_reach_id`
+   value MUST use a value present in the init-time mesh's
+   `np.unique(reach_id)`. Agents introduced with a never-init-seen
+   reach get `inf` threshold via the `in_range` clamp (line ~273
+   in the helper code) and silently never arrive — same failure
+   class as the missing-event silent failure. C5 v2 documents the
+   precondition; runtime enforcement is deferred (would require a
+   wrapper on Population.add_agents that checks every introduction
+   against the threshold dict — out of scope unless misuse is
+   observed).
+
+**Sim-time.** ArrivalEvent.execute checks `len(thresholds) > 0`
 upfront; the `dist is None` and `not thresholds` guards short-
-circuit on legacy backends.
+circuit on legacy backends. Direct `landscape["sim"]` subscript
+fails-loud on missing key. No new RuntimeError raises in the
+happy path.
 
-No new RuntimeError raises in C5. Composition with C4's dormancy
-guard: if movement is dormant (`dist_from_sea` missing), C4's
-guard fires first; C5 never runs. If movement is active but
-ArrivalEvent isn't in the scenario, `pool.arrived` stays False —
-the legacy behavior. No silent failure mode.
+**Composition with C4's dormancy guard.** If movement is dormant
+(`dist_from_sea` missing or all-zero), C4's
+`_check_dormant_gradient` raises BEFORE the first MovementEvent
+step → ArrivalEvent never gets a chance to mis-fire. C5 inherits
+C4's substrate guarantees.
+
+**Sticky-flag overwrite enforcement.** The spec contract: NO event
+in `EVENT_REGISTRY` writes `False` to `pool.arrived`. Test 7
+(below) asserts this via grep + AST inspection at test time —
+catches regressions where a future event clears arrived state
+unintentionally.
 
 ## Implementation files
 
@@ -327,8 +444,9 @@ the legacy behavior. No silent failure mode.
 |---|---|---|
 | `salmon_ibm/simulation.py` | Modify | Add `_arrival_threshold_by_natal_rid` attribute + `_compute_arrival_thresholds` method, called from `__init__` after C4 dist_from_sea load. Add `"sim": self` to the landscape dict in `step()`. Add `sim` to `Landscape` TypedDict. |
 | `salmon_ibm/events_builtin.py` | Modify | Add `ArrivalEvent` class registered via `@register_event("arrival")`. |
-| `tests/test_arrival_event.py` | Create | 6 unit + integration tests. |
+| `tests/test_arrival_event.py` | Create | 8 tests: 6 unit + 1 integration + 1 sticky-overwrite enforcement + 1 missing-event-warning. |
 | `configs/config_curonian_h3_multires.yaml` | Modify | Add `arrival` event to the event sequence (between movement and mortality). |
+| `salmon_ibm/h3_env.py` | Modify | Add `ERR_C5_MISSING_ARRIVAL_EVENT` and `ERR_C5_ARRIVAL_EVENT_MISORDERED` err-id constants alongside the existing C4 err-ids. |
 
 ## Tests
 
@@ -354,11 +472,57 @@ False (mortality precedence).
 Assert arrived stays False — correct rejection of cross-branch
 matching.
 
-**Test 6: integration with movement.** Set up bidirectional
-chain mesh; agent in UPSTREAM behavior; cell 9 (chain end) is
-top-quartile of natal reach. Run MovementEvent then ArrivalEvent
-for K timesteps. Assert agent arrives by step ~5, sticky from
-that point on.
+**Test 5b: pre-tagged sentinel agent.** Agent with
+`pool.natal_reach_id[i] = -1` (pre-tagging sentinel). Place at any
+upper-natal cell. Assert arrived stays False — the int8→int32 cast
++ in_range clamp must correctly route the sentinel to inf
+threshold. This test guards against the int8 overflow finding from
+pass-1 review.
+
+**Test 6: integration with movement.** Concrete fixture
+specification (must match implementation exactly to avoid
+flakiness):
+- 12-cell bidirectional chain mesh.
+- `dist_from_sea = np.arange(12, dtype=np.float32) * 100.0`
+  (0, 100, 200, ..., 1100 meters).
+- All 12 cells in reach_id=1 (single natal reach, no other
+  reaches).
+- 75th-percentile threshold for reach_id=1: 8.25 → ≥ cell 9
+  (cells 9, 10, 11 qualify).
+- One agent: `pool.tri_idx[0] = 0` (sea end), `pool.behavior[0] =
+  Behavior.UPSTREAM`, `pool.natal_reach_id[0] = 1`,
+  `pool.alive[0] = True`, `pool.arrived[0] = False`.
+- Build a minimal landscape with `mesh`, `fields["dist_from_sea"]`,
+  `rng`, and the new `"sim"` reference (a `_FakeSim` shim with
+  `_arrival_threshold_by_natal_rid = {1: 825.0}`).
+- Run MovementEvent + ArrivalEvent for 10 timesteps with
+  `n_micro_steps_per_cell = np.ones(12, dtype=np.int32)`.
+- Assert: by step 9, `pool.arrived[0] == True` (agent reached
+  cell 9 or higher); flag stays True for all subsequent steps.
+
+**Test 7: sticky-flag overwrite enforcement.** AST + grep check on
+`salmon_ibm/events_builtin.py`: assert no event class's `execute`
+method body contains `pool.arrived[...] = False` or
+`pool.arrived[:] = False` patterns. The check uses Python's `ast`
+module to walk AST nodes for `Assign` targets matching
+`pool.arrived` Subscript and assert no rhs is `False` or `0`.
+Catches future regressions where a contributor adds an event that
+clears arrived state, breaking the sticky contract.
+
+**Test 8: missing-arrival-event init-time warning.** Construct a
+synthetic Simulation with an event sequence containing
+MovementEvent but NO ArrivalEvent on a mesh that supports arrival
+(populated `_arrival_threshold_by_natal_rid`). Use
+`caplog.set_level(logging.WARNING, logger="salmon_ibm.simulation")`.
+Assert the warning record contains
+`ERR_C5_MISSING_ARRIVAL_EVENT` ("c5-arrival-event-missing").
+Sanity counter-test: same setup with ArrivalEvent in the sequence
+→ NO warning record with that err-id.
+
+**Test 9: event-ordering misorder warning.** Construct a Simulation
+where ArrivalEvent appears BEFORE MovementEvent in the event
+sequence (or AFTER a mortality event). Assert warning record
+contains `ERR_C5_ARRIVAL_EVENT_MISORDERED`.
 
 **Live-test contract:** post-deploy Playwright run on laguna
 default scenario produces ≥1 "arrived" via the UI counter
@@ -382,7 +546,14 @@ O(N_cells × log(N_cells_per_reach)) for the np.percentile calls;
 - **Scenario configs without an `arrival` event line** continue to
   run identically to pre-C5: `pool.arrived` stays False, all
   existing `~pool.arrived` masks evaluate as `~False = True` (no
-  agent skipped), legacy behavior preserved.
+  agent skipped), legacy behavior preserved. **Sim-init emits a
+  WARNING** in this case (per Validation discipline §1) — the
+  legacy behavior is preserved, but the user is told their build
+  supports arrival tagging and they're not using it.
+- **`Simulation._build_events()` default sequence (Python-driven,
+  not YAML)** stays unchanged. C5's only YAML path adds the event;
+  the default sequence is the legacy path. C5 unit tests construct
+  ArrivalEvent directly (don't rely on default-sequence inclusion).
 - **Legacy non-Baltic backends** (TriMesh, HexMesh, hexsim) lack
   `mesh.dist_from_sea` per-natal-reach data; the threshold dict
   is empty; ArrivalEvent no-ops at execute time.
