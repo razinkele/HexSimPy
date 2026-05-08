@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.10+, conda env `shiny`, NumPy, pytest. Spec at `docs/superpowers/specs/2026-05-08-c5-arrival-event-design.md` (v2 CONVERGED).
 
-**Plan version:** v2 — pass-1 review-loop corrections applied. Pass-1 found 1 CRITICAL (validator referenced non-existent `self.events`; events actually live on `self._sequencer.events`) + 3 BLOCKING (line numbers off by 124+; YAML has no `events:` section, default events come from `_build_events()` not YAML) + 2 minor. v2 restructures Task 6 validator to take events as parameter, corrects line numbers (181 → 305; 602 → 603/616), changes Task 8 from YAML edit to `_build_events()` modification (single source of truth), and reconciles the test-count arithmetic.
+**Plan version:** ✅ v2 final — **2-pass plan-review-loop CONVERGED**. Pass-1 found 1 CRITICAL (validator referenced non-existent `self.events`) + 3 BLOCKING (line numbers + YAML structure) + 2 minor. Pass-2 verified all closures and confirmed 3 code-correctness questions (`self._sequencer.events`, `_build_events()` insertion point, ArrivalEvent import) — all correct against the actual codebase. Plus one documentation-consistency fix (stamp template said "+9 = 961"; corrected to "+14 = ~966"). Implementation-ready.
 
 **Pre-flight:** Confirm baseline before starting:
 
@@ -1260,7 +1260,7 @@ Expected: `alive` ≈ 4, `arrived` ≥ 0 (likely 0-2 with the default scenario; 
 Edit `docs/superpowers/specs/2026-05-08-c5-arrival-event-design.md`'s status header:
 
 ```markdown
-**Status:** ✅ EXECUTED on 2026-05-08 via subagent-driven-development; full pytest <X passed / Y skipped> (baseline+9 = 961 collected). Branch `c5-arrival-event` ready for PR + v1.7.9 tag.
+**Status:** ✅ EXECUTED on 2026-05-08 via subagent-driven-development; full pytest <X passed / Y skipped> (baseline+14 = ~966 collected). Branch `c5-arrival-event` ready for PR + v1.7.9 tag.
 ```
 
 (Replace X/Y with the actual numbers from Step 4.)
@@ -1270,7 +1270,7 @@ Edit `docs/superpowers/specs/2026-05-08-c5-arrival-event-design.md`'s status hea
 Edit the top of this plan file (`docs/superpowers/plans/2026-05-08-c5-arrival-event.md`), after the "Tech Stack" line:
 
 ```markdown
-**Status:** ✅ EXECUTED on 2026-05-08. Final test count: 961 collected (baseline+9), all C5 tests passing.
+**Status:** ✅ EXECUTED on 2026-05-08. Final test count: ~966 collected (baseline+14), all C5 tests passing.
 ```
 
 - [ ] **Step 8: Commit YAML + stamps**
