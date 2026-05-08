@@ -8,13 +8,24 @@
 
 **Tech Stack:** Python 3.10+, conda env `shiny`, NumPy, pytest. Spec at `docs/superpowers/specs/2026-05-08-c5-arrival-event-design.md` (v2 CONVERGED).
 
+**Plan version:** v2 — pass-1 review-loop corrections applied. Pass-1 found 1 CRITICAL (validator referenced non-existent `self.events`; events actually live on `self._sequencer.events`) + 3 BLOCKING (line numbers off by 124+; YAML has no `events:` section, default events come from `_build_events()` not YAML) + 2 minor. v2 restructures Task 6 validator to take events as parameter, corrects line numbers (181 → 305; 602 → 603/616), changes Task 8 from YAML edit to `_build_events()` modification (single source of truth), and reconciles the test-count arithmetic.
+
 **Pre-flight:** Confirm baseline before starting:
 
 ```bash
 micromamba run -n shiny python -m pytest tests/ --collect-only -q | tail -1
 ```
 
-Should report ~952 tests collected (post-C4 baseline at v1.7.8). Record the count; expected post-C5 = baseline + 9 (= 961).
+Should report ~952 tests collected (post-C4 baseline at v1.7.8). Record the count; expected post-C5 = baseline + 14 (= ~966). The plan adds 14 distinct test functions:
+
+- Task 2: 3 (threshold-computation: happy-path, skipped-reach, legacy-mesh)
+- Task 3: 4 (Tests 1, 2, 5, 5b)
+- Task 4: 2 (Tests 3, 4)
+- Task 5: 1 (Test 6 movement integration)
+- Task 6: 3 (Test 8 missing-event, Test 8 sanity, Test 9 misorder)
+- Task 7: 1 (Test 7 AST sticky-overwrite)
+
+The spec lists "9 numbered tests" (Tests 1-9); the plan adds 5 supporting tests beyond the numbered set (3 threshold-computation in Task 2, 1 sanity counter-test in Task 6, and the threshold-validation 5b is counted within the 9 already).
 
 ---
 
@@ -52,7 +63,7 @@ The string annotation avoids circular import (Simulation references Landscape in
 
 - [ ] **Step 3: Add `"sim": self` to the landscape dict in `Simulation.step()`**
 
-Locate the dict construction in `step()` (around `simulation.py:602` — the line that includes `"env": self.env` from C4). Add directly below `"env"`:
+Locate the dict construction in `step()`: the dict literal opens at **`simulation.py:603`** (`landscape: Landscape = {`); `"env": self.env` is at **line 616** (the line added by C4). Add `"sim": self` immediately below the `"env"` line:
 
 ```python
 landscape: Landscape = {
@@ -269,7 +280,7 @@ In `salmon_ibm/simulation.py`, add the method as part of the `Simulation` class 
 
 - [ ] **Step 4: Wire into `Simulation.__init__`**
 
-Locate the existing `assert_branch_topology(self.mesh)` call (around `simulation.py:181` post-C4). Add the threshold computation immediately after:
+Locate the existing `assert_branch_topology(self.mesh)` call at **`simulation.py:305`** (post-C4 ship). Add the threshold computation immediately after:
 
 ```python
         delta_routing.assert_branch_topology(self.mesh)
@@ -801,6 +812,8 @@ EOF
 - Modify: `salmon_ibm/simulation.py` — add validator method called from `__init__` after `_arrival_threshold_by_natal_rid` is computed.
 - Test: `tests/test_arrival_event.py`
 
+**Critical correctness pin from pass-1 review:** The validator MUST take the event list as an explicit parameter (NOT read from `self.events`, which doesn't exist — events live on `self._sequencer.events` at `events.py:95`). v2 plan signature: `_validate_arrival_event_in_sequence(self, events: list[Event]) -> None`. Tests pass the events list directly to avoid coupling to the `_sequencer` internals.
+
 - [ ] **Step 1: Append failing tests for the validators**
 
 Append to `tests/test_arrival_event.py`:
@@ -814,16 +827,15 @@ def test_missing_arrival_event_warning(caplog, tmp_path):
     from salmon_ibm.simulation import Simulation
     from salmon_ibm.h3_env import ERR_C5_MISSING_ARRIVAL_EVENT
 
-    # Construct a Simulation-like instance with thresholds populated
-    # and an event sequence containing MovementEvent but NOT
-    # ArrivalEvent. Use bypass-init pattern to test the validator
-    # in isolation.
+    # Use bypass-init pattern to test the validator in isolation.
+    # Pass events list explicitly per v2 fix (validator takes events
+    # as parameter, doesn't read from self.events which doesn't exist).
     sim = Simulation.__new__(Simulation)
     sim._arrival_threshold_by_natal_rid = {1: 825.0}
-    sim.events = [MovementEvent()]  # movement present, arrival absent
+    events = [MovementEvent()]  # movement present, arrival absent
 
     caplog.set_level(logging.WARNING, logger="salmon_ibm.simulation")
-    sim._validate_arrival_event_in_sequence()
+    sim._validate_arrival_event_in_sequence(events)
     matching = [
         r for r in caplog.records
         if ERR_C5_MISSING_ARRIVAL_EVENT in r.getMessage()
@@ -843,10 +855,10 @@ def test_arrival_event_present_no_warning(caplog):
 
     sim = Simulation.__new__(Simulation)
     sim._arrival_threshold_by_natal_rid = {1: 825.0}
-    sim.events = [MovementEvent(), ArrivalEvent()]
+    events = [MovementEvent(), ArrivalEvent()]
 
     caplog.set_level(logging.WARNING, logger="salmon_ibm.simulation")
-    sim._validate_arrival_event_in_sequence()
+    sim._validate_arrival_event_in_sequence(events)
     matching = [
         r for r in caplog.records
         if ERR_C5_MISSING_ARRIVAL_EVENT in r.getMessage()
@@ -867,13 +879,13 @@ def test_arrival_event_misorder_warning(caplog):
     from salmon_ibm.simulation import Simulation
     from salmon_ibm.h3_env import ERR_C5_ARRIVAL_EVENT_MISORDERED
 
-    # Misorder case 1: arrival BEFORE movement.
     sim = Simulation.__new__(Simulation)
     sim._arrival_threshold_by_natal_rid = {1: 825.0}
-    sim.events = [ArrivalEvent(), MovementEvent()]
 
+    # Misorder case 1: arrival BEFORE movement.
+    events_a = [ArrivalEvent(), MovementEvent()]
     caplog.set_level(logging.WARNING, logger="salmon_ibm.simulation")
-    sim._validate_arrival_event_in_sequence()
+    sim._validate_arrival_event_in_sequence(events_a)
     matching = [
         r for r in caplog.records
         if ERR_C5_ARRIVAL_EVENT_MISORDERED in r.getMessage()
@@ -885,8 +897,8 @@ def test_arrival_event_misorder_warning(caplog):
 
     # Misorder case 2: arrival AFTER survival/mortality event.
     caplog.clear()
-    sim.events = [MovementEvent(), SurvivalEvent(), ArrivalEvent()]
-    sim._validate_arrival_event_in_sequence()
+    events_b = [MovementEvent(), SurvivalEvent(), ArrivalEvent()]
+    sim._validate_arrival_event_in_sequence(events_b)
     matching = [
         r for r in caplog.records
         if ERR_C5_ARRIVAL_EVENT_MISORDERED in r.getMessage()
@@ -907,9 +919,16 @@ Expected: 3 failures — `_validate_arrival_event_in_sequence` doesn't exist yet
 In `salmon_ibm/simulation.py`, add the method as part of the `Simulation` class (near `_compute_arrival_thresholds`):
 
 ```python
-    def _validate_arrival_event_in_sequence(self) -> None:
+    def _validate_arrival_event_in_sequence(
+        self, events: "list[Event]"
+    ) -> None:
         """C5: warn if the event sequence is missing or misorders
         ArrivalEvent on a mesh that supports arrival tagging.
+
+        Takes the event list as an explicit parameter (NOT
+        `self.events` — that attribute does not exist in this
+        codebase; events live on `self._sequencer.events`). The
+        caller passes `self._sequencer.events` from __init__.
 
         Two checks:
         1. Missing-arrival-event: mesh supports arrival (thresholds
@@ -937,7 +956,6 @@ In `salmon_ibm/simulation.py`, add the method as part of the `Simulation` class 
         if not thresholds:
             return  # legacy non-Baltic mesh; no arrival tagging possible
 
-        events = getattr(self, "events", [])
         movement_indices = [
             i for i, e in enumerate(events) if isinstance(e, MovementEvent)
         ]
@@ -960,7 +978,8 @@ In `salmon_ibm/simulation.py`, add the method as part of the `Simulation` class 
                 "sequence — pool.arrived will stay False for the "
                 "entire run. Add `- type: arrival` to the YAML event "
                 "list (typically between movement and mortality "
-                "events).",
+                "events) OR include ArrivalEvent in "
+                "Simulation._build_events().",
                 ERR_C5_MISSING_ARRIVAL_EVENT,
                 len(thresholds),
             )
@@ -994,18 +1013,18 @@ In `salmon_ibm/simulation.py`, add the method as part of the `Simulation` class 
 
 - [ ] **Step 4: Wire into `Simulation.__init__`**
 
-Locate the `_compute_arrival_thresholds` call (added in Task 2). The validator must run AFTER `self.events` is built (the event sequence is constructed somewhere in `__init__`). Find the line where `self.events = ...` is set, and add the validator call immediately after:
+Events are stored in `self._sequencer = EventSequencer(self._build_events())` at **`simulation.py:380`** (the only event-related assignment in `__init__`). The `EventSequencer` class exposes the events list as `self._sequencer.events` (per `events.py:95` constructor). The validator must run AFTER line 380 with the events list extracted:
 
 ```python
-        # ... self.events = self._build_events(...) (existing line) ...
-        # C5: validate arrival event presence + ordering.
-        self._validate_arrival_event_in_sequence()
+        # Existing line at simulation.py:380
+        self._sequencer = EventSequencer(self._build_events())
+        # NEW (C5): validate arrival event presence + ordering.
+        # Read events from the sequencer (NOT self.events — that
+        # attribute does not exist in this codebase).
+        self._validate_arrival_event_in_sequence(self._sequencer.events)
 ```
 
-If the event-building line is hard to locate, run:
-`grep -n "self.events" salmon_ibm/simulation.py | head -5`
-
-Place the validator call AFTER `self.events` is assigned but BEFORE any code that runs the events (i.e., before `step()` is callable from the outside).
+Add the validator call directly after the `self._sequencer = ...` line. The method takes the events list explicitly so test fixtures (which bypass `__init__` and pass events directly) don't need to mutate the sequencer.
 
 - [ ] **Step 5: Run focused tests to verify pass**
 
@@ -1135,51 +1154,85 @@ EOF
 
 ---
 
-## Task 8: YAML scenario update + final regression sweep + EXECUTED stamps
+## Task 8: `_build_events()` integration + final regression sweep + EXECUTED stamps
 
 **Files:**
-- Modify: `configs/config_curonian_h3_multires.yaml` — add `arrival` event between movement and mortality.
+- Modify: `salmon_ibm/simulation.py` — add `ArrivalEvent` to the default event sequence in `_build_events()` between MovementEvent and `update_exit_branch` / `fish_predation`.
 - Modify: `docs/superpowers/specs/2026-05-08-c5-arrival-event-design.md` (status header).
 - Modify: `docs/superpowers/plans/2026-05-08-c5-arrival-event.md` (this file).
 
-- [ ] **Step 1: Locate the existing event sequence in the YAML**
+**Important — pass-1 review correction:** The pre-C5 `configs/config_curonian_h3_multires.yaml` has NO `events:` section; default events come from `Simulation._build_events()` at `simulation.py:386-430`. v1 of this plan said to insert `arrival` into the YAML; v2 changes that to inserting `ArrivalEvent` directly into `_build_events()`. Single source of truth; auto-applies to all scenarios using the default sequence.
 
-Run: `grep -n "type:\|events:" configs/config_curonian_h3_multires.yaml | head -15`
-Expected: an `events:` list with entries like `- type: movement`, `- type: survival`, etc. Note the position of the existing movement event and the first mortality/survival event.
+- [ ] **Step 1: Locate the existing default event sequence in `_build_events()`**
 
-- [ ] **Step 2: Add `- type: arrival` between movement and mortality**
+Run: `grep -n "_build_events\|MovementEvent(\|update_exit_branch\|fish_predation" salmon_ibm/simulation.py | head -10`
 
-Edit `configs/config_curonian_h3_multires.yaml`. Find the event list (under `events:` or similar). Insert `- type: arrival` immediately after the last movement event and before the first mortality/survival event:
+Expected: `_build_events` defined around `simulation.py:386`; the default sequence is a list literal returned by the function. The order is:
 
-```yaml
-events:
-  # ... earlier events (introduction, etc.) ...
-  - type: movement
-  - type: arrival   # NEW (C5) — tags pool.arrived when agent reaches
-                    # upper-quartile of natal reach by dist_from_sea.
-  - type: survival  # or thermal_mortality / predation / etc.
-  # ... later events ...
+```
+push_temperature → behavior_selection → estuarine_overrides →
+update_cwr_counters → MovementEvent → update_exit_branch (C3.3) →
+fish_predation → update_timers → bioenergetics →
+assert_natal_tagged → logging
 ```
 
-If multiple Curonian H3 multires scenario configs exist (e.g.,
-sub-scenarios for different runs), apply the same insertion to each.
+- [ ] **Step 2: Insert `ArrivalEvent` between `update_exit_branch` and `fish_predation`**
 
-- [ ] **Step 3: Smoke-test the YAML loads cleanly**
+In `salmon_ibm/simulation.py`, in the default-sequence return list of `_build_events()` (around `simulation.py:395-430`), add `ArrivalEvent()` between the `update_exit_branch` CustomEvent and the `fish_predation` CustomEvent:
+
+```python
+        # Default: hardcoded salmon migration sequence
+        return [
+            CustomEvent(name="push_temperature", callback=self._event_push_temperature),
+            # ... existing events through update_exit_branch ...
+            CustomEvent(
+                name="update_exit_branch",
+                callback=self._event_update_exit_branch,
+            ),
+            # NEW (C5): tag pool.arrived when agent settles in upper
+            # quartile of natal reach by dist_from_sea. Runs after
+            # C3.3's update_exit_branch (which tags first delta entry)
+            # and before fish_predation (so this-step arrived agents
+            # are exempt from this-step lagoon mortality).
+            ArrivalEvent(),
+            # Fish predation fires AFTER movement so agents are killed
+            # at their final cell of this step (not their starting cell).
+            CustomEvent(
+                name="fish_predation", callback=self._event_fish_predation
+            ),
+            # ... existing events through logging ...
+        ]
+```
+
+The `ArrivalEvent` import is needed — verify the existing `from salmon_ibm.events_builtin import ...` line at the top of `simulation.py` (around line 69) and add `ArrivalEvent` to it. Run:
+
+```bash
+grep -n "from salmon_ibm.events_builtin import" salmon_ibm/simulation.py | head -3
+```
+
+Add `ArrivalEvent` to the existing import line.
+
+- [ ] **Step 3: Smoke-test the default sequence runs**
 
 Run:
 ```bash
 micromamba run -n shiny python -c "
 from salmon_ibm.config import load_config
+from salmon_ibm.simulation import Simulation
 cfg = load_config('configs/config_curonian_h3_multires.yaml')
-print('OK')
+sim = Simulation(cfg, n_agents=10, data_dir='data', rng_seed=42, output_path=None)
+print('events:', [type(e).__name__ for e in sim._sequencer.events])
+print('arrival_in_sequence:', any(
+    type(e).__name__ == 'ArrivalEvent' for e in sim._sequencer.events
+))
 "
 ```
-Expected: `OK`. If parse error, the YAML indentation/spacing is wrong.
+Expected: events list includes `ArrivalEvent`; `arrival_in_sequence: True`. If False, the import or list insertion is wrong.
 
 - [ ] **Step 4: Run full pytest suite**
 
 Run: `micromamba run -n shiny python -m pytest tests/ --tb=short`
-Expected: pre-implementation baseline (952) + 9 = **961 collected**, all C5 tests passing. Pre-existing flakes (Nemunas dormancy raises, perf-baseline) acceptable.
+Expected: pre-implementation baseline (952) + 14 = **~966 collected**, all C5 tests passing. Pre-existing flakes (Nemunas dormancy raises from C4, perf-baseline) acceptable.
 
 If `tests/test_movement_metric.py::test_full_step_time_within_one_percent_of_baseline` flakes, retry in isolation; pass under load. Pre-existing per project memory.
 
