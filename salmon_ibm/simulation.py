@@ -304,6 +304,9 @@ class Simulation:
         # is inconsistent (missing branches or BRANCH_FRACTIONS mismatch).
         # No-op for non-Baltic / legacy meshes.
         delta_routing.assert_branch_topology(self.mesh)
+        # C5: per-natal-reach top-quartile dist_from_sea threshold.
+        # Computed once at init; ArrivalEvent reads via landscape["sim"].
+        self._arrival_threshold_by_natal_rid = self._compute_arrival_thresholds()
         self.bio_params = loaded.wild
         if loaded.hatchery is not None:
             hatch_lut = self._build_activity_lut_for(
@@ -379,6 +382,65 @@ class Simulation:
 
         self.history = []
         self._sequencer = EventSequencer(self._build_events())
+
+    # ------------------------------------------------------------------
+    # C5: arrival-event helpers
+    # ------------------------------------------------------------------
+
+    def _compute_arrival_thresholds(self) -> dict[int, float]:
+        """C5: per-natal-reach 75th-percentile dist_from_sea threshold.
+
+        Computed once at sim init from mesh.dist_from_sea. Maps each
+        reach_id with at least one finite-dist water cell to its
+        top-quartile threshold; arrived = (tri_idx in this reach AND
+        dist_from_sea >= threshold).
+
+        Logs every reach skipped (no finite cells) at WARNING level so
+        the operator sees which reaches won't produce arrivals; agents
+        natal-tagged to a skipped reach silently never arrive otherwise.
+
+        Returns empty dict if mesh.dist_from_sea is missing (legacy
+        non-Baltic backend) — ArrivalEvent then no-ops at execute time.
+        """
+        import logging
+        logger = logging.getLogger("salmon_ibm.simulation")
+
+        dist = getattr(self.mesh, "dist_from_sea", None)
+        if dist is None:
+            return {}
+
+        rid_arr = self.mesh.reach_id
+        # water_mask is part of the C4 contract: any mesh that exposes
+        # dist_from_sea also exposes water_mask. Defensive fallback if
+        # a future mesh decouples them.
+        water = getattr(
+            self.mesh, "water_mask", np.ones(len(dist), dtype=bool),
+        )
+
+        thresholds: dict[int, float] = {}
+        for rid in np.unique(rid_arr):
+            rid_int = int(rid)
+            if rid_int < 0:
+                continue  # sentinel reach_id; not a real reach
+            mask = (rid_arr == rid_int) & water & np.isfinite(dist)
+            n_cells = int(mask.sum())
+            if n_cells == 0:
+                name = (
+                    self.mesh.reach_names[rid_int]
+                    if rid_int < len(getattr(self.mesh, "reach_names", []))
+                    else f"rid_{rid_int}"
+                )
+                logger.warning(
+                    "c5-arrival-skipped-reach: reach %s (rid=%d) has "
+                    "no finite-dist water cells; agents natal-tagged "
+                    "to it will never arrive. Investigate mesh build.",
+                    name, rid_int,
+                )
+                continue
+            thresholds[rid_int] = float(
+                np.percentile(dist[mask], 75)
+            )
+        return thresholds
 
     # ------------------------------------------------------------------
     # Event sequencer setup
