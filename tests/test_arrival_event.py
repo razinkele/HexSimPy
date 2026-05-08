@@ -271,3 +271,78 @@ def test_arrival_dead_agents_skip():
 
     ArrivalEvent().execute(pop, landscape, t=0, mask=pool.alive)
     assert pool.arrived[0] == False  # dead → skipped
+
+
+def test_arrival_integration_with_movement():
+    """C5 Test 6: agent in UPSTREAM behavior climbs the bidirectional
+    chain mesh; ArrivalEvent fires when agent reaches cell 9
+    (top-quartile threshold = 825). Sticky thereafter.
+
+    Fixture: 12-cell bidirectional chain; dist_from_sea = arange*100;
+    threshold = 825.0 (cells 9, 10, 11 qualify); agent starts at cell
+    0 with UPSTREAM behavior.
+    """
+    from salmon_ibm.events_builtin import ArrivalEvent
+    from salmon_ibm.movement import execute_movement
+    from salmon_ibm.agents import AgentPool, Behavior
+
+    n = 12
+    # Build _FakeMesh with bidirectional chain neighbors.
+    water_nbrs = np.full((n, 2), -1, dtype=np.int32)
+    water_nbr_count = np.zeros(n, dtype=np.int32)
+    for i in range(n):
+        slot = 0
+        if i + 1 < n:
+            water_nbrs[i, slot] = i + 1
+            slot += 1
+        if i - 1 >= 0:
+            water_nbrs[i, slot] = i - 1
+            slot += 1
+        water_nbr_count[i] = slot
+
+    class _FakeMesh:
+        pass
+    mesh = _FakeMesh()
+    mesh._water_nbrs = water_nbrs
+    mesh._water_nbr_count = water_nbr_count
+    mesh.n_triangles = n
+    mesh.reach_id = np.full(n, 1, dtype=np.int8)
+    mesh.dist_from_sea = np.arange(n, dtype=np.float32) * 100.0
+    mesh.water_mask = np.ones(n, dtype=bool)
+
+    # Use the real AgentPool, not the helper, so we get real behavior
+    # array dtype + tri_idx semantics.
+    pool = AgentPool(n=1, start_tri=0, rng_seed=42)
+    pool.behavior[0] = int(Behavior.UPSTREAM)
+    pool.natal_reach_id[0] = 1
+    pool.arrived[0] = False
+
+    pop = _make_arrival_population(pool)
+    sim = _make_arrival_sim({1: 825.0})
+
+    fields = {"dist_from_sea": mesh.dist_from_sea}
+    landscape = _make_arrival_landscape(mesh, sim, fields=fields)
+
+    # Run MovementEvent + ArrivalEvent for 12 timesteps. With
+    # n_micro=1 and slot-packing of valid neighbors, agent drifts
+    # cell 0 → 1 → 2 → ... toward cell 11 (one step per timestep
+    # for the gradient-deterministic kernel).
+    arrived_at_step = None
+    for step in range(15):
+        execute_movement(
+            pool, mesh, fields,
+            seed=step,
+            n_micro_steps_per_cell=np.ones(n, dtype=np.int32),
+        )
+        ArrivalEvent().execute(pop, landscape, t=step, mask=pool.alive)
+        if pool.arrived[0] and arrived_at_step is None:
+            arrived_at_step = step
+
+    # Agent reached top-quartile (cell 9) by step ~9; arrived=True.
+    assert pool.arrived[0] == True, (
+        f"Agent did not arrive after 15 steps; final cell = "
+        f"{int(pool.tri_idx[0])}"
+    )
+    assert arrived_at_step is not None and arrived_at_step <= 12, (
+        f"Agent arrived too late: step {arrived_at_step}; expected ≤ 12"
+    )
