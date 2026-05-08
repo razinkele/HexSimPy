@@ -58,6 +58,22 @@ def test_agent_pool_zero_agents():
     assert pool.t3h_mean().shape == (0,)
 
 
+def test_pool_n_arrived_property():
+    pool = AgentPool(n=10, start_tri=0)
+    assert pool.n_arrived == 0
+    pool.arrived[[1, 4, 7]] = True
+    assert pool.n_arrived == 3
+    pool.arrived[:] = True
+    assert pool.n_arrived == 10
+    pool.arrived[:] = False
+    assert pool.n_arrived == 0
+
+
+def test_pool_n_arrived_zero_agents():
+    pool = AgentPool(n=0, start_tri=np.array([], dtype=int))
+    assert pool.n_arrived == 0
+
+
 def test_push_temperature_and_t3h_mean():
     """push_temperature should shift history and t3h_mean should average correctly."""
     import pytest

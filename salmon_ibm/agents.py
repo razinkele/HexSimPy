@@ -115,6 +115,14 @@ class AgentPool:
         self.temp_history[alive_mask, :-1] = self.temp_history[alive_mask, 1:]
         self.temp_history[alive_mask, -1] = temps[alive_mask]
 
+    @property
+    def n_arrived(self) -> int:
+        # Read by app.py status line (`getattr(pool, "n_arrived", 0)`).
+        # Pre-C5 the UI fell through to the default 0 because no writer
+        # existed; C5 populates pool.arrived but the dashboard remained
+        # stuck at 0 until this property bridged the two.
+        return int(self.arrived.sum())
+
 
 class FishAgent:
     """OOP view into a single agent within an AgentPool. Zero-copy."""
