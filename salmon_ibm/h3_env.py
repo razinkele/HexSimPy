@@ -34,6 +34,12 @@ ERR_DIST_FROM_SEA_NAN_ON_WATER = "dist-from-sea-nan-on-water"
 ERR_DIST_FROM_SEA_ALL_ZERO = "dist-from-sea-all-zero"
 ERR_DIST_FROM_SEA_NO_SOURCES = "dist-from-sea-no-sources"
 
+# C5: arrival event err-ids. ArrivalEvent lives in events_builtin.py
+# but err-ids are centralised here next to the C4 dist_from_sea
+# constants for grep-able operational logging.
+ERR_C5_MISSING_ARRIVAL_EVENT = "c5-arrival-event-missing"
+ERR_C5_ARRIVAL_EVENT_MISORDERED = "c5-arrival-event-misordered"
+
 # Map landscape-NetCDF variable names → canonical movement-event keys.
 # Diverging from these names silently no-ops the advection event because
 # `_apply_current_advection_vec` reads `fields["u_current"]`/`["v_current"]`.

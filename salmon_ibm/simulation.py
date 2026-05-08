@@ -31,6 +31,7 @@ class Landscape(TypedDict, total=False):
     hatchery_dispatch: "HatcheryDispatch | None"  # NEW (C2)
     species_config: "BalticSpeciesConfig | None"  # NEW (C3.2)
     env: "H3Environment | Environment | HexSimEnvironment | None"  # NEW (C4)
+    sim: "Simulation"  # NEW (C5) — for ArrivalEvent's threshold lookup.
 
 
 # Module-level constants for resolution-aware movement (Task 0.5).
@@ -620,6 +621,7 @@ class Simulation:
                               # getattr, so a future refactor that renames
                               # self.env fails LOUD instead of silently
                               # leaving env=None.
+            "sim": self,  # NEW (C5) — for ArrivalEvent threshold lookup.
         }
         self._sequencer.step(self.population, landscape, t)
         self.current_t += 1
