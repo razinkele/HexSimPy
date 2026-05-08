@@ -234,3 +234,40 @@ def test_arrival_sentinel_natal_never_arrives():
 
     ArrivalEvent().execute(pop, landscape, t=0, mask=pool.alive)
     assert pool.arrived[0] == False  # sentinel → inf threshold → never arrives
+
+
+def test_arrival_sticky():
+    """C5 Test 3: agent arrives at step 1; moves below threshold at
+    step 2; arrived stays True (sticky once set)."""
+    from salmon_ibm.events_builtin import ArrivalEvent
+
+    mesh = _arrival_test_mesh()
+    pool = _make_arrival_pool(1, natal_rid=1, tri_idx=10)  # above threshold
+    pop = _make_arrival_population(pool)
+    sim = _make_arrival_sim({1: 825.0})
+    landscape = _make_arrival_landscape(mesh, sim)
+
+    # Step 1: arrival fires.
+    ArrivalEvent().execute(pop, landscape, t=0, mask=pool.alive)
+    assert pool.arrived[0] == True
+
+    # Step 2: simulate movement carrying agent back below threshold.
+    pool.tri_idx[0] = 5  # cell 5, dist=500 < 825
+    ArrivalEvent().execute(pop, landscape, t=1, mask=pool.alive)
+    # Sticky: still True despite dropping below threshold.
+    assert pool.arrived[0] == True
+
+
+def test_arrival_dead_agents_skip():
+    """C5 Test 4: dead agent at upper-natal cell + above threshold
+    → arrived stays False (mortality precedence)."""
+    from salmon_ibm.events_builtin import ArrivalEvent
+
+    mesh = _arrival_test_mesh()
+    pool = _make_arrival_pool(1, natal_rid=1, tri_idx=10, alive=False)
+    pop = _make_arrival_population(pool)
+    sim = _make_arrival_sim({1: 825.0})
+    landscape = _make_arrival_landscape(mesh, sim)
+
+    ArrivalEvent().execute(pop, landscape, t=0, mask=pool.alive)
+    assert pool.arrived[0] == False  # dead → skipped
