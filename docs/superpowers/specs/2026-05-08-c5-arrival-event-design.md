@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-08
 **Owner:** @razinkele
-**Status:** 📋 DRAFT v2 — pass-1 corrections (int8 overflow cast, landscape["sim"] fail-loud consistency, double-negative guard rewritten, missing-arrival-event init-time warning, event-ordering validator, NaN-reach logging, water_mask explicit, Test 6 fully specified, PatchIntroduction contract, sticky-flag enforcement, default-sequence clarification).
+**Status:** ✅ CONVERGED v2 — 2-pass review-loop complete (pass-1 surfaced 12 issues across CRITICAL/BLOCKING/HIGH/MEDIUM/NIT; pass-2 verified all closures + flagged stale test-count summaries which are now corrected). Implementation-ready. Awaiting writing-plans.
 
 C5 ships an `ArrivalEvent` that tags an agent as **arrived** when it
 settles in the upstream portion of its natal reach. Until C5,
@@ -114,10 +114,12 @@ wild-vs-hatchery contrast metric.
 - New event added to default scenario configs that exercise the
   Curonian H3 multires landscape (`config_curonian_h3_multires.yaml`
   and equivalents) so the deployed app immediately benefits.
-- 6 new tests in `tests/test_arrival_event.py` (NEW): synthetic
-  fixture covering basic arrival, threshold-boundary, sticky-once,
-  per-origin-stratification, dead-agents-skip, and integration
-  with `MovementEvent` execution order.
+- 9 new tests in `tests/test_arrival_event.py` (NEW): basic
+  arrival (1), threshold boundary (2), sticky (3), dead-agents-skip
+  (4), stray-hatchery (5), pre-tagged sentinel int8-overflow guard
+  (5b), integration with MovementEvent (6), sticky-flag-overwrite
+  AST enforcement (7), missing-event init-time warning (8),
+  misorder warning (9).
 - Live-test contract (post-deploy): default 50-agent / 480h run on
   laguna produces ≥1 arrival via the UI counter. With the observed
   4-8% alive-at-upper-river rate, expected: 1-3 arrivals per 50
@@ -444,7 +446,7 @@ unintentionally.
 |---|---|---|
 | `salmon_ibm/simulation.py` | Modify | Add `_arrival_threshold_by_natal_rid` attribute + `_compute_arrival_thresholds` method, called from `__init__` after C4 dist_from_sea load. Add `"sim": self` to the landscape dict in `step()`. Add `sim` to `Landscape` TypedDict. |
 | `salmon_ibm/events_builtin.py` | Modify | Add `ArrivalEvent` class registered via `@register_event("arrival")`. |
-| `tests/test_arrival_event.py` | Create | 8 tests: 6 unit + 1 integration + 1 sticky-overwrite enforcement + 1 missing-event-warning. |
+| `tests/test_arrival_event.py` | Create | 9 tests: 5 unit (basic, threshold-boundary, sticky, dead-skip, stray) + 1 sentinel int8-overflow guard (5b) + 1 movement-integration (6) + 1 sticky-overwrite AST enforcement (7) + 1 missing-event warning (8) + 1 misorder warning (9). |
 | `configs/config_curonian_h3_multires.yaml` | Modify | Add `arrival` event to the event sequence (between movement and mortality). |
 | `salmon_ibm/h3_env.py` | Modify | Add `ERR_C5_MISSING_ARRIVAL_EVENT` and `ERR_C5_ARRIVAL_EVENT_MISORDERED` err-id constants alongside the existing C4 err-ids. |
 
