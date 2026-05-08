@@ -441,3 +441,51 @@ def test_arrival_event_misorder_warning(caplog):
         f"Expected {ERR_C5_ARRIVAL_EVENT_MISORDERED} for arrival-"
         f"after-mortality; got {[r.getMessage() for r in caplog.records]!r}"
     )
+
+
+def test_no_event_clears_arrived_to_false():
+    """C5 Test 7: AST + grep enforcement that no event in
+    EVENT_REGISTRY writes False to pool.arrived. Catches future
+    regressions where a contributor adds an event that clears
+    arrived state, breaking the sticky contract.
+    """
+    import ast
+    import inspect
+
+    from salmon_ibm import events_builtin
+
+    source = inspect.getsource(events_builtin)
+    tree = ast.parse(source)
+
+    violations: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        # Check each Assign target for `pool.arrived[...]` or
+        # `pop.arrived[...]` (or any *.arrived[...]).
+        for target in node.targets:
+            if not isinstance(target, ast.Subscript):
+                continue
+            target_obj = target.value
+            if not isinstance(target_obj, ast.Attribute):
+                continue
+            if target_obj.attr != "arrived":
+                continue
+            # Found a `<obj>.arrived[<slice>] = <rhs>` assignment.
+            # Check the RHS for False or 0 literal.
+            rhs = node.value
+            is_false_literal = (
+                (isinstance(rhs, ast.Constant) and rhs.value is False)
+                or (isinstance(rhs, ast.Constant) and rhs.value == 0)
+                or (isinstance(rhs, ast.NameConstant) and rhs.value is False)
+            )
+            if is_false_literal:
+                violations.append(
+                    f"events_builtin.py line {node.lineno}: "
+                    f"clears `arrived` to False — violates sticky "
+                    f"contract per C5 spec."
+                )
+
+    assert not violations, (
+        "Sticky-flag overwrite violations found:\n" + "\n".join(violations)
+    )
