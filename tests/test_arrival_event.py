@@ -346,3 +346,98 @@ def test_arrival_integration_with_movement():
     assert arrived_at_step is not None and arrived_at_step <= 12, (
         f"Agent arrived too late: step {arrived_at_step}; expected ≤ 12"
     )
+
+
+def test_missing_arrival_event_warning(caplog, tmp_path):
+    """C5 Test 8: scenario with movement but no arrival event +
+    mesh supports arrival (populated thresholds) → init-time
+    WARNING with err-id ERR_C5_MISSING_ARRIVAL_EVENT."""
+    from salmon_ibm.events_builtin import MovementEvent
+    from salmon_ibm.simulation import Simulation
+    from salmon_ibm.h3_env import ERR_C5_MISSING_ARRIVAL_EVENT
+
+    # Use bypass-init pattern to test the validator in isolation.
+    # Pass events list explicitly per v2 fix (validator takes events
+    # as parameter, doesn't read from self.events which doesn't exist).
+    sim = Simulation.__new__(Simulation)
+    sim._arrival_threshold_by_natal_rid = {1: 825.0}
+    # MovementEvent inherits Event.name (no default) — must pass explicitly.
+    events = [MovementEvent(name="movement")]  # movement present, arrival absent
+
+    caplog.set_level(logging.WARNING, logger="salmon_ibm.simulation")
+    sim._validate_arrival_event_in_sequence(events)
+    matching = [
+        r for r in caplog.records
+        if ERR_C5_MISSING_ARRIVAL_EVENT in r.getMessage()
+    ]
+    assert matching, (
+        f"Expected {ERR_C5_MISSING_ARRIVAL_EVENT} warning; got "
+        f"{[r.getMessage() for r in caplog.records]!r}"
+    )
+
+
+def test_arrival_event_present_no_warning(caplog):
+    """C5 Test 8 sanity: scenario with both movement AND arrival
+    events → NO missing-event warning."""
+    from salmon_ibm.events_builtin import MovementEvent, ArrivalEvent
+    from salmon_ibm.simulation import Simulation
+    from salmon_ibm.h3_env import ERR_C5_MISSING_ARRIVAL_EVENT
+
+    sim = Simulation.__new__(Simulation)
+    sim._arrival_threshold_by_natal_rid = {1: 825.0}
+    events = [MovementEvent(name="movement"), ArrivalEvent()]
+
+    caplog.set_level(logging.WARNING, logger="salmon_ibm.simulation")
+    sim._validate_arrival_event_in_sequence(events)
+    matching = [
+        r for r in caplog.records
+        if ERR_C5_MISSING_ARRIVAL_EVENT in r.getMessage()
+    ]
+    assert not matching, (
+        f"Did NOT expect {ERR_C5_MISSING_ARRIVAL_EVENT} warning; got "
+        f"{[r.getMessage() for r in caplog.records]!r}"
+    )
+
+
+def test_arrival_event_misorder_warning(caplog):
+    """C5 Test 9: scenario with arrival BEFORE movement OR after a
+    mortality event → init-time WARNING with err-id
+    ERR_C5_ARRIVAL_EVENT_MISORDERED."""
+    from salmon_ibm.events_builtin import (
+        MovementEvent, ArrivalEvent, SurvivalEvent,
+    )
+    from salmon_ibm.simulation import Simulation
+    from salmon_ibm.h3_env import ERR_C5_ARRIVAL_EVENT_MISORDERED
+
+    sim = Simulation.__new__(Simulation)
+    sim._arrival_threshold_by_natal_rid = {1: 825.0}
+
+    # Misorder case 1: arrival BEFORE movement.
+    events_a = [ArrivalEvent(), MovementEvent(name="movement")]
+    caplog.set_level(logging.WARNING, logger="salmon_ibm.simulation")
+    sim._validate_arrival_event_in_sequence(events_a)
+    matching = [
+        r for r in caplog.records
+        if ERR_C5_ARRIVAL_EVENT_MISORDERED in r.getMessage()
+    ]
+    assert matching, (
+        f"Expected {ERR_C5_ARRIVAL_EVENT_MISORDERED} for arrival-"
+        f"before-movement; got {[r.getMessage() for r in caplog.records]!r}"
+    )
+
+    # Misorder case 2: arrival AFTER survival/mortality event.
+    caplog.clear()
+    events_b = [
+        MovementEvent(name="movement"),
+        SurvivalEvent(name="survival"),
+        ArrivalEvent(),
+    ]
+    sim._validate_arrival_event_in_sequence(events_b)
+    matching = [
+        r for r in caplog.records
+        if ERR_C5_ARRIVAL_EVENT_MISORDERED in r.getMessage()
+    ]
+    assert matching, (
+        f"Expected {ERR_C5_ARRIVAL_EVENT_MISORDERED} for arrival-"
+        f"after-mortality; got {[r.getMessage() for r in caplog.records]!r}"
+    )

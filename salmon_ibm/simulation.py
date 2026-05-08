@@ -382,6 +382,10 @@ class Simulation:
 
         self.history = []
         self._sequencer = EventSequencer(self._build_events())
+        # C5: validate arrival event presence + ordering in the event
+        # sequence. Read events from the sequencer (NOT self.events —
+        # that attribute does not exist in this codebase).
+        self._validate_arrival_event_in_sequence(self._sequencer.events)
 
     # ------------------------------------------------------------------
     # C5: arrival-event helpers
@@ -441,6 +445,97 @@ class Simulation:
                 np.percentile(dist[mask], 75)
             )
         return thresholds
+
+    def _validate_arrival_event_in_sequence(
+        self, events: "list[Event]"
+    ) -> None:
+        """C5: warn if the event sequence is missing or misorders
+        ArrivalEvent on a mesh that supports arrival tagging.
+
+        Takes the event list as an explicit parameter (NOT
+        `self.events` — that attribute does not exist in this
+        codebase; events live on `self._sequencer.events`). The
+        caller passes `self._sequencer.events` from __init__.
+
+        Two checks:
+        1. Missing-arrival-event: mesh supports arrival (thresholds
+           dict non-empty) AND sequence has MovementEvent but NOT
+           ArrivalEvent → warn. Catches the silent-failure class C5
+           was built to eliminate.
+        2. Misorder: ArrivalEvent appears BEFORE the last
+           MovementEvent OR AFTER any *_mortality / *Mortality /
+           Survival / Predation event → warn. Misorder is technically
+           runnable but biologically suspect.
+        """
+        import logging
+        from salmon_ibm.events_builtin import (
+            MovementEvent, ArrivalEvent, SurvivalEvent,
+        )
+        from salmon_ibm.h3_env import (
+            ERR_C5_MISSING_ARRIVAL_EVENT,
+            ERR_C5_ARRIVAL_EVENT_MISORDERED,
+        )
+
+        logger = logging.getLogger("salmon_ibm.simulation")
+        thresholds = getattr(
+            self, "_arrival_threshold_by_natal_rid", {},
+        )
+        if not thresholds:
+            return  # legacy non-Baltic mesh; no arrival tagging possible
+
+        movement_indices = [
+            i for i, e in enumerate(events) if isinstance(e, MovementEvent)
+        ]
+        arrival_indices = [
+            i for i, e in enumerate(events) if isinstance(e, ArrivalEvent)
+        ]
+        mortality_indices = [
+            i for i, e in enumerate(events)
+            if isinstance(e, SurvivalEvent)
+            or "mortality" in type(e).__name__.lower()
+            or "predation" in type(e).__name__.lower()
+        ]
+
+        # Check 1: missing-arrival-event.
+        if movement_indices and not arrival_indices:
+            logger.warning(
+                "%s: scenario has movement events on a mesh that "
+                "supports arrival tagging (dist_from_sea present, "
+                "%d natal reaches) but no ArrivalEvent in the event "
+                "sequence — pool.arrived will stay False for the "
+                "entire run. Add `- type: arrival` to the YAML event "
+                "list (typically between movement and mortality "
+                "events) OR include ArrivalEvent in "
+                "Simulation._build_events().",
+                ERR_C5_MISSING_ARRIVAL_EVENT,
+                len(thresholds),
+            )
+
+        # Check 2: misorder.
+        if arrival_indices and movement_indices:
+            last_move_idx = max(movement_indices)
+            first_arrival_idx = min(arrival_indices)
+            if first_arrival_idx < last_move_idx:
+                logger.warning(
+                    "%s: ArrivalEvent at index %d appears BEFORE the "
+                    "last MovementEvent at index %d. Arrival should "
+                    "run after movement so it sees the post-step cell.",
+                    ERR_C5_ARRIVAL_EVENT_MISORDERED,
+                    first_arrival_idx, last_move_idx,
+                )
+        if arrival_indices and mortality_indices:
+            first_arrival_idx = min(arrival_indices)
+            first_mortality_idx = min(mortality_indices)
+            if first_arrival_idx > first_mortality_idx:
+                logger.warning(
+                    "%s: ArrivalEvent at index %d appears AFTER a "
+                    "mortality/survival event at index %d. Arrival "
+                    "should run before mortality so this-step "
+                    "settled agents are exempt from this-step "
+                    "free-swimming-in-lagoon mortality.",
+                    ERR_C5_ARRIVAL_EVENT_MISORDERED,
+                    first_arrival_idx, first_mortality_idx,
+                )
 
     # ------------------------------------------------------------------
     # Event sequencer setup
