@@ -539,3 +539,84 @@ class SummaryReportEvent(Event):
         if "summary_reports" not in landscape:
             landscape["summary_reports"] = []
         landscape["summary_reports"].append(record)
+
+
+@register_event("arrival")
+@dataclass
+class ArrivalEvent(Event):
+    """C5: tag agents as arrived when they reach the upstream
+    portion of their natal reach.
+
+    Vectorised. Runs after MovementEvent (sees post-step cell).
+    Sticky: pool.arrived is set True once and never reset.
+
+    Reads `landscape["sim"]` directly (no getattr default) per C4's
+    fail-loud convention. If the scenario landscape doesn't have a
+    "sim" key, KeyError propagates — surfaces the misconfiguration
+    rather than silently no-opping.
+
+    No-ops gracefully when:
+    - sim has no _arrival_threshold_by_natal_rid attribute (pre-C5
+      Simulation), via getattr fallback.
+    - thresholds dict is empty (legacy non-Baltic mesh; sim init
+      already returned {} from _compute_arrival_thresholds).
+    - mesh.dist_from_sea is None (legacy mesh).
+    """
+
+    name: str = "arrival"
+
+    def execute(self, population, landscape, t, mask):
+        pool = population.pool
+        # Direct subscript per fail-loud convention — KeyError if
+        # "sim" missing tells the operator their landscape dict
+        # construction is wrong.
+        sim = landscape["sim"]
+        thresholds = getattr(
+            sim, "_arrival_threshold_by_natal_rid", {},
+        )
+        if not thresholds:
+            return  # pre-C5 sim or legacy non-Baltic mesh — no-op
+
+        mesh = landscape["mesh"]
+        dist = getattr(mesh, "dist_from_sea", None)
+        if dist is None:
+            return  # legacy mesh — no-op (defensive)
+
+        # CAST natal_reach_id from int8 to int32 BEFORE any indexing.
+        # Pool.natal_reach_id is dtype=np.int8 (agents.py:78), which
+        # overflows at 128 → -128. The threshold lookup below indexes
+        # thr_arr; without the cast, an int8-wrapped negative value
+        # would either incorrectly match the sentinel guard or wrap
+        # to an out-of-bound index.
+        natal_rid = pool.natal_reach_id.astype(np.int32)
+
+        # Vectorised mask: alive AND not arrived AND on mesh.
+        active = pool.alive & ~pool.arrived
+        on_mesh = pool.tri_idx >= 0
+        safe_tri = np.where(on_mesh, pool.tri_idx, 0)
+        cur_reach = mesh.reach_id[safe_tri].astype(np.int32)
+        in_natal = cur_reach == natal_rid
+
+        # Per-agent threshold lookup. Build a flat threshold array
+        # indexed by reach_id; out-of-range agents get inf.
+        n_reaches = max(thresholds.keys()) + 1
+        thr_arr = np.full(n_reaches, np.inf, dtype=np.float32)
+        for rid, val in thresholds.items():
+            thr_arr[rid] = val
+
+        # Atomic in-range lookup: clamp out-of-range natal_rid to 0
+        # for safe indexing, then overwrite with inf via np.where.
+        # Combining clamp + overwrite into one np.where avoids the
+        # two-step pattern that a future refactor could break.
+        in_range = (natal_rid >= 0) & (natal_rid < n_reaches)
+        natal_safe = np.where(in_range, natal_rid, 0)
+        per_agent_threshold = np.where(
+            in_range, thr_arr[natal_safe], np.inf,
+        )
+
+        agent_dist = dist[safe_tri]
+        above_threshold = agent_dist >= per_agent_threshold
+
+        arrived_now = active & on_mesh & in_natal & above_threshold
+        if arrived_now.any():
+            pool.arrived[arrived_now] = True
