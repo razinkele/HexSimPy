@@ -20,6 +20,9 @@
 #      NO `--delete`, so HexSim workspace dirs and `data/` survive.
 #      `tests/`, `docs/superpowers/`, and bundled HexSim sample
 #      workspaces are excluded as runtime-irrelevant.
+#   3.5 SCP gitignored landscape NCs separately (regenerable build
+#      artifacts that `git archive` won't ship).  Added in v1.7.8 after
+#      a C4 deploy gap required manual `scp` to ship the rebuilt NC.
 #   4. `touch restart.txt` to trigger Shiny Server's hot-reload.
 #
 # Safety notes:
@@ -127,6 +130,31 @@ echo "==> Pushing $N_FILES tracked files to $HOST:$DEST/"
 git archive HEAD --format=tar | \
     ssh -o BatchMode=yes "$HOST" \
         "tar -x --wildcards -C $(printf '%q' "$DEST")$EXCLUDES_QUOTED"
+
+# --- 3.5 Ship gitignored landscape NCs -------------------------------
+# `git archive HEAD` only includes TRACKED files, so gitignored
+# regenerable build artifacts (the H3 multires landscape NCs) are
+# missing from the archive.  Ship them via separate SCP.  Each NC
+# is shipped only if it exists locally; missing NCs are warned but
+# not fatal (the server may already have a working copy).
+#
+# Encountered as a deploy gap during v1.7.8 (C4 movement gradient):
+# the rebuilt NC contained the new dist_from_sea variable required
+# by the dormancy guard, but the deploy didn't ship it.  Manual
+# `scp` was needed to fix the live deploy.  This step automates it.
+NC_FILES=(
+    "data/curonian_h3_multires_landscape.nc"
+    "data/nemunas_h3_landscape.nc"
+)
+for nc in "${NC_FILES[@]}"; do
+    if [[ -f "$nc" ]]; then
+        nc_size=$(du -h "$nc" | cut -f1)
+        echo "==> SCP $nc ($nc_size) -> $HOST:$DEST/$nc"
+        scp -o BatchMode=yes "$nc" "$HOST:$DEST/$nc"
+    else
+        echo "==> SKIP $nc (not present locally; server keeps existing copy if any)"
+    fi
+done
 
 # --- 4. Hot-reload + audit trail -------------------------------------
 echo "==> touch $DEST/restart.txt (Shiny Server hot-reload)"
