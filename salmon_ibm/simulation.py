@@ -68,7 +68,7 @@ from salmon_ibm.estuary import (
     DO_LETHAL,
 )
 from salmon_ibm.events import EventSequencer
-from salmon_ibm.events_builtin import MovementEvent, CustomEvent
+from salmon_ibm.events_builtin import MovementEvent, CustomEvent, ArrivalEvent
 from salmon_ibm.mesh import TriMesh
 from salmon_ibm.output import OutputLogger
 
@@ -572,6 +572,12 @@ class Simulation:
                 name="update_exit_branch",
                 callback=self._event_update_exit_branch,
             ),
+            # NEW (C5): tag pool.arrived when agent settles in upper
+            # quartile of natal reach by dist_from_sea. Runs after
+            # C3.3's update_exit_branch (which tags first delta entry)
+            # and before fish_predation (so this-step arrived agents
+            # are exempt from this-step lagoon mortality).
+            ArrivalEvent(),
             # Fish predation fires AFTER movement so agents are killed
             # at their final cell of this step (not their starting cell).
             # No-ops on backends without reach_id (TriMesh, HexMesh).

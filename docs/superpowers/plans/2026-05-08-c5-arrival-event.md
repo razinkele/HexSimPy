@@ -8,6 +8,8 @@
 
 **Tech Stack:** Python 3.10+, conda env `shiny`, NumPy, pytest. Spec at `docs/superpowers/specs/2026-05-08-c5-arrival-event-design.md` (v2 CONVERGED).
 
+**Status:** ✅ EXECUTED on 2026-05-08. Final test count: 925 passed / 33 skipped / 1 xfailed (baseline + 14 new C5 tests). Pre-existing failures (perf-baseline flake, nemunas-NC errors) acceptable per C4 EXECUTED note. End-to-end smoke confirms `pool.arrived` now derives from real biology (no longer stuck at 0). Branch `c5-arrival-event` ready for PR + v1.7.9 tag.
+
 **Plan version:** ✅ v2 final — **2-pass plan-review-loop CONVERGED**. Pass-1 found 1 CRITICAL (validator referenced non-existent `self.events`) + 3 BLOCKING (line numbers + YAML structure) + 2 minor. Pass-2 verified all closures and confirmed 3 code-correctness questions (`self._sequencer.events`, `_build_events()` insertion point, ArrivalEvent import) — all correct against the actual codebase. Plus one documentation-consistency fix (stamp template said "+9 = 961"; corrected to "+14 = ~966"). Implementation-ready.
 
 **Pre-flight:** Confirm baseline before starting:

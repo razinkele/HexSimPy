@@ -2,7 +2,9 @@
 
 **Date:** 2026-05-08
 **Owner:** @razinkele
-**Status:** ✅ CONVERGED v2 — 2-pass review-loop complete (pass-1 surfaced 12 issues across CRITICAL/BLOCKING/HIGH/MEDIUM/NIT; pass-2 verified all closures + flagged stale test-count summaries which are now corrected). Implementation-ready. Awaiting writing-plans.
+**Status:** ✅ EXECUTED on 2026-05-08 via subagent-driven-development; full pytest 925 passed / 33 skipped / 1 xfailed / 1 pre-existing perf-baseline flake / 10 pre-existing nemunas-NC errors (out-of-scope per C4 spec). Baseline + 14 new C5 tests in `tests/test_arrival_event.py`. Branch `c5-arrival-event` ready for PR + v1.7.9 tag.
+
+End-to-end smoke (rng_seed=42, 50 agents, 480h): `alive=46, arrived=46, exit_branch_tagged=4`. Arrival metric now derives from real biology (no longer stuck at 0). Per-natal-reach 75th-percentile threshold tags every agent that sits in the upper quartile of its natal reach by `dist_from_sea`; in this seed most agents stay upstream rather than migrating, so they are trivially in the upper-quartile band — flagged as a follow-up tuning observation, not a blocker.
 
 C5 ships an `ArrivalEvent` that tags an agent as **arrived** when it
 settles in the upstream portion of its natal reach. Until C5,
