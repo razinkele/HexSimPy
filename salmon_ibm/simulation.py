@@ -47,7 +47,7 @@ MAX_N_MICRO_STEPS = 256  # ceiling for budget — at res 11 (~28 m) this
 
 from salmon_ibm import delta_routing
 from salmon_ibm.agents import AgentPool, Behavior
-from salmon_ibm.baltic_params import BalticSpeciesConfig, HatcheryDispatch
+from salmon_ibm.baltic_params import BalticBioParams, BalticSpeciesConfig, HatcheryDispatch
 from salmon_ibm.behavior import pick_behaviors, apply_overrides
 from salmon_ibm.population import Population
 from salmon_ibm.bioenergetics import origin_aware_activity_mult, update_energy
@@ -69,6 +69,7 @@ from salmon_ibm.estuary import (
 )
 from salmon_ibm.events import EventSequencer
 from salmon_ibm.events_builtin import MovementEvent, CustomEvent, ArrivalEvent
+from salmon_ibm.h3_env import ERR_C5_1_AT_SEA_REACHES_MISSING
 from salmon_ibm.mesh import TriMesh
 from salmon_ibm.output import OutputLogger
 
@@ -304,6 +305,68 @@ class Simulation:
         # is inconsistent (missing branches or BRANCH_FRACTIONS mismatch).
         # No-op for non-Baltic / legacy meshes.
         delta_routing.assert_branch_topology(self.mesh)
+        # C5.1: positive Baltic-detection independent of any single
+        # reach-name lookup. Mirrors delta_routing's branch-detection
+        # pattern; closes the single-point-of-failure pattern that
+        # produced the v1.7.10 getattr(pool, "n_arrived", 0) bug.
+        #
+        # FROZEN AT INIT: do NOT recompute on rebuild_luts(). The
+        # cached _species_config (line 302) is intentionally re-read
+        # by rebuild_luts() without re-evaluating _is_baltic; if a
+        # future refactor mutates _species_config.hatchery post-init,
+        # _is_baltic becomes stale. Currently no codepath does this,
+        # but pass-1 type-design review (H-2) flagged the risk.
+        # The wild-OR-hatchery disjunction handles configs where
+        # the Baltic species_config arrives via the hatchery side
+        # only (e.g., Baltic stocking experiment into non-Baltic
+        # native population).
+        self._is_baltic = (
+            (isinstance(self._species_config.wild, BalticBioParams)
+             or isinstance(
+                 getattr(self._species_config, "hatchery", None),
+                 BalticBioParams,
+             ))
+            and any(
+                rn in self.mesh.reach_names
+                for rn in delta_routing.BRANCH_FRACTIONS.keys()
+            )
+        )
+
+        # C5.1: at-sea reach IDs. ONLY constructed when Baltic-detected.
+        # Total miss → raise (fail loud at sim init); partial miss
+        # (one of two names typo'd) → warn + continue with narrower set.
+        if self._is_baltic:
+            rids = set()
+            missing_names = []
+            for name in ("BalticCoast", "OpenBaltic"):
+                try:
+                    rids.add(int(self.mesh.reach_names.index(name)))
+                except ValueError:
+                    missing_names.append(name)
+            if missing_names and rids:
+                logger.warning(
+                    "c5.1-at-sea-reach-partial-miss: Baltic-detected "
+                    "landscape resolved %s but reach name(s) %s were "
+                    "not found in mesh.reach_names. Round-trip arrival "
+                    "proceeds on the partial set; verify NC build if "
+                    "this is unexpected.",
+                    sorted(rids), missing_names,
+                )
+            if not rids:
+                raise RuntimeError(
+                    f"{ERR_C5_1_AT_SEA_REACHES_MISSING}: Baltic-detected "
+                    f"landscape but neither 'BalticCoast' nor 'OpenBaltic' "
+                    f"is in mesh.reach_names={self.mesh.reach_names}. "
+                    f"Round-trip arrival cannot be computed. Likely cause: "
+                    f"the loaded NC was built before C5.1 added at-sea "
+                    f"reach assignment, OR a stale cached NC is shadowing "
+                    f"a freshly-rebuilt copy. Rebuild the H3 multires "
+                    f"landscape with the current build script and verify "
+                    f"the loaded NC path."
+                )
+            self._at_sea_rid_set = frozenset(rids)
+        else:
+            self._at_sea_rid_set = frozenset()
         # C5: per-natal-reach top-quartile dist_from_sea threshold.
         # Computed once at init; ArrivalEvent reads via landscape["sim"].
         self._arrival_threshold_by_natal_rid = self._compute_arrival_thresholds()

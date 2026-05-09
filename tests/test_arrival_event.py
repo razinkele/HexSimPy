@@ -489,3 +489,87 @@ def test_no_event_clears_arrived_to_false():
     assert not violations, (
         "Sticky-flag overwrite violations found:\n" + "\n".join(violations)
     )
+
+
+# ---------------------------------------------------------------------------
+# C5.1 — _is_baltic discriminator + _at_sea_rid_set resolution (Task 2/9)
+# ---------------------------------------------------------------------------
+
+from salmon_ibm.h3_env import ERR_C5_1_AT_SEA_REACHES_MISSING
+
+
+def test_is_baltic_true_on_curonian_h3_multires(tmp_path):
+    """Default Curonian H3 multires config triggers _is_baltic=True."""
+    from salmon_ibm.config import load_config
+    from salmon_ibm.simulation import Simulation
+    cfg = load_config("configs/config_curonian_h3_multires.yaml")
+    sim = Simulation(cfg, n_agents=5, data_dir="data", rng_seed=42,
+                     output_path=None)
+    assert sim._is_baltic is True
+    assert len(sim._at_sea_rid_set) >= 1
+    assert isinstance(sim._at_sea_rid_set, frozenset)
+
+
+def test_is_baltic_false_on_columbia(tmp_path):
+    """Columbia config has non-Baltic BioParams + no Baltic branches."""
+    from salmon_ibm.config import load_config
+    from salmon_ibm.simulation import Simulation
+    cfg = load_config("config_columbia.yaml")
+    sim = Simulation(cfg, n_agents=5, rng_seed=42, output_path=None)
+    assert sim._is_baltic is False
+    assert sim._at_sea_rid_set == frozenset()
+
+
+def test_at_sea_reaches_missing_raises(monkeypatch):
+    """A Baltic-detected mesh whose reach_names is missing both
+    'BalticCoast' and 'OpenBaltic' must raise RuntimeError at sim init."""
+    from salmon_ibm.config import load_config
+    from salmon_ibm.simulation import Simulation
+    cfg = load_config("configs/config_curonian_h3_multires.yaml")
+    import salmon_ibm.h3_multires as h3m
+    orig_init = h3m.H3MultiResMesh.__init__
+
+    def patched_init(self, *args, **kwargs):
+        orig_init(self, *args, **kwargs)
+        self.reach_names = [
+            r for r in self.reach_names
+            if r not in ("BalticCoast", "OpenBaltic")
+        ]
+
+    monkeypatch.setattr(h3m.H3MultiResMesh, "__init__", patched_init)
+    with pytest.raises(RuntimeError, match=ERR_C5_1_AT_SEA_REACHES_MISSING):
+        Simulation(cfg, n_agents=5, data_dir="data", rng_seed=42,
+                   output_path=None)
+
+
+def test_at_sea_partial_miss_warns(monkeypatch, caplog):
+    """Baltic-detected mesh with only ONE of {BalticCoast, OpenBaltic}
+    in reach_names → warning logged, sim init succeeds with narrower
+    _at_sea_rid_set."""
+    from salmon_ibm.config import load_config
+    from salmon_ibm.simulation import Simulation
+    cfg = load_config("configs/config_curonian_h3_multires.yaml")
+    import salmon_ibm.h3_multires as h3m
+    orig_init = h3m.H3MultiResMesh.__init__
+
+    def patched_init(self, *args, **kwargs):
+        orig_init(self, *args, **kwargs)
+        self.reach_names = [
+            r for r in self.reach_names if r != "OpenBaltic"
+        ]
+
+    monkeypatch.setattr(h3m.H3MultiResMesh, "__init__", patched_init)
+    with caplog.at_level(logging.WARNING, logger="salmon_ibm.simulation"):
+        sim = Simulation(cfg, n_agents=5, data_dir="data", rng_seed=42,
+                         output_path=None)
+    assert "OpenBaltic" not in sim.mesh.reach_names, (
+        "Monkeypatch on H3MultiResMesh.__init__ did not take effect "
+        "— test is pass-only-if-patched. Verify Simulation.__init__ "
+        "still constructs mesh internally via H3MultiResMesh()."
+    )
+    assert sim._is_baltic is True
+    assert len(sim._at_sea_rid_set) == 1  # only BalticCoast resolved
+    assert any(
+        "c5.1-at-sea-reach-partial-miss" in r.message
+        for r in caplog.records
+    )
