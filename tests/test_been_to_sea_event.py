@@ -299,3 +299,38 @@ def test_arrival_event_sticky_with_been_to_sea_guard():
     pop = SimpleNamespace(pool=pool)
     ArrivalEvent().execute(pop, landscape, t=0, mask=None)
     assert pool.arrived[0] == True
+
+
+def test_been_to_sea_reads_post_teleport_cell():
+    """Ordering invariant: BeenToSeaEvent runs AFTER update_exit_branch
+    (which may teleport stray-strayer agents to a non-natal delta-branch
+    cell, mutating pool.tri_idx). BeenToSeaEvent must read the
+    post-teleport cell.
+
+    Two scenarios:
+    (a) Teleport into at-sea cell: been_to_sea SHOULD be set this step
+        (the agent is now at sea).
+    (b) Teleport out of at-sea cell into delta-branch cell: been_to_sea
+        is NOT set this step (post-teleport cell isn't at sea).
+        However, sticky semantics mean if been_to_sea was True from a
+        prior step, it stays True — the test verifies the read source
+        is post-teleport, not pre-teleport.
+    """
+    # Scenario (a): teleport INTO at-sea cell.
+    pool = AgentPool(n=1, start_tri=np.array([0], dtype=int))  # river cell
+    sim = _make_sim_stub(
+        is_baltic=True, at_sea_rid_set={1}, mesh_reach_id=[0, 1],
+    )
+    # Simulate teleport: update_exit_branch sets pool.tri_idx[0] = 1.
+    pool.tri_idx[0] = 1
+    BeenToSeaEvent().execute(_make_pop(pool), {"sim": sim}, t=0, mask=None)
+    assert pool.been_to_sea[0] == True
+
+    # Scenario (b): start at-sea, teleport OUT into delta-branch.
+    pool2 = AgentPool(n=1, start_tri=np.array([1], dtype=int))  # at-sea
+    # NOT setting been_to_sea pre-teleport — testing the read source.
+    pool2.tri_idx[0] = 0  # post-teleport: river/delta
+    BeenToSeaEvent().execute(_make_pop(pool2), {"sim": sim}, t=0, mask=None)
+    # BeenToSeaEvent reads pool.tri_idx[0]=0 (river); reach_id[0]=0
+    # is not in at_sea_rid_set={1}; been_to_sea stays False.
+    assert pool2.been_to_sea[0] == False
