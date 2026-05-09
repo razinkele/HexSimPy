@@ -588,3 +588,89 @@ def test_at_sea_partial_miss_warns(monkeypatch, caplog):
         "c5.1-at-sea-reach-partial-miss" in r.message
         for r in caplog.records
     )
+
+
+# ---------------------------------------------------------------------------
+# C5.1 — sim-init validators for BeenToSeaEvent + sea-pen detector (Task 6/9)
+# ---------------------------------------------------------------------------
+
+
+def test_missing_been_to_sea_event_raises(monkeypatch):
+    """Baltic scenario with ArrivalEvent but no BeenToSeaEvent → raise."""
+    from salmon_ibm.config import load_config
+    from salmon_ibm.simulation import Simulation
+    cfg = load_config("configs/config_curonian_h3_multires.yaml")
+    orig_build = Simulation._build_events
+
+    def patched_build(self):
+        events = orig_build(self)
+        from salmon_ibm.events_builtin import BeenToSeaEvent
+        return [e for e in events if not isinstance(e, BeenToSeaEvent)]
+
+    monkeypatch.setattr(Simulation, "_build_events", patched_build)
+    with pytest.raises(RuntimeError, match="c5.1-been-to-sea-missing"):
+        Simulation(cfg, n_agents=5, data_dir="data", rng_seed=42,
+                   output_path=None)
+
+
+def test_been_to_sea_misorder_raises(monkeypatch):
+    """BeenToSeaEvent placed AFTER ArrivalEvent → raise."""
+    from salmon_ibm.config import load_config
+    from salmon_ibm.simulation import Simulation
+    cfg = load_config("configs/config_curonian_h3_multires.yaml")
+    orig_build = Simulation._build_events
+
+    def patched_build(self):
+        events = orig_build(self)
+        from salmon_ibm.events_builtin import BeenToSeaEvent, ArrivalEvent
+        bts_idx = next(i for i, e in enumerate(events) if isinstance(e, BeenToSeaEvent))
+        ae_idx = next(i for i, e in enumerate(events) if isinstance(e, ArrivalEvent))
+        if bts_idx < ae_idx:
+            bts_evt = events.pop(bts_idx)
+            events.insert(ae_idx + 1, bts_evt)
+        return events
+
+    monkeypatch.setattr(Simulation, "_build_events", patched_build)
+    with pytest.raises(RuntimeError, match="c5.1-been-to-sea-misordered"):
+        Simulation(cfg, n_agents=5, data_dir="data", rng_seed=42,
+                   output_path=None)
+
+
+def test_non_baltic_validator_no_complaint(caplog):
+    """Columbia/TriMesh scenario without BeenToSeaEvent → no warning,
+    no raise. _is_baltic=False suppresses C5.1 checks."""
+    import logging
+    from salmon_ibm.config import load_config
+    from salmon_ibm.simulation import Simulation
+    cfg = load_config("config_columbia.yaml")
+    with caplog.at_level(logging.WARNING, logger="salmon_ibm.simulation"):
+        sim = Simulation(cfg, n_agents=5, rng_seed=42, output_path=None)
+    c5_1_warnings = [
+        r for r in caplog.records
+        if "c5.1-been-to-sea" in r.message
+    ]
+    assert not c5_1_warnings
+
+
+def test_sea_pen_hatchery_degenerate_warning(caplog):
+    """Baltic scenario where any agent's natal_reach_id ∈ _at_sea_rid_set
+    → warning at c5.1-sea-pen-hatchery-degenerate-arrival; no raise.
+    """
+    import logging
+    from salmon_ibm.config import load_config
+    from salmon_ibm.simulation import Simulation
+    cfg = load_config("configs/config_curonian_h3_multires.yaml")
+    sim = Simulation(cfg, n_agents=5, data_dir="data", rng_seed=42,
+                     output_path=None)
+    at_sea_rid = next(iter(sim._at_sea_rid_set))
+    # Inject degenerate state.
+    for pop in sim._multi_pop_mgr.populations.values():
+        pop.pool.natal_reach_id[0] = at_sea_rid
+        break
+    with caplog.at_level(logging.WARNING, logger="salmon_ibm.simulation"):
+        sim._validate_arrival_event_in_sequence(sim._sequencer.events)
+    sea_pen_warnings = [
+        r for r in caplog.records
+        if "c5.1-sea-pen-hatchery-degenerate-arrival" in r.message
+    ]
+    assert len(sea_pen_warnings) >= 1

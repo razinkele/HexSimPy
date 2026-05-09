@@ -535,10 +535,13 @@ class Simulation:
         import logging
         from salmon_ibm.events_builtin import (
             MovementEvent, ArrivalEvent, SurvivalEvent,
+            BeenToSeaEvent,
         )
         from salmon_ibm.h3_env import (
             ERR_C5_MISSING_ARRIVAL_EVENT,
             ERR_C5_ARRIVAL_EVENT_MISORDERED,
+            ERR_C5_1_BEEN_TO_SEA_MISSING,
+            ERR_C5_1_BEEN_TO_SEA_MISORDERED,
         )
 
         logger = logging.getLogger("salmon_ibm.simulation")
@@ -601,6 +604,70 @@ class Simulation:
                     ERR_C5_ARRIVAL_EVENT_MISORDERED,
                     first_arrival_idx, first_mortality_idx,
                 )
+
+        # === BEGIN C5.1 EXTENSION ===
+        # Only fire C5.1 checks on Baltic-detected scenarios.
+        if not getattr(self, "_is_baltic", False):
+            return
+
+        # Find indices of BeenToSeaEvent and ArrivalEvent (if present).
+        bts_idx = next(
+            (i for i, e in enumerate(events) if isinstance(e, BeenToSeaEvent)),
+            None,
+        )
+        ae_idx = next(
+            (i for i, e in enumerate(events) if isinstance(e, ArrivalEvent)),
+            None,
+        )
+
+        # Missing-event check: ArrivalEvent present but BeenToSeaEvent absent.
+        if ae_idx is not None and bts_idx is None:
+            raise RuntimeError(
+                f"{ERR_C5_1_BEEN_TO_SEA_MISSING}: Baltic-detected scenario "
+                f"has ArrivalEvent in sequence but no BeenToSeaEvent. "
+                f"Round-trip arrival semantics require BeenToSeaEvent to "
+                f"precede ArrivalEvent. Add BeenToSeaEvent() to "
+                f"_build_events() between update_exit_branch and "
+                f"ArrivalEvent()."
+            )
+
+        # Misorder check: BeenToSeaEvent must come strictly before ArrivalEvent.
+        if bts_idx is not None and ae_idx is not None and bts_idx >= ae_idx:
+            raise RuntimeError(
+                f"{ERR_C5_1_BEEN_TO_SEA_MISORDERED}: BeenToSeaEvent at "
+                f"index {bts_idx} must come strictly before ArrivalEvent "
+                f"at index {ae_idx}. Re-order events in _build_events()."
+            )
+
+        # Sea-pen-degenerate detector: any agent's natal_reach_id in
+        # _at_sea_rid_set means been_to_sea=True from t=0 (sea-pen
+        # release semantics). Warning, not raise — biologically valid.
+        #
+        # IMPORTANT (pass-1 C-1 fix): the populations source is
+        # self._multi_pop_mgr.populations (a dict[str, Population]),
+        # NOT self.populations (which doesn't exist on Simulation).
+        at_sea = self._at_sea_rid_set
+        if at_sea:
+            # Fail-loud if the multi-pop manager is unexpectedly missing
+            # rather than silently iterating an empty default.
+            mgr = self._multi_pop_mgr  # AttributeError-on-missing is correct
+            for pop in mgr.populations.values():
+                pool = pop.pool
+                if (np.isin(pool.natal_reach_id.astype(np.int32),
+                            np.fromiter(at_sea, dtype=np.int32))).any():
+                    logger.warning(
+                        "c5.1-sea-pen-hatchery-degenerate-arrival: at "
+                        "least one agent has natal_reach_id in "
+                        "_at_sea_rid_set=%s. Round-trip semantics regress "
+                        "to C5 semantics for those agents (no natal "
+                        "river to home to). Configuration is biologically "
+                        "valid (e.g., delayed-release sea-pen stocking) "
+                        "but the metric isn't measuring round-trip homing "
+                        "for them.",
+                        sorted(at_sea),
+                    )
+                    break  # one warning per sim; no per-agent spam
+        # === END C5.1 EXTENSION ===
 
     # ------------------------------------------------------------------
     # Event sequencer setup
