@@ -674,3 +674,144 @@ def test_sea_pen_hatchery_degenerate_warning(caplog):
         if "c5.1-sea-pen-hatchery-degenerate-arrival" in r.message
     ]
     assert len(sea_pen_warnings) >= 1
+
+
+# ---------------------------------------------------------------------------
+# C5.1 — AST sticky-overwrite contract for pool.been_to_sea (Task 7/9)
+# ---------------------------------------------------------------------------
+
+
+def _walk_been_to_sea_violations(tree, attr_name="been_to_sea"):
+    """Walk an AST and return list of violation messages for any
+    write to <obj>.<attr_name>[...] that doesn't match a sticky-safe
+    AST shape:
+      (a) Constant True RHS to subscript assign
+      (b) AugAssign with BitOr op
+      (c) Read-modify-write OR (BinOp BitOr with left matching target)
+    Used by both the production-code AST scan and the counter-tests.
+    """
+    import ast as _ast
+
+    def is_target(node):
+        if isinstance(node, _ast.Subscript):
+            return is_target(node.value)
+        if isinstance(node, _ast.Attribute) and node.attr == attr_name:
+            return True
+        return False
+
+    def attr_chain(node):
+        chain = []
+        cur = node
+        if isinstance(cur, _ast.Subscript):
+            cur = cur.value
+        while isinstance(cur, _ast.Attribute):
+            chain.append(cur.attr)
+            cur = cur.value
+        if isinstance(cur, _ast.Name):
+            chain.append(cur.id)
+            return tuple(reversed(chain))
+        return None
+
+    violations = []
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.AugAssign):
+            if not is_target(node.target):
+                continue
+            if not isinstance(node.op, _ast.BitOr):
+                violations.append(
+                    f"line {node.lineno}: AugAssign on {attr_name} "
+                    f"uses non-BitOr op {type(node.op).__name__}"
+                )
+        elif isinstance(node, _ast.Assign):
+            for tgt in node.targets:
+                # Only flag SUBSCRIPTED writes to <obj>.been_to_sea[...].
+                # Bare-attribute Assign (e.g. `self.been_to_sea = np.zeros(n)`
+                # in AgentPool.__init__) is field declaration/allocation,
+                # not a sticky-contract write — exclude per spec intent.
+                # Shapes (a) and (c) both target Subscript; shape (b) is
+                # the bare-Attribute case but is an AugAssign, handled above.
+                if not isinstance(tgt, _ast.Subscript):
+                    continue
+                if not is_target(tgt):
+                    continue
+                rhs = node.value
+                # Shape (a): Constant True.
+                if isinstance(rhs, _ast.Constant) and rhs.value is True:
+                    continue
+                # Shape (c): BinOp BitOr with left == target.
+                if isinstance(rhs, _ast.BinOp) and isinstance(rhs.op, _ast.BitOr):
+                    target_chain = attr_chain(tgt)
+                    left_chain = attr_chain(rhs.left)
+                    if target_chain and target_chain == left_chain:
+                        continue
+                    violations.append(
+                        f"line {node.lineno}: BinOp on {attr_name} "
+                        f"left chain {left_chain} != target chain "
+                        f"{target_chain}"
+                    )
+                    continue
+                rhs_repr = (
+                    _ast.unparse(rhs) if hasattr(_ast, "unparse")
+                    else str(rhs)
+                )
+                violations.append(
+                    f"line {node.lineno}: Assign to {attr_name} has "
+                    f"non-True/non-OR RHS: {rhs_repr}"
+                )
+    return violations
+
+
+def test_no_event_clears_been_to_sea_to_false():
+    """C5.1 sticky-overwrite contract: any write to pool.been_to_sea[...]
+    in salmon_ibm/*.py must match one of three sticky-safe shapes:
+
+      (a) Constant True literal RHS to subscript assign
+      (b) AugAssign with BitOr op
+      (c) Read-modify-write OR with matching target
+    """
+    import ast
+    salmon_ibm_dir = Path(__file__).parent.parent / "salmon_ibm"
+    all_violations = []
+    for py_file in sorted(salmon_ibm_dir.rglob("*.py")):
+        try:
+            src = py_file.read_text(encoding="utf-8")
+            tree = ast.parse(src)
+        except (UnicodeDecodeError, SyntaxError):
+            continue
+        file_violations = _walk_been_to_sea_violations(tree)
+        for v in file_violations:
+            all_violations.append(f"{py_file.name}: {v}")
+    assert not all_violations, (
+        "salmon_ibm/ contains writes to been_to_sea that violate the "
+        "sticky contract (only constant True, |=, or BinOp(BitOr, "
+        "same target) RHS allowed):\n"
+        + "\n".join(f"  - {v}" for v in all_violations)
+    )
+
+
+def test_ast_walker_counter_examples():
+    """Counter-tests: synthesize AST for forbidden patterns and confirm
+    the SAME walker (via _walk_been_to_sea_violations helper) rejects
+    them. Eliminates drift risk between production scan and counter-
+    test predicates per pass-1 H-3.
+    """
+    import ast as _ast
+
+    def violations_for(src):
+        return _walk_been_to_sea_violations(_ast.parse(src))
+
+    # Accepted patterns (no violations expected):
+    assert violations_for("pool.been_to_sea[mask] = True") == []
+    assert violations_for("pool.been_to_sea |= mask") == []
+    assert violations_for(
+        "pool.been_to_sea[mask] = pool.been_to_sea[mask] | new_mask"
+    ) == []
+
+    # Rejected patterns (violations expected):
+    assert violations_for("pool.been_to_sea[mask] = False") != []
+    assert violations_for("pool.been_to_sea[mask] = 0") != []
+    assert violations_for("pool.been_to_sea[mask] = arr") != []
+    # Different left target than assign target → reject.
+    assert violations_for(
+        "pool.been_to_sea[mask] = other_pool.been_to_sea[mask] | new_mask"
+    ) != []
