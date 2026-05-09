@@ -103,8 +103,16 @@ def _make_arrival_landscape(mesh, sim, fields=None, rng_seed=0):
 
 
 def _make_arrival_pool(n, *, behavior=0, alive=True, arrived=False,
-                       natal_rid=1, tri_idx=0):
-    """Helper: minimal pool stand-in with the fields ArrivalEvent reads."""
+                       natal_rid=1, tri_idx=0, been_to_sea=True):
+    """Helper: minimal pool stand-in with the fields ArrivalEvent reads.
+
+    `been_to_sea` defaults True for these pre-C5.1 tests: their intent
+    is "agent at upper-natal cell + threshold met → arrived True", and
+    the round-trip flag is incidental to that intent (D1 disposition
+    per Task 5 plan). D3 tests (stray-natal, sentinel, dead-agent) are
+    blocked elsewhere in the mask (in_natal mismatch, inf threshold,
+    or alive=False) and remain correct with been_to_sea=True.
+    """
     class _FakePool:
         pass
     pool = _FakePool()
@@ -113,6 +121,7 @@ def _make_arrival_pool(n, *, behavior=0, alive=True, arrived=False,
     pool.arrived = np.full(n, arrived, dtype=bool)
     pool.natal_reach_id = np.full(n, natal_rid, dtype=np.int8)
     pool.behavior = np.full(n, behavior, dtype=np.int8)
+    pool.been_to_sea = np.full(n, been_to_sea, dtype=bool)
     return pool
 
 
@@ -316,6 +325,12 @@ def test_arrival_integration_with_movement():
     pool.behavior[0] = int(Behavior.UPSTREAM)
     pool.natal_reach_id[0] = 1
     pool.arrived[0] = False
+    # C5.1 (D1): pre-C5.1 test where the round-trip flag is incidental
+    # to the test's intent (UPSTREAM agent climbs gradient → arrives).
+    # The fixture is a single-reach mesh (no at-sea cells), so
+    # BeenToSeaEvent would never set this flag during the run; fake the
+    # prior at-sea visit here so the mask passes.
+    pool.been_to_sea[0] = True
 
     pop = _make_arrival_population(pool)
     sim = _make_arrival_sim({1: 825.0})

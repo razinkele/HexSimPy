@@ -664,6 +664,17 @@ class ArrivalEvent(Event):
         agent_dist = dist[safe_tri]
         above_threshold = agent_dist >= per_agent_threshold
 
-        arrived_now = active & on_mesh & in_natal & above_threshold
+        # C5.1: round-trip guard — agent must have visited a
+        # BalticCoast or OpenBaltic cell at some prior step.
+        # pool.been_to_sea is sticky; defaults False; set by
+        # BeenToSeaEvent. On non-Baltic landscapes pool.been_to_sea
+        # stays all-False (BeenToSeaEvent no-ops there), but C5's
+        # _compute_arrival_thresholds also returns {} on non-Baltic,
+        # so the early-return at line 624 fires before this mask is
+        # built. Net effect on non-Baltic: unchanged.
+        arrived_now = (
+            active & on_mesh & in_natal & above_threshold
+            & pool.been_to_sea
+        )
         if arrived_now.any():
             pool.arrived[arrived_now] = True

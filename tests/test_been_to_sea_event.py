@@ -228,3 +228,74 @@ def test_been_to_sea_off_mesh_agents_not_falsely_tagged():
         )
     # Either outcome passes — this test is documentary/diagnostic
     # rather than enforcing.
+
+
+# ---------------------------------------------------------------------------
+# C5.1 Task 5 — ArrivalEvent guard tests (round-trip semantics).
+# ---------------------------------------------------------------------------
+
+
+def test_arrival_requires_been_to_sea(monkeypatch):
+    """Agent in upper-quartile of natal reach but been_to_sea=False
+    → arrived stays False. Demonstrates the guard term is in the
+    arrival mask: without it, the agent would be tagged arrived.
+    """
+    from salmon_ibm.events_builtin import ArrivalEvent
+    pool = AgentPool(n=1, start_tri=np.array([0], dtype=int))
+    pool.natal_reach_id[0] = 0
+    # been_to_sea NOT set — guard should block arrival.
+    sim = SimpleNamespace(
+        _arrival_threshold_by_natal_rid={0: 0.0},  # any dist >= 0 qualifies
+    )
+    mesh = SimpleNamespace(
+        reach_id=np.asarray([0], dtype=np.int8),
+        dist_from_sea=np.asarray([100.0], dtype=np.float32),
+    )
+    landscape = {"sim": sim, "mesh": mesh}
+    pop = SimpleNamespace(pool=pool)
+    ArrivalEvent().execute(pop, landscape, t=0, mask=None)
+    assert pool.arrived[0] == False
+
+
+def test_arrival_after_round_trip(monkeypatch):
+    """Agent visits at-sea, then returns to natal upper-quartile →
+    arrived=True after round-trip. With the guard satisfied, arrival
+    proceeds normally.
+    """
+    from salmon_ibm.events_builtin import ArrivalEvent
+    pool = AgentPool(n=1, start_tri=np.array([0], dtype=int))
+    pool.natal_reach_id[0] = 0
+    pool.been_to_sea[0] = True  # simulating prior at-sea visit
+    sim = SimpleNamespace(
+        _arrival_threshold_by_natal_rid={0: 0.0},
+    )
+    mesh = SimpleNamespace(
+        reach_id=np.asarray([0], dtype=np.int8),
+        dist_from_sea=np.asarray([100.0], dtype=np.float32),
+    )
+    landscape = {"sim": sim, "mesh": mesh}
+    pop = SimpleNamespace(pool=pool)
+    ArrivalEvent().execute(pop, landscape, t=0, mask=None)
+    assert pool.arrived[0] == True
+
+
+def test_arrival_event_sticky_with_been_to_sea_guard():
+    """Once arrived=True, doesn't re-clear when agent leaves natal
+    upper quartile. Sticky-flag contract holds with the guard added.
+    """
+    from salmon_ibm.events_builtin import ArrivalEvent
+    pool = AgentPool(n=1, start_tri=np.array([0], dtype=int))
+    pool.natal_reach_id[0] = 0
+    pool.been_to_sea[0] = True
+    pool.arrived[0] = True  # already arrived
+    sim = SimpleNamespace(
+        _arrival_threshold_by_natal_rid={0: 999.0},
+    )
+    mesh = SimpleNamespace(
+        reach_id=np.asarray([0], dtype=np.int8),
+        dist_from_sea=np.asarray([10.0], dtype=np.float32),
+    )
+    landscape = {"sim": sim, "mesh": mesh}
+    pop = SimpleNamespace(pool=pool)
+    ArrivalEvent().execute(pop, landscape, t=0, mask=None)
+    assert pool.arrived[0] == True

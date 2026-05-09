@@ -68,7 +68,9 @@ from salmon_ibm.estuary import (
     DO_LETHAL,
 )
 from salmon_ibm.events import EventSequencer
-from salmon_ibm.events_builtin import MovementEvent, CustomEvent, ArrivalEvent
+from salmon_ibm.events_builtin import (
+    MovementEvent, CustomEvent, ArrivalEvent, BeenToSeaEvent,
+)
 from salmon_ibm.h3_env import ERR_C5_1_AT_SEA_REACHES_MISSING
 from salmon_ibm.mesh import TriMesh
 from salmon_ibm.output import OutputLogger
@@ -635,11 +637,20 @@ class Simulation:
                 name="update_exit_branch",
                 callback=self._event_update_exit_branch,
             ),
+            # NEW (C5.1): tag pool.been_to_sea when agent occupies a
+            # BalticCoast or OpenBaltic cell. Runs after C3.3's
+            # update_exit_branch (post-teleport cell) and before
+            # C5's ArrivalEvent (so the round-trip guard reads the
+            # latest been_to_sea state). No-op on non-Baltic
+            # landscapes (sim._is_baltic=False short-circuits).
+            BeenToSeaEvent(),
             # NEW (C5): tag pool.arrived when agent settles in upper
             # quartile of natal reach by dist_from_sea. Runs after
             # C3.3's update_exit_branch (which tags first delta entry)
             # and before fish_predation (so this-step arrived agents
             # are exempt from this-step lagoon mortality).
+            # C5.1: arrival mask is guarded by pool.been_to_sea —
+            # see ArrivalEvent.execute for the round-trip term.
             ArrivalEvent(),
             # Fish predation fires AFTER movement so agents are killed
             # at their final cell of this step (not their starting cell).
