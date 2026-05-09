@@ -329,7 +329,12 @@ class Simulation:
                  BalticBioParams,
              ))
             and any(
-                rn in self.mesh.reach_names
+                # getattr defends against TriMesh (no reach_names attr) —
+                # a Baltic species_config on a non-Baltic mesh classifies
+                # as non-Baltic for round-trip purposes (no Baltic reach
+                # mesh = nothing to home to). Falls back to () so the
+                # membership test cleanly returns False.
+                rn in getattr(self.mesh, "reach_names", ())
                 for rn in delta_routing.BRANCH_FRACTIONS.keys()
             )
         )
