@@ -40,6 +40,12 @@ ERR_DIST_FROM_SEA_NO_SOURCES = "dist-from-sea-no-sources"
 ERR_C5_MISSING_ARRIVAL_EVENT = "c5-arrival-event-missing"
 ERR_C5_ARRIVAL_EVENT_MISORDERED = "c5-arrival-event-misordered"
 
+# C5.1: round-trip arrival err-ids. BeenToSeaEvent lives in
+# events_builtin.py; err-ids centralised here next to the C5 block.
+ERR_C5_1_BEEN_TO_SEA_MISSING = "c5.1-been-to-sea-missing"
+ERR_C5_1_BEEN_TO_SEA_MISORDERED = "c5.1-been-to-sea-misordered"
+ERR_C5_1_AT_SEA_REACHES_MISSING = "c5.1-at-sea-reaches-missing"
+
 # Map landscape-NetCDF variable names → canonical movement-event keys.
 # Diverging from these names silently no-ops the advection event because
 # `_apply_current_advection_vec` reads `fields["u_current"]`/`["v_current"]`.

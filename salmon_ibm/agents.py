@@ -32,6 +32,8 @@ class AgentPool:
         "steps",
         "alive",
         "arrived",
+        "been_to_sea",      # NEW (C5.1) — sticky: True iff agent has occupied
+                            #   a BalticCoast or OpenBaltic cell at any t.
         "temp_history",
         "natal_reach_id",   # int8: cell's reach_id at introduction; -1 if pre-tagging
         "exit_branch_id",   # int8: delta-branch homing decision (C3.3:
@@ -74,6 +76,7 @@ class AgentPool:
         self.steps = np.zeros(n, dtype=int)
         self.alive = np.ones(n, dtype=bool)
         self.arrived = np.zeros(n, dtype=bool)
+        self.been_to_sea = np.zeros(n, dtype=bool)  # NEW (C5.1)
         self.temp_history = np.full((n, 3), 15.0)
         self.natal_reach_id = np.full(n, -1, dtype=np.int8)
         self.exit_branch_id = np.full(n, -1, dtype=np.int8)
@@ -170,6 +173,10 @@ class FishAgent:
     @property
     def arrived(self) -> bool:
         return bool(self._pool.arrived[self._idx])
+
+    @property
+    def been_to_sea(self) -> bool:
+        return bool(self._pool.been_to_sea[self._idx])
 
     @property
     def steps(self) -> int:

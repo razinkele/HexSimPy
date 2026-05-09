@@ -273,6 +273,7 @@ class Population:
         new_arrays["steps"][old_n:] = 0
         new_arrays["alive"][old_n:] = True
         new_arrays["arrived"][old_n:] = False
+        new_arrays["been_to_sea"][old_n:] = False  # NEW (C5.1)
         new_arrays["temp_history"][old_n:] = 15.0
         new_arrays["natal_reach_id"][old_n:] = -1
         new_arrays["exit_branch_id"][old_n:] = -1

@@ -183,3 +183,27 @@ def test_pool_compact_preserves_natal_and_exit_ids():
     assert pool.n == 2
     assert (pool.natal_reach_id == np.array([1, 3], dtype=np.int8)).all()
     assert (pool.exit_branch_id == np.array([5, 7], dtype=np.int8)).all()
+
+
+def test_pool_been_to_sea_defaults_false():
+    pool = AgentPool(n=10, start_tri=0)
+    assert pool.been_to_sea.shape == (10,)
+    assert pool.been_to_sea.dtype == bool
+    assert not pool.been_to_sea.any()
+
+
+def test_array_fields_includes_been_to_sea():
+    """ARRAY_FIELDS round-trip plumbing must include been_to_sea."""
+    assert "been_to_sea" in AgentPool.ARRAY_FIELDS
+    pool = AgentPool(n=5, start_tri=0)
+    for f in AgentPool.ARRAY_FIELDS:
+        arr = getattr(pool, f, None)
+        assert isinstance(arr, np.ndarray), f"missing init for {f}"
+
+
+def test_agent_view_been_to_sea_reads_pool():
+    pool = AgentPool(n=5, start_tri=0)
+    pool.been_to_sea[2] = True
+    agent = pool.get_agent(2)
+    assert agent.been_to_sea is True
+    assert pool.get_agent(0).been_to_sea is False
