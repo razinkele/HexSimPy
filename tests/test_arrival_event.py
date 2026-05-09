@@ -487,12 +487,14 @@ def test_no_event_clears_arrived_to_false():
             if target_obj.attr != "arrived":
                 continue
             # Found a `<obj>.arrived[<slice>] = <rhs>` assignment.
-            # Check the RHS for False or 0 literal.
+            # Check the RHS for False or 0 literal. ast.NameConstant
+            # was an alias for ast.Constant since Python 3.8 and is
+            # removed in 3.14 — the ast.Constant check below covers
+            # both cases without needing the deprecated NameConstant.
             rhs = node.value
             is_false_literal = (
                 (isinstance(rhs, ast.Constant) and rhs.value is False)
                 or (isinstance(rhs, ast.Constant) and rhs.value == 0)
-                or (isinstance(rhs, ast.NameConstant) and rhs.value is False)
             )
             if is_false_literal:
                 violations.append(

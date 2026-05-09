@@ -4,7 +4,6 @@ Covers basic set-on-entry behavior; sticky semantics; non-Baltic no-op;
 dead-skip; int8-overflow safety; post-teleport ordering.
 """
 import numpy as np
-import pytest
 from types import SimpleNamespace
 
 from salmon_ibm.agents import AgentPool

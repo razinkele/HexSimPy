@@ -558,7 +558,8 @@ class BeenToSeaEvent(Event):
 
     Defends against int8 overflow at reach index >=128 by casting
     cell_rid to int32 before the membership test (mesh.reach_id is
-    np.int8; mirrors ArrivalEvent's defensive cast at events_builtin.py:591).
+    np.int8; mirrors ArrivalEvent's `cur_reach = ...astype(np.int32)`
+    defensive cast for the same reason).
     """
 
     name: str = "been_to_sea"
@@ -680,8 +681,8 @@ class ArrivalEvent(Event):
         # BeenToSeaEvent. On non-Baltic landscapes pool.been_to_sea
         # stays all-False (BeenToSeaEvent no-ops there), but C5's
         # _compute_arrival_thresholds also returns {} on non-Baltic,
-        # so the early-return at line 624 fires before this mask is
-        # built. Net effect on non-Baltic: unchanged.
+        # so the `if not thresholds: return` guard above fires before
+        # this mask is built. Net effect on non-Baltic: unchanged.
         arrived_now = (
             active & on_mesh & in_natal & above_threshold
             & pool.been_to_sea
