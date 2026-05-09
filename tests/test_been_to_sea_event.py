@@ -190,22 +190,20 @@ def test_been_to_sea_empty_pool_no_op():
 
 
 def test_been_to_sea_off_mesh_agents_not_falsely_tagged():
-    """Edge case (pass-1 different-angle B-A2): if any agent has
-    pool.tri_idx == -1 (off-mesh sentinel), the indexing
-    sim.mesh.reach_id[-1] returns the LAST cell's reach_id. If the
-    last cell happens to be at-sea, off-mesh agents get falsely
-    tagged. This test forces the scenario and verifies behavior.
+    """Off-mesh guard: agents with pool.tri_idx == -1 must NOT be
+    tagged, even when reach_id[-1] (the last cell, which NumPy negative
+    indexing returns) happens to be at-sea.
 
-    NOTE: spec §2 design assumes agents are always on-mesh; this
-    test serves as a regression guard. If the production code
-    eventually adds an explicit `pool.tri_idx >= 0` guard
-    (analogous to ArrivalEvent's `on_mesh = pool.tri_idx >= 0` at
-    events_builtin.py:595), this test will document that intent.
+    Without the on_mesh guard, sim.mesh.reach_id[-1] returns the LAST
+    cell's reach_id (= 1 = at-sea here), and the off-mesh agent gets
+    falsely tagged. The production guard (mirroring ArrivalEvent's
+    on_mesh pattern) clamps -1 to 0 via safe_tri and AND's the result
+    with on_mesh = pool.tri_idx >= 0.
     """
     # Mesh: cell 0 = river, cell 1 = at-sea (last cell).
-    # Agent 0: tri_idx=-1 (off-mesh) — would index reach_id[-1]=1=at-sea
-    #          IF unguarded, → false tag.
-    # Agent 1: tri_idx=0 (river) — should not be tagged.
+    # Agent 0: tri_idx=-1 (off-mesh) — without the guard, reach_id[-1]=1
+    #          would falsely tag this agent.
+    # Agent 1: tri_idx=0 (river) — must not be tagged.
     pool = AgentPool(n=2, start_tri=np.array([-1, 0], dtype=int))
     sim = _make_sim_stub(
         is_baltic=True, at_sea_rid_set={1},
@@ -213,21 +211,10 @@ def test_been_to_sea_off_mesh_agents_not_falsely_tagged():
     )
     evt = BeenToSeaEvent()
     evt.execute(_make_pop(pool), {"sim": sim}, t=0, mask=None)
-    # Document current behavior: if BeenToSeaEvent.execute does NOT
-    # guard tri_idx >= 0, agent 0 would be falsely tagged.
-    assert pool.been_to_sea[1] == False  # river agent stays False
-    if pool.been_to_sea[0]:
-        # No guard in implementation — flag in commit message as a
-        # known regression vector.
-        import warnings
-        warnings.warn(
-            "BeenToSeaEvent does not guard pool.tri_idx >= 0; "
-            "off-mesh agents may be falsely tagged. Consider "
-            "adding `& (pool.tri_idx >= 0)` to at_sea_now mask.",
-            stacklevel=2,
-        )
-    # Either outcome passes — this test is documentary/diagnostic
-    # rather than enforcing.
+    # Off-mesh agent: stays False (on_mesh guard fires).
+    assert pool.been_to_sea[0] == False
+    # River agent: stays False (cell reach_id 0 not in at_sea_rid_set).
+    assert pool.been_to_sea[1] == False
 
 
 # ---------------------------------------------------------------------------
@@ -334,3 +321,63 @@ def test_been_to_sea_reads_post_teleport_cell():
     # BeenToSeaEvent reads pool.tri_idx[0]=0 (river); reach_id[0]=0
     # is not in at_sea_rid_set={1}; been_to_sea stays False.
     assert pool2.been_to_sea[0] == False
+
+
+# ---------------------------------------------------------------------------
+# C5.1 SwitchPopulationEvent propagation — sticky flags survive transfer.
+# ---------------------------------------------------------------------------
+
+
+def test_switch_population_propagates_been_to_sea_and_arrived():
+    """SwitchPopulationEvent must propagate the C5.1 sticky flags
+    (been_to_sea, arrived) on inter-population transfer. Without this,
+    transferred agents lose their round-trip homing state and silently
+    fail to arrive after transfer.
+
+    Uses REAL Population instances (not Mock) per the C3.2 sea_age
+    precedent (tests/test_hatchery_c3_2_seaage.py:515) — Mock satisfies
+    hasattr but its __setitem__ no-ops, masking regressions. Asserts
+    BIT-EXACT element-order: source [T,F,T] → target [T,F,T] in the
+    same order.
+    """
+    from salmon_ibm.interactions import MultiPopulationManager
+    from salmon_ibm.network import SwitchPopulationEvent
+    from salmon_ibm.population import Population
+
+    src_pool = AgentPool(n=3, start_tri=0, rng_seed=42)
+    src_pool.alive[:] = True
+    src_pool.been_to_sea[:] = [True, False, True]
+    src_pool.arrived[:] = [False, True, False]
+    src = Population(name="src", pool=src_pool)
+
+    tgt_pool = AgentPool(n=0, start_tri=0, rng_seed=42)
+    tgt = Population(name="tgt", pool=tgt_pool)
+
+    multi_pop = MultiPopulationManager()
+    multi_pop.register("src", src)
+    multi_pop.register("tgt", tgt)
+
+    landscape = {
+        "rng": np.random.default_rng(12345),
+        "multi_pop_mgr": multi_pop,
+    }
+    evt = SwitchPopulationEvent(
+        name="transfer",
+        source_pop="src",
+        target_pop="tgt",
+        transfer_probability=1.0,
+    )
+    mask = np.ones(3, dtype=bool)
+    evt.execute(src, landscape, t=0, mask=mask)
+
+    # Bit-exact element-order: source [T,F,T] → target [T,F,T].
+    np.testing.assert_array_equal(
+        tgt.pool.been_to_sea,
+        np.array([True, False, True], dtype=bool),
+    )
+    np.testing.assert_array_equal(
+        tgt.pool.arrived,
+        np.array([False, True, False], dtype=bool),
+    )
+    # All source agents marked dead.
+    assert not src.pool.alive.any()

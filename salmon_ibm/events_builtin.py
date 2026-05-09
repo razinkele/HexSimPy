@@ -568,19 +568,29 @@ class BeenToSeaEvent(Event):
         if not sim._is_baltic:
             return  # non-Baltic landscape; nothing to do.
         # Direct .pool — fail-loud, matches existing ArrivalEvent
-        # convention (events_builtin.py:569).
+        # convention.
         pool = population.pool
-        # Cast to int32: mesh.reach_id is np.int8 (h3_multires.py:290);
-        # without the cast, indices >=128 wrap to negative and silently
-        # miss the membership test. ArrivalEvent applies the same
-        # defensive cast at line 591 for the same reason.
-        cell_rid = sim.mesh.reach_id[pool.tri_idx].astype(np.int32)
+        # On-mesh guard mirrors ArrivalEvent's pattern: pool.tri_idx
+        # == -1 sentinel agents are off-mesh; without the clamp,
+        # mesh.reach_id[-1] returns the last cell's reach_id and would
+        # falsely tag off-mesh agents whenever the last cell happens
+        # to be at-sea. safe_tri replaces -1 with 0 for indexing; the
+        # final mask AND'd with on_mesh discards the result.
+        on_mesh = pool.tri_idx >= 0
+        safe_tri = np.where(on_mesh, pool.tri_idx, 0)
+        # Cast to int32: mesh.reach_id is np.int8 (h3_multires.py); without
+        # the cast, indices >=128 wrap to negative and silently miss the
+        # membership test. ArrivalEvent applies the same defensive cast
+        # for the same reason.
+        cell_rid = sim.mesh.reach_id[safe_tri].astype(np.int32)
         # Vectorised membership test. _at_sea_rid_set is a frozenset[int]
         # of size 1-2; np.fromiter materialises to ndarray for np.isin.
         at_sea_rids = np.fromiter(
             sim._at_sea_rid_set, dtype=np.int32,
         )
-        at_sea_now = np.isin(cell_rid, at_sea_rids) & pool.alive
+        at_sea_now = (
+            np.isin(cell_rid, at_sea_rids) & pool.alive & on_mesh
+        )
         # Sticky: only set True, never clear. Dead-and-already-True
         # agents stay True post-mortem (harmless; ArrivalEvent's alive
         # filter excludes them from arrival counting downstream).

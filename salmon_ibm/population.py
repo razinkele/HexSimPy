@@ -57,6 +57,10 @@ class Population:
         return self.pool.arrived
 
     @property
+    def been_to_sea(self) -> np.ndarray:
+        return self.pool.been_to_sea
+
+    @property
     def tri_idx(self) -> np.ndarray:
         return self.pool.tri_idx
 

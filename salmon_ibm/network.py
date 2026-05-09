@@ -216,4 +216,20 @@ class SwitchPopulationEvent(Event):
         # natal_reach_id and origin.
         if hasattr(target, "sea_age") and hasattr(source, "sea_age"):
             target.sea_age[new_idx] = source.sea_age[transfer]
+        # C5.1: propagate been_to_sea + arrived sticky flags. Without
+        # this, transferred agents lose their round-trip homing state
+        # and silently fail to arrive after transfer. Hasattr-guarded
+        # idiom mirrors sea_age above. Uses |= (BitOr augmented assign)
+        # rather than direct assign because:
+        #  (a) sticky-True semantics — once True, stays True;
+        #  (b) AST sticky-overwrite contract (test_no_event_clears_*
+        #      in tests/test_arrival_event.py) rejects bare-array RHS
+        #      to forbid silent clearing patterns.
+        # For freshly-added new_idx slots (target=False by default
+        # per population.add_agents), |= is identical to direct assign:
+        # False|=True → True, False|=False → False.
+        if hasattr(target, "been_to_sea") and hasattr(source, "been_to_sea"):
+            target.been_to_sea[new_idx] |= source.been_to_sea[transfer]
+        if hasattr(target, "arrived") and hasattr(source, "arrived"):
+            target.arrived[new_idx] |= source.arrived[transfer]
         source.alive[transfer] = False
