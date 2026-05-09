@@ -541,6 +541,53 @@ class SummaryReportEvent(Event):
         landscape["summary_reports"].append(record)
 
 
+@register_event("been_to_sea")
+@dataclass
+class BeenToSeaEvent(Event):
+    """C5.1: tag agents as been_to_sea when they occupy a cell whose
+    reach_id is in sim._at_sea_rid_set (BalticCoast or OpenBaltic).
+
+    Vectorised. Runs after MovementEvent + update_exit_branch (sees
+    post-step / post-teleport cell). Sticky: pool.been_to_sea is set
+    True once and never reset.
+
+    Reads `landscape["sim"]` directly per the C4/C5 fail-loud
+    convention. No-op when sim._is_baltic is False (non-Baltic
+    landscape; _at_sea_rid_set is empty by construction in that case
+    too, but the early return saves the np.fromiter / np.isin work).
+
+    Defends against int8 overflow at reach index >=128 by casting
+    cell_rid to int32 before the membership test (mesh.reach_id is
+    np.int8; mirrors ArrivalEvent's defensive cast at events_builtin.py:591).
+    """
+
+    name: str = "been_to_sea"
+
+    def execute(self, population, landscape, t, mask):
+        sim = landscape["sim"]
+        if not sim._is_baltic:
+            return  # non-Baltic landscape; nothing to do.
+        # Direct .pool — fail-loud, matches existing ArrivalEvent
+        # convention (events_builtin.py:569).
+        pool = population.pool
+        # Cast to int32: mesh.reach_id is np.int8 (h3_multires.py:290);
+        # without the cast, indices >=128 wrap to negative and silently
+        # miss the membership test. ArrivalEvent applies the same
+        # defensive cast at line 591 for the same reason.
+        cell_rid = sim.mesh.reach_id[pool.tri_idx].astype(np.int32)
+        # Vectorised membership test. _at_sea_rid_set is a frozenset[int]
+        # of size 1-2; np.fromiter materialises to ndarray for np.isin.
+        at_sea_rids = np.fromiter(
+            sim._at_sea_rid_set, dtype=np.int32,
+        )
+        at_sea_now = np.isin(cell_rid, at_sea_rids) & pool.alive
+        # Sticky: only set True, never clear. Dead-and-already-True
+        # agents stay True post-mortem (harmless; ArrivalEvent's alive
+        # filter excludes them from arrival counting downstream).
+        if at_sea_now.any():
+            pool.been_to_sea[at_sea_now] = True
+
+
 @register_event("arrival")
 @dataclass
 class ArrivalEvent(Event):
